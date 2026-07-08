@@ -361,21 +361,86 @@ submit:
 llm-wiki-core/scripts/llm-wiki-core --root . submit-promotion promotion-pack/promotion.yaml
 ```
 
-submit 결과는 target-free queue에 남는다.
+submit 결과는 package 폴더 안에 `submission.yaml`로 남는다.
 
 ```text
-llm-wiki-promotion-queue/
-  20260708-153000-promotion/
-    promotion.yaml
-    submission.yaml
-    files/
-      raw/example_source.md
-      sources/example_source_summary.md
+promotion-pack/
+  promotion.yaml
+  submission.yaml
+  files/
+    raw/example_source.md
+    sources/example_source_summary.md
 ```
 
-submit은 현재 repo의 `llm-wiki/`나 target artifact를 읽지 않는다. package 안의 `pack_path`, `sha256`, `target_path`, `raw_transfer_policy`만 검증하고 queue에 복사한다.
+submit은 현재 repo의 `llm-wiki/`나 target artifact를 읽지 않는다. package 안의 `pack_path`, `sha256`, `target_path`, `raw_transfer_policy`만 검증하고 같은 package 폴더에 제출 manifest를 기록한다.
 
-외부 repo나 별도 promotion processor가 이 queue를 받아 실제 target artifact wiki에 반영한다.
+외부 repo나 별도 promotion processor가 이 timestamped package 폴더를 받아 실제 target artifact wiki에 반영한다.
+
+## 9.1 promotion-shelf
+
+`promotion-shelf/`는 submit 전후에 local LLM이 계속 읽을 수 있는 local-only lite artifact다. `promotion-packages/`는 GitHub/review 전달용 payload이고, runtime source로 기본 사용하지 않는다.
+
+`promotion-shelf/` 디렉터리가 있으면 `wiki_stack.yaml`에 명시하지 않아도 `local-promotion-shelf` source binding으로 자동 인식된다. 기본 우선순위는 명시된 artifact 다음, `local-mutable-wiki` 이전이다.
+
+```text
+artifact
+  canonical / higher authority
+
+promotion-shelf
+  pending local lite artifact
+
+llm-wiki
+  draft / working memory
+```
+
+생성:
+
+```bash
+llm-wiki-core/scripts/llm-wiki-core --root . create-promotion-shelf promotion-pack/promotion.yaml \
+  --shelf-id 20260708-example
+```
+
+생성 결과:
+
+```text
+promotion-shelf/20260708-example/
+  manifest.yaml
+  index.md
+  log.md
+  raw/example_source.md
+  sources/example_source_summary.md
+```
+
+정제 page의 raw 참조는 현재 wiki unit root 기준 상대 locator를 사용한다.
+
+```yaml
+sources:
+  - raw/example_source.md
+```
+
+동일 locator가 shelf, package, artifact 안에서 각각 자기 root 기준으로 resolve된다.
+
+```text
+promotion-shelf/20260708-example/raw/example_source.md
+promotion-pack/files/raw/example_source.md
+artifacts/team-wiki/raw/example_source.md
+```
+
+locator만으로 identity를 판단하지 않는다. `manifest.yaml`과 promotion package의 `sha256`이 raw identity다. 같은 파일명이라도 hash가 다르면 다른 raw로 취급한다.
+
+local page가 `sources: raw/foo.md`를 참조하지만 현재 wiki unit 안에 raw가 없으면, runtime은 `source_hashes`의 sha256이 있을 때만 content-addressed recovery를 시도한다. 탐색 대상은 active wiki sources(`promotion-shelf`, artifact, local wiki)와 `promotion-packages/**/files/raw/**`이며, 같은 sha256이 확인된 raw만 `resolved_sources`에 recovery로 기록된다. 같은 파일명이어도 sha256이 다르면 recovery하지 않고 lineage mismatch로 남긴다.
+
+raw가 resolve되지 않는다고 해서 정제 page가 자동으로 사용 불가가 되지는 않는다. 정제 page의 사용 가능 여부는 `status`, `confidence`, review/promotion 상태, artifact 반영 여부로 판단한다. raw 부재는 검증 가능성, 감사 가능성, 재정제 가능성의 제한으로 기록한다. 특히 `none`, `excerpt`, `source_vault_ref` 정책은 보안/개인정보 경계 때문에 raw 전체를 포함하지 않는 정상 경로다.
+
+기본적으로 shelf 생성은 matching local refined/raw 파일을 `llm-wiki/archive/shelved/<shelf-id>/`로 이동한다. 다른 local page가 같은 raw를 참조하면 raw는 유지되고 `raw_retained` warning이 기록된다. 원본 local 파일을 유지하려면 `--keep-local`을 사용한다.
+
+복구:
+
+```bash
+llm-wiki-core/scripts/llm-wiki-core --root . restore-promotion-shelf 20260708-example
+```
+
+복구는 `manifest.yaml`의 `original_local_path`를 기준으로 shelf raw/refined page를 `llm-wiki/`로 되돌린다. 복구된 shelf는 `promotion-shelf/archive/restored/<shelf-id>/`로 이동하여 active context에서 제외된다.
 
 ## 10. raw_transfer_policy
 
@@ -384,17 +449,17 @@ submit은 현재 repo의 `llm-wiki/`나 target artifact를 읽지 않는다. pac
 ```text
 raw_copy
   raw_items가 필수다.
-  raw 파일을 promotion queue에 같이 복사한다.
+  raw 파일을 promotion package의 files/raw/**에 같이 포함한다.
 
 none
   raw 파일을 package에 포함하지 않는다.
-  refined_pages만 submit할 수 있다.
+  refined_pages만 submit할 수 있다. 정제 page는 사용할 수 있지만, 원문 재검증은 package 밖의 review 기록과 confidence에 의존한다.
 
 excerpt
-  raw 전체 대신 필요한 excerpt나 evidence_digest로 근거를 설명한다.
+  raw 전체 대신 필요한 excerpt나 evidence_digest로 근거를 설명한다. 정제 page는 사용할 수 있고, 검증 범위는 제공된 excerpt로 제한된다.
 
 source_vault_ref
-  raw 파일은 별도 vault/storage에 있고, package에는 참조 정보만 둔다.
+  raw 파일은 별도 vault/storage에 있고, package에는 참조 정보만 둔다. 정제 page는 사용할 수 있고, 접근 권한이 있는 reviewer가 vault에서 raw를 검증한다.
 ```
 
 submit은 policy에 맞게 적용한다.
@@ -402,7 +467,7 @@ submit은 policy에 맞게 적용한다.
 ```text
 raw_copy인데 raw_items가 없으면 실패
 none/excerpt/source_vault_ref이면 raw_items 없이도 submit 가능
-non-copy policy에서 raw_items가 있으면 파일과 sha256은 검증 후 queue에 복사
+non-copy policy에서 raw_items가 있으면 파일과 sha256은 검증 후 submission.yaml에 기록
 ```
 
 ## 11. 권장 운영 방식
@@ -448,8 +513,8 @@ llm-wiki/
 wiki_stack.yaml
   프로젝트 dependency 선언이므로 공유한다.
 
-llm-wiki-promotion-queue/
-  target-free promotion package review queue이므로 기본적으로 공유한다.
+promotion-packages/
+  target-free timestamped promotion package review store이므로 기본적으로 공유한다.
 
 artifacts/
   현재 repo가 artifact snapshot을 소유하면 공유하고,
@@ -477,7 +542,7 @@ llm-wiki-core/scripts/llm-wiki-core --root . list-raw-items
 # promotion package 검증
 llm-wiki-core/scripts/llm-wiki-core validate-promotion <promotion.yaml>
 
-# promotion queue에 submit
+# promotion package 제출 manifest 생성
 llm-wiki-core/scripts/llm-wiki-core --root . submit-promotion <promotion.yaml>
 
 # 선택적으로 .wikipkg 생성

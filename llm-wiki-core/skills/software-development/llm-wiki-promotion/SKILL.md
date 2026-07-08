@@ -14,18 +14,18 @@ metadata:
 
 ## Overview
 
-제출된 **Promotion Package**는 큐레이터(Curator) 또는 검토 에이전트의 심사(Review)를 거쳐 정식 반영(Accept) 여부가 결정됩니다. Promotion package와 submit queue는 target artifact를 지정하지 않습니다. 큐레이터 또는 별도 queue 처리 프로세스가 대상 artifact wiki를 결정하고 반영합니다. 이 스킬은 큐레이터 관점에서 승격 제안을 심사하고, 최종적으로 지식을 정식 프로젝트/팀 아티팩트에 반영하는 큐레이터 워크플로우를 정의합니다.
+제출된 **Promotion Package**는 큐레이터(Curator) 또는 검토 에이전트의 심사(Review)를 거쳐 정식 반영(Accept) 여부가 결정됩니다. Promotion package와 submit manifest는 target artifact를 지정하지 않습니다. 큐레이터 또는 별도 처리 프로세스가 대상 artifact wiki를 결정하고 반영합니다. 이 스킬은 큐레이터 관점에서 승격 제안을 심사하고, 최종적으로 지식을 정식 프로젝트/팀 아티팩트에 반영하는 큐레이터 워크플로우를 정의합니다.
 
 ## When to Use
 
-- 수신함(Incoming Queue)에 등록된 target-free `promotion_package`와 포함된 raw/refined 파일을 리뷰 및 승인 처리할 때
+- 수신함에 등록된 target-free `promotion_package`와 포함된 raw/refined 파일을 리뷰 및 승인 처리할 때
 - 여러 날짜에 걸친 개인 실험 데이터의 모순을 감지하고 Timeline으로 결합할 때
 - 최종 승인된 문서를 위키 아티팩트로 배포(Artifact Publish)하기 위해 로컬 소스를 업데이트할 때
 
 ## Required Flow
 
 1. **Phase A: Source Selection Proposal**:
-   - submit staging의 `submission.yaml`, `raw_transfer_policy`, `raw_items`, `refined_pages`를 검토하여 raw 근거 처리 방식과 정제 결과가 일치하는지 확인합니다.
+   - package 폴더의 `submission.yaml`, `raw_transfer_policy`, `raw_items`, `refined_pages`를 검토하여 raw 근거 처리 방식과 정제 결과가 일치하는지 확인합니다.
    - 승격 요청에 명시된 원본 파일 목록을 검토하여 Ingest 대상 소스를 선별하고 사용자(또는 메인 승인자)에게 `Source Selection Proposal`로 승인을 받습니다.
    
 2. **Phase B: Promotion Draft & Claim Classification**:
@@ -47,9 +47,9 @@ metadata:
 # 1. 제출된 승격 패키지 규격 검사
 llm-wiki-core/scripts/llm-wiki-core validate-promotion promotion-package.yaml
 
-# 2. submit queue가 raw/refined 파일을 포함했는지 확인
+# 2. package 제출 manifest가 raw/refined 파일을 포함했는지 확인
 llm-wiki-core/scripts/llm-wiki-core --root . submit-promotion promotion-package.yaml \
-  --output-dir /tmp/promotion-check --force
+  --force
 
 # 3. 승격 후 위키 설정 정합성(Schema 등) 검증
 llm-wiki-core/scripts/llm-wiki-core --root . validate
@@ -64,8 +64,8 @@ llm-wiki-core/scripts/llm-wiki-core --root . validate
 ## Verification Checklist
 
 - [ ] 승격하려는 주장의 원본 출처(Lineage) 및 해시값이 기록되었는가?
-- [ ] submit queue에 `raw_transfer_policy`에 맞는 raw 근거 또는 raw 파일과 정제 페이지가 포함되어 있는가?
-- [ ] target artifact 정보가 promotion package나 queue metadata에 남지 않는가?
+- [ ] package와 `submission.yaml`에 `raw_transfer_policy`에 맞는 raw 근거 또는 raw 파일과 정제 페이지가 포함되어 있는가?
+- [ ] target artifact 정보가 promotion package나 submission metadata에 남지 않는가?
 - [ ] 검증되지 않은 정보가 있는 경우 `needs_verification` 항목으로 분류했는가?
 - [ ] 최종 병합 처리 후 `index.md`에 링크를 걸고 `log.md`에 변경 로그를 남겼는가?
 - [ ] 새로/수정된 페이지 링크가 절대 경로(`file:///...`)가 아닌 상대 경로로 작성되었는가?

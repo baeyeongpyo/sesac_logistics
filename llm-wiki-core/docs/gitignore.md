@@ -28,7 +28,7 @@ ignore하지 않는다:
   llm-wiki-core/
   AGENTS.md
   .agent-os/
-  llm-wiki-promotion-queue/
+  promotion-packages/
   공유하기로 결정한 artifacts/
   팀 공통 agent hook 설정
 ```
@@ -67,8 +67,8 @@ Thumbs.db
 !AGENTS.md
 !.agent-os/
 !.agent-os/**
-!llm-wiki-promotion-queue/
-!llm-wiki-promotion-queue/**
+!promotion-packages/
+!promotion-packages/**
 
 # keep shared agent hook configs tracked when used
 !.codex/
@@ -177,11 +177,11 @@ bundle, cache, tmp, log는 실행 중 재생성되는 산출물이다.
 Git에 올리지 않는다.
 ```
 
-`llm-wiki-promotion-queue/`:
+`promotion-packages/`:
 
 ```text
-target-free promotion package를 다른 repo나 별도 promotion processor로 넘기기 위한 queue다.
-submit 결과를 팀 리뷰 대상으로 남길 수 있어야 하므로 기본적으로 Git에 올린다.
+target-free timestamped promotion package를 다른 repo나 별도 promotion processor로 넘기기 위한 review store다.
+submit 결과와 package 원본을 팀 리뷰 대상으로 남길 수 있어야 하므로 기본적으로 Git에 올린다.
 ```
 
 ## 에이전트별 hook 설정
@@ -224,10 +224,10 @@ artifacts/*
 
 반대로 `artifacts/`를 이 repo에서 공유 artifact snapshot으로 관리한다면 optional 블록은 넣지 않는다.
 
-## local-only queue가 필요할 때
+## local-only promotion package가 필요할 때
 
-기본 `llm-wiki-promotion-queue/`는 공유 queue다. local 실험 queue가 필요하면 이름을 분리한다.
+기본 `promotion-packages/`는 공유 review store다. local 실험 promotion package가 필요하면 이름을 분리한다.
 
 ```gitignore
-llm-wiki-promotion-queue-local/
+promotion-packages-local/
 ```
