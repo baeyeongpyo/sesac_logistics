@@ -1,0 +1,11 @@
+{
+  "wiki-context": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd); \"$ROOT/llm-wiki-core/hooks/user-prompt-submit-wiki-context.sh\" --agent antigravity --root \"$ROOT\"",
+        "timeout": 30
+      }
+    ]
+  }
+}

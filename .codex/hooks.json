@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd); if [ -x \"$ROOT/llm-wiki-core/hooks/pre-bundle-validate.sh\" ]; then \"$ROOT/llm-wiki-core/hooks/pre-bundle-validate.sh\" \"$ROOT\"; fi; if [ -x \"$ROOT/llm-wiki-core/hooks/session-start.sh\" ]; then \"$ROOT/llm-wiki-core/hooks/session-start.sh\" \"$ROOT\"; fi",
+            "statusMessage": "Validating wiki stack config..."
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd); \"$ROOT/llm-wiki-core/hooks/user-prompt-submit-wiki-context.sh\" --agent codex --root \"$ROOT\"",
+            "statusMessage": "Injecting llm-wiki-core context..."
+          }
+        ]
+      }
+    ]
+  }
+}

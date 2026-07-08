@@ -3,12 +3,12 @@
 # mutable_source_wiki_policy.source_binding_order.
 
 wiki_artifacts:
-  - dependency_id: tracking-vehicle
-    artifact_ref: artifacts/tracking-vehicle
-    namespace: tracking-vehicle:wiki
-  - dependency_id: programming-architecture
-    artifact_ref: artifacts/programming-architecture
-    namespace: programming-architecture:wiki
+  # - dependency_id: tracking-vehicle
+  #   artifact_ref: artifacts/tracking-vehicle
+  #   namespace: tracking-vehicle:wiki
+  # - dependency_id: programming-architecture
+  #   artifact_ref: artifacts/programming-architecture
+  #   namespace: programming-architecture:wiki
 
 personal_wikis: []
 
@@ -26,14 +26,14 @@ selection_policy:
 
 mutable_source_wiki_policy:
   source_binding_order:
-    - source_binding_id: tracking-vehicle
-      dependency_id: tracking-vehicle
-      dependency_type: artifact
-      effective_scope: team
-      authority_level: policy
-    - source_binding_id: programming-architecture
-      dependency_id: programming-architecture
-      dependency_type: artifact
-      effective_scope: team
-      authority_level: policy
+    # - source_binding_id: tracking-vehicle
+    #   dependency_id: tracking-vehicle
+    #   dependency_type: artifact
+    #   effective_scope: team
+    #   authority_level: policy
+    # - source_binding_id: programming-architecture
+    #   dependency_id: programming-architecture
+    #   dependency_type: artifact
+    #   effective_scope: team
+    #   authority_level: policy
     - source_binding_id: local-mutable-wiki
