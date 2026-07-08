@@ -1,0 +1,11 @@
+# Agent Instructions
+
+This project uses `llm-wiki-core`.
+
+Before doing project work, read and follow this file when it exists:
+
+```text
+llm-wiki-core/templates/wiki-core-agents.md
+```
+
+If you cannot read that file, ask the user to paste `llm-wiki-core/templates/wiki-core-agents.md` into this `agents.md`/`AGENTS.md` file.
