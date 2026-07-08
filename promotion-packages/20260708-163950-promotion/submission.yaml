@@ -1,0 +1,44 @@
+schema_version: promotion-submission/v1
+submitted_at: '2026-07-08T17:14:01Z'
+promotion_package: promotion.yaml
+included_files:
+- kind: raw
+  pack_path: files/raw/mentorpi-m1-user-provided-spec-screenshots-2026-07-08.md
+  target_path: raw/mentorpi-m1-user-provided-spec-screenshots-2026-07-08.md
+  sha256: 75f4bb0d0f6d42419100d379bc5b9699bdbfbce5268e9ce60ea97382e96f1b99
+  staged_path: files/raw/mentorpi-m1-user-provided-spec-screenshots-2026-07-08.md
+- kind: raw
+  pack_path: files/raw/mentorpi-ros2-ws-current-source-2026-07-09.sha256
+  target_path: raw/mentorpi-ros2-ws-current-source-2026-07-09.sha256
+  sha256: d5a34720010acdf837badfa92048984879542d97ebaa9b7fb4561a9590d250df
+  staged_path: files/raw/mentorpi-ros2-ws-current-source-2026-07-09.sha256
+- kind: raw
+  pack_path: files/raw/mentorpi-ros2-ws-current-verification-2026-07-09.md
+  target_path: raw/mentorpi-ros2-ws-current-verification-2026-07-09.md
+  sha256: 16027f3c721b12546276fcf0e4de80bb007f09565c63b93b3d0d59e4790bf1a4
+  staged_path: files/raw/mentorpi-ros2-ws-current-verification-2026-07-09.md
+- kind: raw
+  pack_path: files/raw/mentorpi-ros2-ws-group-control-2026-07-08.sha256
+  target_path: raw/mentorpi-ros2-ws-group-control-2026-07-08.sha256
+  sha256: 0cab3cfa241b78fb22aa4435b1878248de5d31b149658b689c6dd27fa11a451e
+  staged_path: files/raw/mentorpi-ros2-ws-group-control-2026-07-08.sha256
+- kind: raw
+  pack_path: files/raw/mentorpi-ros2-ws-group-control-2026-07-08.tar.gz
+  target_path: raw/mentorpi-ros2-ws-group-control-2026-07-08.tar.gz
+  sha256: 6e3187aa3dabfcb7616e7523cb0ca1de16be3fa16dae5ee05139d4380d658287
+  staged_path: files/raw/mentorpi-ros2-ws-group-control-2026-07-08.tar.gz
+- kind: refined
+  pack_path: files/sources/hiwonder-mentorpi-m1.md
+  target_path: sources/hiwonder-mentorpi-m1.md
+  sha256: 2c342669dbfd98b035fb63f9b49b7b1f08e062af10bb66d146edf9301df31aa9
+  staged_path: files/sources/hiwonder-mentorpi-m1.md
+- kind: refined
+  pack_path: files/sources/hiwonder-mentorpi-getting-ready-implementation-guide.md
+  target_path: sources/hiwonder-mentorpi-getting-ready-implementation-guide.md
+  sha256: 7cf3d2c3c20441f8aec7c901ccca69923a2f73c0df313d7cb0920a9a958b8731
+  staged_path: files/sources/hiwonder-mentorpi-getting-ready-implementation-guide.md
+- kind: refined
+  pack_path: files/sources/hiwonder-mentorpi-group-control-code-map.md
+  target_path: sources/hiwonder-mentorpi-group-control-code-map.md
+  sha256: b29aaef6c29dc0ed4f89fba271421f7302cc86852e3d726b58dc75b493740798
+  staged_path: files/sources/hiwonder-mentorpi-group-control-code-map.md

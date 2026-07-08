@@ -3,6 +3,9 @@
 # mutable_source_wiki_policy.source_binding_order.
 
 wiki_artifacts:
+  - dependency_id: vehicle
+    artifact_ref: artifacts/vehicle
+    namespace: vehicle:wiki
   # - dependency_id: tracking-vehicle
   #   artifact_ref: artifacts/tracking-vehicle
   #   namespace: tracking-vehicle:wiki
@@ -26,6 +29,11 @@ selection_policy:
 
 mutable_source_wiki_policy:
   source_binding_order:
+    - source_binding_id: vehicle
+      dependency_id: vehicle
+      dependency_type: artifact
+      effective_scope: project
+      authority_level: policy
     # - source_binding_id: tracking-vehicle
     #   dependency_id: tracking-vehicle
     #   dependency_type: artifact

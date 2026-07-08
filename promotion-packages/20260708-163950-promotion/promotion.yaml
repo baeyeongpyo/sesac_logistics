@@ -1,0 +1,57 @@
+promotion_package:
+  source_owner: "yeongpyo"
+  claims:
+    - claim_id: "mentorpi-m1-product-spec-and-manual-map"
+      content: "Hiwonder MentorPi M1 is a Raspberry Pi 5 and RRC Lite based ROS2 Humble Mecanum robot platform; the project notes preserve kit options, core hardware specs, sensor specs, initial setup values, and manual section mapping needed for implementation planning."
+      target_section: "sources/hiwonder-mentorpi-m1"
+    - claim_id: "mentorpi-getting-ready-runtime-code-map"
+      content: "The MentorPi Getting Ready behaviors map primarily to bringup.launch.py, startup_check.py, start_app.launch.py, app feature nodes, joystick_control.launch.py, controller, ros_robot_controller, and the .zshrc/.robotrc/.typerc runtime environment chain."
+      target_section: "sources/hiwonder-mentorpi-getting-ready-implementation-guide"
+    - claim_id: "mentorpi-group-control-code-map"
+      content: "The Master-Slave and Group Control tutorial maps to the multi package: multi_controller.launch.py starts each namespaced controller stack, joystick_control_multi.py broadcasts /joy-derived Twist and buzzer commands to robot_N namespaces, and controller/ros_robot_controller nodes bridge those commands to hardware."
+      target_section: "sources/hiwonder-mentorpi-group-control-code-map"
+  evidence_digest:
+    - "Refined page llm-wiki/sources/hiwonder-mentorpi-m1.md summarizes the Hiwonder product page, MentorPi documentation, group-control tutorial, getting-ready documentation, and user-provided spec screenshots."
+    - "Refined page llm-wiki/sources/hiwonder-mentorpi-getting-ready-implementation-guide.md maps the Getting Ready guide to the preserved/current MentorPi ros2_ws code paths and notes that 430 non-.DS_Store source files matched by SHA-256 on 2026-07-09."
+    - "Refined page llm-wiki/sources/hiwonder-mentorpi-group-control-code-map.md maps the group-control tutorial to the preserved/current MentorPi ros2_ws multi package and records the 2026-07-09 current-source verification."
+    - "The promotion package includes all local raw evidence under llm-wiki/raw. The preserved ROS2 workspace directory is packaged as files/raw/mentorpi-ros2-ws-group-control-2026-07-08.tar.gz because promotion raw_items require file pack paths."
+  lineage:
+    - page_path: "llm-wiki/sources/hiwonder-mentorpi-m1.md"
+      sha256: "2c342669dbfd98b035fb63f9b49b7b1f08e062af10bb66d146edf9301df31aa9"
+    - page_path: "llm-wiki/sources/hiwonder-mentorpi-getting-ready-implementation-guide.md"
+      sha256: "7cf3d2c3c20441f8aec7c901ccca69923a2f73c0df313d7cb0920a9a958b8731"
+    - page_path: "llm-wiki/sources/hiwonder-mentorpi-group-control-code-map.md"
+      sha256: "b29aaef6c29dc0ed4f89fba271421f7302cc86852e3d726b58dc75b493740798"
+  confidence: medium
+  requested_target_pages:
+    - "sources/hiwonder-mentorpi-m1.md"
+    - "sources/hiwonder-mentorpi-getting-ready-implementation-guide.md"
+    - "sources/hiwonder-mentorpi-group-control-code-map.md"
+  raw_transfer_policy: raw_copy
+  raw_items:
+    - pack_path: "files/raw/mentorpi-m1-user-provided-spec-screenshots-2026-07-08.md"
+      target_path: "raw/mentorpi-m1-user-provided-spec-screenshots-2026-07-08.md"
+      sha256: "75f4bb0d0f6d42419100d379bc5b9699bdbfbce5268e9ce60ea97382e96f1b99"
+    - pack_path: "files/raw/mentorpi-ros2-ws-current-source-2026-07-09.sha256"
+      target_path: "raw/mentorpi-ros2-ws-current-source-2026-07-09.sha256"
+      sha256: "d5a34720010acdf837badfa92048984879542d97ebaa9b7fb4561a9590d250df"
+    - pack_path: "files/raw/mentorpi-ros2-ws-current-verification-2026-07-09.md"
+      target_path: "raw/mentorpi-ros2-ws-current-verification-2026-07-09.md"
+      sha256: "16027f3c721b12546276fcf0e4de80bb007f09565c63b93b3d0d59e4790bf1a4"
+    - pack_path: "files/raw/mentorpi-ros2-ws-group-control-2026-07-08.sha256"
+      target_path: "raw/mentorpi-ros2-ws-group-control-2026-07-08.sha256"
+      sha256: "0cab3cfa241b78fb22aa4435b1878248de5d31b149658b689c6dd27fa11a451e"
+    - pack_path: "files/raw/mentorpi-ros2-ws-group-control-2026-07-08.tar.gz"
+      target_path: "raw/mentorpi-ros2-ws-group-control-2026-07-08.tar.gz"
+      sha256: "6e3187aa3dabfcb7616e7523cb0ca1de16be3fa16dae5ee05139d4380d658287"
+  refined_pages:
+    - pack_path: "files/sources/hiwonder-mentorpi-m1.md"
+      target_path: "sources/hiwonder-mentorpi-m1.md"
+      sha256: "2c342669dbfd98b035fb63f9b49b7b1f08e062af10bb66d146edf9301df31aa9"
+    - pack_path: "files/sources/hiwonder-mentorpi-getting-ready-implementation-guide.md"
+      target_path: "sources/hiwonder-mentorpi-getting-ready-implementation-guide.md"
+      sha256: "7cf3d2c3c20441f8aec7c901ccca69923a2f73c0df313d7cb0920a9a958b8731"
+    - pack_path: "files/sources/hiwonder-mentorpi-group-control-code-map.md"
+      target_path: "sources/hiwonder-mentorpi-group-control-code-map.md"
+      sha256: "b29aaef6c29dc0ed4f89fba271421f7302cc86852e3d726b58dc75b493740798"
+  reviewer_required: true
