@@ -27,8 +27,8 @@ Thumbs.db
 !AGENTS.md
 !.agent-os/
 !.agent-os/**
-!llm-wiki-promotion-queue/
-!llm-wiki-promotion-queue/**
+!promotion-packages/
+!promotion-packages/**
 
 # keep shared agent hook configs tracked when used
 !.codex/
