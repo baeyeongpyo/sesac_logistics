@@ -1,0 +1,39 @@
+# llm-wiki-core integrated project ignore
+# Apply this once even if Agent OS is added later.
+
+# local mutable wiki
+# Project/Team artifact로 승격하기 전의 개인/프로젝트 작업 영역이다.
+llm-wiki/
+
+# generated llm-wiki-core runtime outputs
+# context bundle은 현재 wiki 상태에서 재생성되는 산출물이다.
+.agent-harness/bundles/
+.agent-harness/pending-personal-captures/
+.agent-harness/cache/
+.agent-harness/tmp/
+.agent-harness/*.log
+
+# runtime noise
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+Thumbs.db
+
+# keep shared llm-wiki-core configuration tracked
+!wiki_stack.yaml
+!llm-wiki-core/
+!llm-wiki-core/**
+!AGENTS.md
+!.agent-os/
+!.agent-os/**
+!llm-wiki-promotion-queue/
+!llm-wiki-promotion-queue/**
+
+# keep shared agent hook configs tracked when used
+!.codex/
+!.codex/hooks.json
+!.claude/
+!.claude/settings.json
+!.agents/
+!.agents/hooks.json
