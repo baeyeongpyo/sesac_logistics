@@ -33,3 +33,16 @@ Stop hook은 boilerplate stop event를 자동 capture하지 않는다. 실패, �
 - Personal Wiki를 Project/Team Wiki로 파일 복사 병합하지 않는다.
 - conflict를 `llm-wiki-core` policy 없이 조용히 선택하지 않는다.
 - `.agent-harness/generated` 또는 `.agent-harness/bundles`를 canonical wiki data로 취급하지 않는다.
+
+## Roles
+
+역할별 rule은 `.agent-os/roles/` 아래에 둔다. 모든 역할은 `llm-wiki-core`
+context bundle을 먼저 소비하고, Project/Team Wiki truth를 직접 수정하지
+않는다.
+
+- `default.md`: 기본 Agent OS 실행자.
+- `technical-lead.md`: 기술 방향, 아키텍처, 위험도, 검증 전략 분석.
+- `pm.md`: 목표, 범위, 우선순위, acceptance criteria 정리.
+- `qa.md`: 테스트 전략, 회귀 위험, 미검증 영역 확인.
+- `reviewer.md`: 코드/문서 변경의 결함, 회귀, 유지보수 위험 리뷰.
+- `ux.md`: 사용자 흐름, 정보 구조, 오류 회복, 운영 UX 검토.
