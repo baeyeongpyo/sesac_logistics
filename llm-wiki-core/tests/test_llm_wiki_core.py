@@ -196,6 +196,16 @@ class LlmWikiCoreTest(unittest.TestCase):
 
         self.assertIn("llm-wiki-core/skills/**", core.DEFAULT_EXCLUDE_GLOBS)
 
+    def test_promotion_shelf_is_documented_as_git_ignored_local_runtime_state(self):
+        gitignore = (ROOT / ".gitignore").read_text()
+        gitignore_doc = (ROOT / "llm-wiki-core" / "docs" / "gitignore.md").read_text()
+        workflow = (ROOT / "llm-wiki-core" / "docs" / "workflow.md").read_text()
+
+        self.assertIn("promotion-shelf/", gitignore)
+        self.assertIn("promotion-shelf/", gitignore_doc)
+        self.assertIn("Git에 올리지 않는다", workflow)
+        self.assertNotIn("git add llm-wiki-promotion-queue/20260708-153000-promotion promotion-shelf", workflow)
+
     def write_accepted_concept(self, project: Path, name: str = "retention.md") -> None:
         concept = project / "llm-wiki" / "concepts" / name
         concept.parent.mkdir(parents=True, exist_ok=True)
@@ -891,14 +901,21 @@ This local page should be collected exactly once.
             self.assertEqual(search_data["count"], 1)
             self.assertEqual(search_data["matches"][0]["source_binding_id"], "local-mutable-wiki")
 
-    def test_init_scaffold_uses_explicit_local_mutable_wiki_without_personal_registration(self):
+    def test_init_scaffold_uses_default_local_sources_without_dependency_registration(self):
         with tempfile.TemporaryDirectory() as td:
             project = Path(td)
             run([str(INIT), "--dest", str(project), "--domain", "Scaffold Local Wiki"])
 
             stack_text = (project / "wiki_stack.yaml").read_text()
             self.assertIn("personal_wikis: []", stack_text)
+            self.assertIn("source_binding_id: local-promotion-shelf", stack_text)
             self.assertIn("source_binding_id: local-mutable-wiki", stack_text)
+            self.assertLess(
+                stack_text.index("source_binding_id: local-promotion-shelf"),
+                stack_text.index("source_binding_id: local-mutable-wiki"),
+            )
+            self.assertNotIn("dependency_id: local-promotion-shelf", stack_text)
+            self.assertNotIn("dependency_id: local-mutable-wiki", stack_text)
             self.assertNotIn("dependency_id: personal-wiki", stack_text)
             self.assertFalse((project / "llm-wiki-core" / "wiki_stack.yaml").exists())
             self.assertTrue((project / "llm-wiki-core" / "hooks" / "session-start.sh").exists())
@@ -908,7 +925,14 @@ This local page should be collected exactly once.
             validate = run([str(CLI), "--root", str(project), "validate"])
             validate_data = json.loads(validate.stdout)
             self.assertTrue(validate_data["ok"])
-            self.assertEqual(validate_data["source_bindings"][0]["source_binding_id"], "local-mutable-wiki")
+            self.assertEqual([b["source_binding_id"] for b in validate_data["source_bindings"]], [
+                "local-promotion-shelf",
+                "local-mutable-wiki",
+            ])
+            self.assertEqual(validate_data["source_bindings"][0]["dependency_id"], "local-promotion-shelf")
+            self.assertEqual(validate_data["source_bindings"][0]["dependency_type"], "promotion_shelf")
+            self.assertEqual(validate_data["source_bindings"][1]["dependency_id"], "local-mutable-wiki")
+            self.assertEqual(validate_data["source_bindings"][1]["dependency_type"], "local_wiki")
 
     def test_init_artifact_wiki_creates_empty_folder_artifact(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1253,6 +1277,84 @@ Curated evidence.
             self.assertNotIn("target_effective_scope", submission)
             self.assertEqual(submission["included_files"][0]["pack_path"], "files/raw/example_source.md")
             self.assertEqual(len(submission["included_files"]), 2)
+
+    def test_submit_promotion_creates_promotion_shelf_and_archives_matching_local_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td)
+            run([str(INIT), "--dest", str(project), "--domain", "Submit Shelf Wiki"])
+
+            local_raw = project / "llm-wiki" / "raw" / "example_source.md"
+            local_raw.write_text("# Raw Source\n\nOriginal evidence.\n")
+            local_refined = project / "llm-wiki" / "sources" / "example_source_summary.md"
+            local_refined.write_text("""---
+title: Example Source Summary
+status: accepted
+confidence: high
+sources:
+  - llm-wiki/raw/example_source.md
+---
+# Example Source Summary
+
+Curated evidence.
+""")
+
+            pack = project / "promotion-pack"
+            raw = pack / "files" / "raw" / "example_source.md"
+            raw.parent.mkdir(parents=True)
+            raw.write_text(local_raw.read_text())
+            refined = pack / "files" / "sources" / "example_source_summary.md"
+            refined.parent.mkdir(parents=True)
+            refined.write_text(local_refined.read_text())
+            raw_sha = hashlib.sha256(raw.read_bytes()).hexdigest()
+            refined_sha = hashlib.sha256(refined.read_bytes()).hexdigest()
+
+            pkg = pack / "promotion.yaml"
+            pkg.write_text(f"""promotion_package:
+  source_owner: bae
+  claims:
+    - claim_id: claim-001
+      content: Example source summary should be promoted.
+      target_section: sources/example_source_summary
+  evidence_digest:
+    - Raw source was summarized into a curated page.
+  lineage:
+    - page_path: llm-wiki/sources/example_source_summary.md
+      sha256: "{refined_sha}"
+  confidence: high
+  requested_target_pages:
+    - sources/example_source_summary.md
+  raw_transfer_policy: raw_copy
+  raw_items:
+    - pack_path: files/raw/example_source.md
+      target_path: raw/example_source.md
+      sha256: "{raw_sha}"
+  refined_pages:
+    - pack_path: files/sources/example_source_summary.md
+      target_path: sources/example_source_summary.md
+      sha256: "{refined_sha}"
+  reviewer_required: true
+""")
+
+            submit = run([
+                str(CLI),
+                "--root",
+                str(project),
+                "submit-promotion",
+                str(pkg),
+            ])
+            submit_data = json.loads(submit.stdout)
+
+            self.assertTrue(submit_data["ok"], submit_data)
+            shelf_id = submit_data["shelf"]["shelf_id"]
+            shelf_dir = project / "promotion-shelf" / shelf_id
+            self.assertTrue(shelf_dir.exists())
+            self.assertEqual((shelf_dir / "raw" / "example_source.md").read_text(), "# Raw Source\n\nOriginal evidence.\n")
+            self.assertTrue((shelf_dir / "sources" / "example_source_summary.md").exists())
+            self.assertFalse(local_refined.exists())
+            self.assertFalse(local_raw.exists())
+            self.assertTrue((project / "llm-wiki" / "archive" / "shelved" / shelf_id / "sources" / "example_source_summary.md").exists())
+            self.assertTrue((project / "llm-wiki" / "archive" / "shelved" / shelf_id / "raw" / "example_source.md").exists())
+            self.assertEqual(submit_data["shelf"]["archived_local_count"], 2)
 
     def test_submit_promotion_allows_non_copy_raw_transfer_policies_without_raw_files(self):
         for raw_transfer_policy in ["none", "excerpt", "source_vault_ref"]:
@@ -1726,16 +1828,18 @@ Curated evidence.
             self.assertFalse(resolved["sha256_ok"])
 
     def test_missing_local_relative_raw_recovers_from_promotion_package_when_sha256_matches(self):
-        with tempfile.TemporaryDirectory() as td:
-            project = Path(td)
-            run([str(INIT), "--dest", str(project), "--domain", "Recovered Raw Wiki"])
+        for review_root in ["promotion-packages", "llm-wiki-promotion-queue"]:
+            with self.subTest(review_root=review_root):
+                with tempfile.TemporaryDirectory() as td:
+                    project = Path(td)
+                    run([str(INIT), "--dest", str(project), "--domain", "Recovered Raw Wiki"])
 
-            package_raw = project / "promotion-packages" / "20260708-recovered" / "files" / "raw" / "package.md"
-            package_raw.parent.mkdir(parents=True)
-            package_raw.write_text("# Package Raw\n\nReview payload evidence.\n")
-            raw_sha = hashlib.sha256(package_raw.read_bytes()).hexdigest()
-            page = project / "llm-wiki" / "sources" / "package_summary.md"
-            page.write_text(f"""---
+                    package_raw = project / review_root / "20260708-recovered" / "files" / "raw" / "package.md"
+                    package_raw.parent.mkdir(parents=True)
+                    package_raw.write_text("# Package Raw\n\nReview payload evidence.\n")
+                    raw_sha = hashlib.sha256(package_raw.read_bytes()).hexdigest()
+                    page = project / "llm-wiki" / "sources" / "package_summary.md"
+                    page.write_text(f"""---
 title: Package Summary
 status: accepted
 confidence: high
@@ -1749,21 +1853,21 @@ source_hashes:
 Curated evidence.
 """)
 
-            lineage = run([
-                str(CLI),
-                "--root",
-                str(project),
-                "get-lineage",
-                "llm-wiki/sources/package_summary.md",
-            ])
-            lineage_data = json.loads(lineage.stdout)
+                    lineage = run([
+                        str(CLI),
+                        "--root",
+                        str(project),
+                        "get-lineage",
+                        "llm-wiki/sources/package_summary.md",
+                    ])
+                    lineage_data = json.loads(lineage.stdout)
 
-            resolved = lineage_data["resolved_sources"][0]
-            self.assertEqual(resolved["primary_resolved_path"], "llm-wiki/raw/package.md")
-            self.assertEqual(resolved["resolved_path"], "promotion-packages/20260708-recovered/files/raw/package.md")
-            self.assertEqual(resolved["recovery_source_binding_id"], "promotion-packages")
-            self.assertTrue(resolved["recovered"])
-            self.assertTrue(resolved["sha256_ok"])
+                    resolved = lineage_data["resolved_sources"][0]
+                    self.assertEqual(resolved["primary_resolved_path"], "llm-wiki/raw/package.md")
+                    self.assertEqual(resolved["resolved_path"], f"{review_root}/20260708-recovered/files/raw/package.md")
+                    self.assertEqual(resolved["recovery_source_binding_id"], review_root)
+                    self.assertTrue(resolved["recovered"])
+                    self.assertTrue(resolved["sha256_ok"])
 
     def test_missing_raw_does_not_exclude_accepted_refined_page_or_lower_score(self):
         with tempfile.TemporaryDirectory() as td:

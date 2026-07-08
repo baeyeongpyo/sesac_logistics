@@ -37,9 +37,11 @@ metadata:
    - `validate-promotion` 명령어를 사용해 패키지 오류를 사전에 잡습니다.
    
 4. **Package Submission**:
-   - 유효성이 입증되면 `submit-promotion <package>`로 package 폴더 안에 `submission.yaml`을 기록합니다.
-   - submit은 현재 repo의 `wiki_stack.yaml`이나 `llm-wiki/`를 읽지 않고, promotion package 폴더 안의 `files/**`만 검증합니다.
-   - `promotion.yaml`은 변형하지 않습니다. 제출 시각은 `submission.yaml`의 `submitted_at`에만 기록합니다.
+   - 유효성이 입증되면 `submit-promotion <package>`로 `llm-wiki-promotion-queue/<timestamp>-promotion/`에 review payload를 생성합니다.
+   - submit은 promotion package 폴더 안의 `files/**`를 검증하고, 같은 ID의 `promotion-shelf/<timestamp>-promotion/` lite artifact를 생성합니다.
+   - shelf 생성 후 matching local `llm-wiki/**` 파일은 `llm-wiki/archive/shelved/<timestamp>-promotion/`로 이동합니다. 다른 local page가 raw를 계속 참조하면 raw는 유지되고 warning이 기록됩니다.
+   - `promotion-shelf/`는 local LLM runtime state이므로 Git에 올리지 않습니다. 공유/review 대상은 `llm-wiki-promotion-queue/`입니다.
+   - 원본 `promotion.yaml`은 변형하지 않습니다. 제출 큐에 복사된 package와 `submission.yaml`에 제출 시각을 기록합니다.
 
 ## Commands
 
@@ -54,13 +56,22 @@ llm-wiki-core/scripts/llm-wiki-core --root . submit-promotion <패키지파일�
 기본 output:
 
 ```text
-promotion-packages/
+llm-wiki-promotion-queue/
   20260708-153000-promotion/
     promotion.yaml
     submission.yaml
     files/
       raw/...
       sources/...
+promotion-shelf/
+  20260708-153000-promotion/
+    manifest.yaml
+    raw/...
+    sources/...
+llm-wiki/archive/shelved/
+  20260708-153000-promotion/
+    raw/...
+    sources/...
 ```
 
 ### 필수 YAML 스키마 규격
@@ -107,5 +118,6 @@ promotion_package:
 - [ ] `refined_pages`가 있고 각 항목의 `sha256`이 실제 파일과 일치하는가?
 - [ ] `raw_transfer_policy: raw_copy`라면 `raw_items`가 있고 각 항목의 `sha256`이 실제 파일과 일치하는가?
 - [ ] `validate-promotion` 명령어로 에러 메세지가 없는지 검증했는가?
-- [ ] `submit-promotion <package>`가 package 내부 `files/**`의 raw/refined 파일을 검증하고 `submission.yaml`을 생성했는가?
-- [ ] `promotion.yaml`은 변형되지 않고 `submission.yaml`에만 `submitted_at`이 기록되어 있는가?
+- [ ] `submit-promotion <package>`가 package 내부 `files/**`의 raw/refined 파일을 검증하고 review queue의 `submission.yaml`을 생성했는가?
+- [ ] 같은 ID의 `promotion-shelf/`가 생성되고 matching local 파일이 `llm-wiki/archive/shelved/`로 이동했는가?
+- [ ] 원본 `promotion.yaml`은 변형되지 않고 제출 큐 복사본과 `submission.yaml`에만 `submitted_at`이 기록되어 있는가?

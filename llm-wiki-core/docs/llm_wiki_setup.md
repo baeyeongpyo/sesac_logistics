@@ -58,6 +58,7 @@ personal_wikis: []
 
 mutable_source_wiki_policy:
   source_binding_order:
+    - source_binding_id: local-promotion-shelf
     - source_binding_id: local-mutable-wiki
 ```
 
@@ -65,6 +66,7 @@ mutable_source_wiki_policy:
 
 * 현재 프로젝트의 `llm-wiki/`는 `personal_wikis`에 등록하지 않는다.
 * local wiki는 예약 binding인 `local-mutable-wiki`로만 참조한다.
+* promotion shelf는 예약 binding인 `local-promotion-shelf`로 참조하며, 별도 dependency registry 없이 local wiki보다 먼저 읽는다.
 * `wiki_artifacts`와 `personal_wikis`는 외부 dependency registry다.
 * folder artifact를 기본 포맷으로 사용하고, `.wikipkg`/tar archive는 배포용 선택 포맷으로만 사용한다.
 * artifact 경로는 프로젝트 루트 기준 상대 경로를 권장한다.

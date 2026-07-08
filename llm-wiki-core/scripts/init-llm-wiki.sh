@@ -142,6 +142,7 @@ selection_policy:
 
 mutable_source_wiki_policy:
   source_binding_order:
+    - source_binding_id: local-promotion-shelf
     - source_binding_id: local-mutable-wiki"
 
 # Write index.md

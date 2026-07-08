@@ -19,6 +19,7 @@
 ```text
 ignore한다:
   llm-wiki/
+  promotion-shelf/
   .agent-harness/의 재생성 가능한 실행 산출물
   local cache/tmp/log
   runtime noise
@@ -28,6 +29,7 @@ ignore하지 않는다:
   llm-wiki-core/
   AGENTS.md
   .agent-os/
+  llm-wiki-promotion-queue/
   promotion-packages/
   공유하기로 결정한 artifacts/
   팀 공통 agent hook 설정
@@ -44,6 +46,7 @@ ignore하지 않는다:
 # local mutable wiki
 # Project/Team artifact로 승격하기 전의 개인/프로젝트 작업 영역이다.
 llm-wiki/
+promotion-shelf/
 
 # generated llm-wiki-core runtime outputs
 # context bundle은 현재 wiki 상태에서 재생성되는 산출물이다.
@@ -67,6 +70,8 @@ Thumbs.db
 !AGENTS.md
 !.agent-os/
 !.agent-os/**
+!llm-wiki-promotion-queue/
+!llm-wiki-promotion-queue/**
 !promotion-packages/
 !promotion-packages/**
 
@@ -142,6 +147,14 @@ ignore:
 Project/Team artifact로 승격하기 전의 작업 영역이므로 일반 프로젝트 repo에서는 Git에 올리지 않는다.
 ```
 
+`promotion-shelf/`:
+
+```text
+promotion package에서 파생된 local-only runtime shelf다.
+local LLM이 pending promotion을 읽기 위한 작업 상태이므로 `llm-wiki/`와 같이 Git에 올리지 않는다.
+공유/review 대상은 `llm-wiki-promotion-queue/`의 package payload다.
+```
+
 `wiki_stack.yaml`:
 
 ```text
@@ -177,7 +190,7 @@ bundle, cache, tmp, log는 실행 중 재생성되는 산출물이다.
 Git에 올리지 않는다.
 ```
 
-`promotion-packages/`:
+`llm-wiki-promotion-queue/`:
 
 ```text
 target-free timestamped promotion package를 다른 repo나 별도 promotion processor로 넘기기 위한 review store다.
@@ -226,8 +239,9 @@ artifacts/*
 
 ## local-only promotion package가 필요할 때
 
-기본 `promotion-packages/`는 공유 review store다. local 실험 promotion package가 필요하면 이름을 분리한다.
+기본 `llm-wiki-promotion-queue/`는 공유 review store다. legacy `promotion-packages/`도 호환용 review store로 유지할 수 있다. local 실험 promotion package가 필요하면 이름을 분리한다.
 
 ```gitignore
 promotion-packages-local/
+llm-wiki-promotion-queue-local/
 ```

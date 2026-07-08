@@ -13,6 +13,10 @@ wiki_artifacts:
   #   artifact_ref: artifacts/programming-architecture
   #   namespace: programming-architecture:wiki
 
+promotion_shelves:
+  - dependency_id: local-promotion-shelf
+    shelf_ref: promotion-shelf
+
 personal_wikis: []
 
 selection_policy:
@@ -29,6 +33,11 @@ selection_policy:
 
 mutable_source_wiki_policy:
   source_binding_order:
+    - source_binding_id: local-promotion-shelf
+      dependency_id: local-promotion-shelf
+      dependency_type: promotion_shelf
+      effective_scope: local
+      authority_level: pending
     - source_binding_id: vehicle
       dependency_id: vehicle
       dependency_type: artifact

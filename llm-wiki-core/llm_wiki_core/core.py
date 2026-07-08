@@ -77,6 +77,7 @@ PROMOTION_SHELF_ID = "local-promotion-shelf"
 PROMOTION_SHELF_TYPE = "promotion_shelf"
 DEFAULT_PROMOTION_SHELF_ROOT = "promotion-shelf"
 PROMOTION_SHELF_SCHEMA_VERSION = "promotion-shelf/v1"
+PROMOTION_PACKAGE_REVIEW_ROOTS = ("llm-wiki-promotion-queue", "promotion-packages")
 
 DEFAULT_PACK_EXCLUDE_DIRS = {"build", "install", "log", "__pycache__", ".git"}
 DEFAULT_PACK_EXCLUDE_FILE_NAMES = {".DS_Store"}
@@ -807,17 +808,18 @@ def iter_raw_recovery_candidates(
 
 
 def iter_promotion_package_raw_candidates(root: Path, normalized_source: str) -> Iterable[Dict[str, Any]]:
-    package_root = root / "promotion-packages"
-    if not package_root.exists() or not package_root.is_dir():
-        return []
     pattern = str(Path("files") / normalized_source)
-    for candidate in sorted(package_root.rglob(pattern)):
-        if candidate.exists() and candidate.is_file():
-            yield {
-                "resolved_path": rel_to(candidate, root),
-                "source_binding_id": "promotion-packages",
-                "sha256": sha256_file(candidate),
-            }
+    for review_root in PROMOTION_PACKAGE_REVIEW_ROOTS:
+        package_root = root / review_root
+        if not package_root.exists() or not package_root.is_dir():
+            continue
+        for candidate in sorted(package_root.rglob(pattern)):
+            if candidate.exists() and candidate.is_file():
+                yield {
+                    "resolved_path": rel_to(candidate, root),
+                    "source_binding_id": review_root,
+                    "sha256": sha256_file(candidate),
+                }
 
 
 def recover_source_by_sha256(
@@ -2255,7 +2257,6 @@ def submit_promotion_package(
 ) -> Dict[str, Any]:
     package_path = package_path.resolve()
     package_root = package_path.parent
-    in_place_submit = output_dir is None
     validation = validate_promotion_package(package_path)
     data = load_yaml(package_path)
     pkg = data.get("promotion_package") if isinstance(data.get("promotion_package"), dict) else {}
@@ -2265,12 +2266,13 @@ def submit_promotion_package(
     errors.extend(entry_errors)
 
     if output_dir is None:
-        output_dir = package_root
+        output_dir = root / "llm-wiki-promotion-queue" / datetime.now().strftime("%Y%m%d-%H%M%S-promotion")
     elif not output_dir.is_absolute():
         output_dir = root / output_dir
 
     output_dir = output_dir.resolve()
     output_is_package_root = output_dir == package_root
+    in_place_submit = output_is_package_root
     submission_path = output_dir / "submission.yaml"
 
     if output_is_package_root:
@@ -2290,8 +2292,15 @@ def submit_promotion_package(
     output_dir.mkdir(parents=True, exist_ok=True)
     files_dir = output_dir / "files"
     submitted_at = now_iso()
-    if not output_is_package_root:
-        shutil.copy2(package_path, output_dir / package_path.name)
+    submitted_package_path = package_path if output_is_package_root else output_dir / package_path.name
+    if output_is_package_root:
+        submitted_package_data = data
+    else:
+        submitted_package_data = dict(data)
+        submitted_pkg = dict(pkg)
+        submitted_pkg["submitted_at"] = submitted_at
+        submitted_package_data["promotion_package"] = submitted_pkg
+        submitted_package_path.write_text(dump_yaml(submitted_package_data), encoding="utf-8")
     copied_files: List[Dict[str, Any]] = []
     for item in included_files:
         src = package_root / item["pack_path"]
@@ -2308,6 +2317,22 @@ def submit_promotion_package(
         "included_files": copied_files,
     }
     submission_path.write_text(dump_yaml(submission))
+    shelf_result = create_promotion_shelf(
+        root=root,
+        package_path=submitted_package_path,
+        shelf_id=output_dir.name,
+        force=force,
+    )
+    if not shelf_result["ok"]:
+        return {
+            "ok": False,
+            "errors": [f"promotion shelf creation failed: {error}" for error in shelf_result.get("errors", [])],
+            "warnings": shelf_result.get("warnings", []),
+            "package": str(package_path),
+            "output_dir": str(output_dir),
+            "submission_path": str(submission_path),
+            "shelf": shelf_result,
+        }
     return {
         "ok": True,
         "errors": [],
@@ -2317,6 +2342,7 @@ def submit_promotion_package(
         "in_place": in_place_submit,
         "included_file_count": len(copied_files),
         "included_files": copied_files,
+        "shelf": shelf_result,
     }
 
 

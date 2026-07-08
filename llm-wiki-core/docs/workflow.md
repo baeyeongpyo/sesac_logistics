@@ -163,7 +163,7 @@ llm-wiki-core/hooks/promotion-submit-validate.sh promotion-package.yaml
 
 ## 5. promotion shelf 생성
 
-promotion package가 검증되면 submit 전에 local runtime용 lite artifact인 `promotion-shelf/<shelf-id>/`로 복사할 수 있다.
+promotion package가 검증되면 `submit-promotion`이 local runtime용 lite artifact인 `promotion-shelf/<shelf-id>/`를 자동 생성한다. 수동으로 먼저 만들거나 복구 테스트를 할 때는 `create-promotion-shelf`를 직접 실행할 수 있다.
 
 ```bash
 llm-wiki-core/scripts/llm-wiki-core --root . create-promotion-shelf promotion-package.yaml \
@@ -206,7 +206,7 @@ llm-wiki-core/scripts/llm-wiki-core --root . restore-promotion-shelf 20260708-ex
 
 ## 6. submit
 
-검증이 통과한 package는 package 폴더 자체를 review 대상 제출물로 사용한다. `submit-promotion`은 현재 repo의 `wiki_stack.yaml`이나 `llm-wiki/`를 읽지 않고, promotion package 폴더 안의 `files/**`만 검증한 뒤 같은 폴더에 `submission.yaml`을 기록한다.
+검증이 통과한 package는 timestamped review queue로 복사된다. `submit-promotion`은 promotion package 폴더 안의 `files/**`를 검증한 뒤 `llm-wiki-promotion-queue/<shelf-id>/`에 `submission.yaml`을 기록하고, 같은 ID의 `promotion-shelf/<shelf-id>/`를 생성한다.
 
 ```bash
 llm-wiki-core/scripts/llm-wiki-core --root . submit-promotion promotion-package.yaml
@@ -215,21 +215,32 @@ llm-wiki-core/scripts/llm-wiki-core --root . submit-promotion promotion-package.
 기본 출력 구조:
 
 ```text
-promotion-packages/
-  20260708-153000-promotion-package/
+llm-wiki-promotion-queue/
+  20260708-153000-promotion/
     promotion-package.yaml
     submission.yaml
     files/
       raw/example_source.md
       sources/example_source_summary.md
+promotion-shelf/
+  20260708-153000-promotion/
+    manifest.yaml
+    raw/example_source.md
+    sources/example_source_summary.md
+llm-wiki/archive/shelved/
+  20260708-153000-promotion/
+    raw/example_source.md
+    sources/example_source_summary.md
 ```
 
-`promotion-package.yaml`은 submit 과정에서 변형하지 않는다. 제출 시각은 `submission.yaml`의 `submitted_at`에만 기록된다.
+`promotion-shelf/`와 `llm-wiki/archive/shelved/`는 local LLM runtime 상태이므로 Git에 올리지 않는다. 공유/review 대상은 `llm-wiki-promotion-queue/<shelf-id>/`다.
+
+원본 `promotion-package.yaml`은 submit 과정에서 변형하지 않는다. 제출 시각은 review queue에 복사된 package와 `submission.yaml`에 기록된다.
 
 커밋 예시:
 
 ```bash
-git add promotion-packages/20260708-153000-promotion-package
+git add llm-wiki-promotion-queue/20260708-153000-promotion
 git commit -m "docs: submit example source summary promotion"
 ```
 
@@ -300,6 +311,7 @@ mutable_source_wiki_policy:
       dependency_type: artifact
       effective_scope: team
       authority_level: policy
+    - source_binding_id: local-promotion-shelf
     - source_binding_id: local-mutable-wiki
 ```
 
@@ -339,6 +351,7 @@ mutable_source_wiki_policy:
       dependency_type: artifact
       effective_scope: team
       authority_level: policy
+    - source_binding_id: local-promotion-shelf
     - source_binding_id: local-mutable-wiki
 ```
 
