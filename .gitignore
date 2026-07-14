@@ -40,3 +40,4 @@ Thumbs.db
 !.claude/settings.json
 !.agents/
 !.agents/hooks.json
+.superpowers/
