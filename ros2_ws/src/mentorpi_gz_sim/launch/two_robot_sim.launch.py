@@ -10,7 +10,7 @@ import xacro
 
 
 def _robot_nodes(name, xyz, package_share):
-    description_path = Path(get_package_share_directory('mentorpi_description')) / 'urdf' / 'mecanum.xacro'
+    description_path = Path(get_package_share_directory('mentorpi_description')) / 'urdf' / 'mecanum_forklift.xacro'
     sdf_path = Path(package_share) / 'models' / 'mentorpi_m1' / 'model.sdf.xacro'
     description = xacro.process_file(str(description_path)).toxml()
     sdf = xacro.process_file(str(sdf_path), mappings={'robot_name': name}).toxml()

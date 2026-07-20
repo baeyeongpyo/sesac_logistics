@@ -16,7 +16,7 @@ def generate_launch_description():
         DeclareLaunchArgument('robot_name', default_value='robot_1'),
         DeclareLaunchArgument('frame_prefix', default_value='robot_1/'),
         DeclareLaunchArgument('model', default_value=[
-            '/opt/mentorpi_ws/install/mentorpi_description/share/mentorpi_description/urdf/mecanum.xacro']),
+            '/opt/mentorpi_ws/install/mentorpi_description/share/mentorpi_description/urdf/mecanum_forklift.xacro']),
         Node(package='robot_state_publisher', executable='robot_state_publisher',
              namespace=robot_name, parameters=[{'robot_description': description,
                                                 'frame_prefix': frame_prefix,
