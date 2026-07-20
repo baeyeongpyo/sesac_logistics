@@ -10,9 +10,9 @@ import xacro
 
 
 def _robot_nodes(name, xyz, package_share):
-    description_path = Path(get_package_share_directory('mentorpi_description')) / 'urdf' / 'mentorpi_m1.urdf.xacro'
+    description_path = Path(get_package_share_directory('mentorpi_description')) / 'urdf' / 'mecanum.xacro'
     sdf_path = Path(package_share) / 'models' / 'mentorpi_m1' / 'model.sdf.xacro'
-    description = xacro.process_file(str(description_path), mappings={'robot_name': name, 'frame_prefix': f'{name}/'}).toxml()
+    description = xacro.process_file(str(description_path)).toxml()
     sdf = xacro.process_file(str(sdf_path), mappings={'robot_name': name}).toxml()
     bridge = str(Path(package_share) / 'config' / f'{name}_bridge.yaml')
     image_topic = f'/{name}/depth/image_raw'

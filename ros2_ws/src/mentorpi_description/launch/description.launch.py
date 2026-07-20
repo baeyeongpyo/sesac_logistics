@@ -10,14 +10,13 @@ def generate_launch_description():
     frame_prefix = LaunchConfiguration('frame_prefix')
     model = LaunchConfiguration('model')
     description = ParameterValue(
-        Command([FindExecutable(name='xacro'), ' ', model,
-                 ' robot_name:=', robot_name, ' frame_prefix:=', frame_prefix]),
+        Command([FindExecutable(name='xacro'), ' ', model]),
         value_type=str)
     return LaunchDescription([
         DeclareLaunchArgument('robot_name', default_value='robot_1'),
         DeclareLaunchArgument('frame_prefix', default_value='robot_1/'),
         DeclareLaunchArgument('model', default_value=[
-            '/opt/mentorpi_ws/install/mentorpi_description/share/mentorpi_description/urdf/mentorpi_m1.urdf.xacro']),
+            '/opt/mentorpi_ws/install/mentorpi_description/share/mentorpi_description/urdf/mecanum.xacro']),
         Node(package='robot_state_publisher', executable='robot_state_publisher',
              namespace=robot_name, parameters=[{'robot_description': description,
                                                 'frame_prefix': frame_prefix,
