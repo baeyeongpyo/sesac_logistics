@@ -1,0 +1,37 @@
+services:
+  mentorpi-sim:
+    build:
+      context: .
+    image: mentorpi-gazebo:humble
+    platform: ${TARGET_PLATFORM:-linux/amd64}
+    working_dir: /ws
+    volumes:
+      - ./ros2_ws:/ws
+    environment:
+      # Gazebo server, GUI, and ROS bridges all run in this container.
+      # Loopback prevents Gazebo Transport from choosing an unusable host NIC.
+      IGN_IP: 127.0.0.1
+      QT_X11_NO_MITSHM: "1"
+    stdin_open: true
+    tty: true
+
+  mentorpi-gui:
+    extends:
+      service: mentorpi-sim
+    network_mode: host
+    environment:
+      DISPLAY: ${DISPLAY:-}
+      XAUTHORITY: /tmp/.Xauthority
+      QT_X11_NO_MITSHM: "1"
+    volumes:
+      - ./ros2_ws:/ws
+      - ${XAUTHORITY:-/tmp/.Xauthority}:/tmp/.Xauthority:ro
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    group_add:
+      - "${RENDER_GID:-991}"
+
+  mentorpi-host:
+    extends:
+      service: mentorpi-sim
+    network_mode: host

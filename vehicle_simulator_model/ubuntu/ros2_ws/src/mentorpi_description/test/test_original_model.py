@@ -1,38 +1,35 @@
 import hashlib
 import struct
-import tarfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[4]
-ARCHIVE = ROOT / 'promotion-shelf/20260708-163950-mentorpi/raw/mentorpi-ros2-ws-group-control-2026-07-08.tar.gz'
-UPSTREAM = 'mentorpi-ros2-ws-group-control-2026-07-08/src/simulations/mentorpi_description/urdf/mecanum.xacro'
-MECANUM = ROOT / 'ros2_ws/src/mentorpi_description/urdf/mecanum.xacro'
-MECANUM_URDF = ROOT / 'ros2_ws/src/mentorpi_description/urdf/mecanum.urdf'
-FORKLIFT = ROOT / 'ros2_ws/src/mentorpi_description/urdf/mecanum_forklift.xacro'
-FORKLIFT_URDF = ROOT / 'ros2_ws/src/mentorpi_description/urdf/mecanum_forklift.urdf'
-CAMERA_CONFIG = ROOT / 'ros2_ws/src/mentorpi_description/urdf/forklift_camera_config.xacro'
-CAMERA_MESH = ROOT / 'ros2_ws/src/mentorpi_description/meshes/mecanum/cam_Link.STL'
-LEGACY_MODEL = ROOT / 'ros2_ws/src/mentorpi_description/urdf/mentorpi_m1.urdf.xacro'
-DESCRIPTION_LAUNCH = ROOT / 'ros2_ws/src/mentorpi_description/launch/description.launch.py'
-SIM_LAUNCH = ROOT / 'ros2_ws/src/mentorpi_gz_sim/launch/two_robot_sim.launch.py'
-SDF = ROOT / 'ros2_ws/src/mentorpi_gz_sim/models/mentorpi_m1/model.sdf.xacro'
+WORKSPACE = Path(__file__).resolve().parents[3]
+SOURCE = WORKSPACE / 'src'
+MECANUM = SOURCE / 'mentorpi_description/urdf/mecanum.xacro'
+MECANUM_URDF = SOURCE / 'mentorpi_description/urdf/mecanum.urdf'
+FORKLIFT = SOURCE / 'mentorpi_description/urdf/mecanum_forklift.xacro'
+FORKLIFT_URDF = SOURCE / 'mentorpi_description/urdf/mecanum_forklift.urdf'
+CAMERA_CONFIG = SOURCE / 'mentorpi_description/urdf/forklift_camera_config.xacro'
+CAMERA_MESH = SOURCE / 'mentorpi_description/meshes/mecanum/cam_Link.STL'
+LIDAR_MESH = SOURCE / 'mentorpi_description/meshes/mecanum/lidar_Link.STL'
+LEGACY_MODEL = SOURCE / 'mentorpi_description/urdf/mentorpi_m1.urdf.xacro'
+DESCRIPTION_LAUNCH = SOURCE / 'mentorpi_description/launch/description.launch.py'
+SIM_LAUNCH = SOURCE / 'mentorpi_gz_sim/launch/two_robot_sim.launch.py'
+SDF = SOURCE / 'mentorpi_gz_sim/models/mentorpi_m1/model.sdf.xacro'
 BRIDGE_CONFIGS = [
-    ROOT / 'ros2_ws/src/mentorpi_gz_sim/config/robot_1_bridge.yaml',
-    ROOT / 'ros2_ws/src/mentorpi_gz_sim/config/robot_2_bridge.yaml',
+    SOURCE / 'mentorpi_gz_sim/config/robot_1_bridge.yaml',
+    SOURCE / 'mentorpi_gz_sim/config/robot_2_bridge.yaml',
 ]
-GAZEBO_PACKAGE_XML = ROOT / 'ros2_ws/src/mentorpi_gz_sim/package.xml'
+GAZEBO_PACKAGE_XML = SOURCE / 'mentorpi_gz_sim/package.xml'
+EXPECTED_MECANUM_SHA256 = 'f787f807714c78888dbe4afe755308ddb9e7f29c2778c6cb3bd5e56f960614ee'
 
 
 class MecanumSourceModelTest(unittest.TestCase):
-    def test_description_uses_the_exact_archived_mecanum_model(self):
-        with tarfile.open(ARCHIVE) as archive:
-            expected = archive.extractfile(UPSTREAM).read()
-
+    def test_description_uses_the_pinned_mecanum_model(self):
         self.assertTrue(MECANUM.is_file())
-        self.assertEqual(hashlib.sha256(MECANUM.read_bytes()).digest(), hashlib.sha256(expected).digest())
+        self.assertEqual(hashlib.sha256(MECANUM.read_bytes()).hexdigest(), EXPECTED_MECANUM_SHA256)
         self.assertTrue(MECANUM_URDF.is_symlink())
         self.assertEqual(MECANUM_URDF.readlink(), Path('mecanum.xacro'))
         self.assertFalse(LEGACY_MODEL.exists())
@@ -68,9 +65,65 @@ class MecanumSourceModelTest(unittest.TestCase):
         self.assertIn('<xacro:wheel name="front_right" x="0.067052" y="-0.07591" z="0.051592"', text)
         self.assertIn('<xacro:wheel name="back_left" x="-0.06764" y="0.07591" z="0.051586"', text)
         self.assertIn('<xacro:wheel name="back_right" x="-0.067621" y="-0.07591" z="0.051592"', text)
-        self.assertIn('<wheelbase>0.13468</wheelbase><wheel_separation>0.15182</wheel_separation>', text)
+        drive_plugin = next(
+            plugin for plugin in model.findall('plugin')
+            if plugin.attrib['name'] == 'ignition::gazebo::systems::MecanumDrive'
+        )
+        self.assertEqual(drive_plugin.findtext('wheelbase'), '0.13468')
+        self.assertEqual(drive_plugin.findtext('wheel_separation'), '0.15182')
         self.assertIn('<gz_frame_id>${robot_name}/lidar_frame</gz_frame_id>', text)
         self.assertIn('<gz_frame_id>${robot_name}/depth_cam</gz_frame_id>', text)
+
+    def test_gazebo_uses_original_sensor_meshes_without_guide_markers(self):
+        root = ET.parse(SDF).getroot()
+        model = root.find('model')
+        links = {link.attrib['name']: link for link in model.findall('link')}
+
+        expected_meshes = {
+            'lidar_frame': ('lidar_visual', 'lidar_Link.STL'),
+            'depth_cam': ('depth_camera_visual', 'cam_Link.STL'),
+        }
+        for link_name, (visual_name, mesh_name) in expected_meshes.items():
+            visuals = {visual.attrib['name']: visual for visual in links[link_name].findall('visual')}
+            self.assertEqual(set(visuals), {visual_name})
+            self.assertEqual(links[link_name].findall('collision'), [])
+            mesh = visuals[visual_name].find('geometry/mesh')
+            self.assertIsNotNone(mesh)
+            self.assertEqual(mesh.findtext('uri'), f'file://$(find mentorpi_description)/meshes/mecanum/{mesh_name}')
+            self.assertIsNone(mesh.find('scale'))
+
+        self.assertEqual(links['imu_link'].findall('visual'), [])
+
+        for link_name in ('lidar_frame', 'depth_cam'):
+            self.assertEqual(links[link_name].findtext('sensor/visualize'), 'false')
+        self.assertEqual(links['imu_link'].findtext('sensor/visualize'), None)
+        self.assertEqual(links['lidar_frame'].findtext('sensor/gz_frame_id'), '${robot_name}/lidar_frame')
+        self.assertEqual(links['depth_cam'].findtext('sensor/gz_frame_id'), '${robot_name}/depth_cam')
+        self.assertEqual(links['imu_link'].findtext('sensor/gz_frame_id'), '${robot_name}/imu_link')
+
+    def test_gazebo_chassis_is_below_the_lidar_mesh(self):
+        root = ET.parse(SDF).getroot()
+        model = root.find('model')
+        links = {link.attrib['name']: link for link in model.findall('link')}
+
+        chassis = links['base_footprint']
+        collision = chassis.find("collision[@name='chassis_collision']")
+        visual = chassis.find("visual[@name='chassis_visual']")
+        self.assertEqual(collision.findtext('pose'), '0 0 0.0765 0 0 0')
+        self.assertEqual(visual.findtext('pose'), '0 0 0.0765 0 0 0')
+        self.assertEqual(collision.findtext('geometry/box/size'), '0.180 0.145 0.090')
+        self.assertEqual(visual.findtext('geometry/box/size'), '0.180 0.145 0.090')
+
+        lidar_mesh = LIDAR_MESH.read_bytes()
+        triangle_count = struct.unpack_from('<I', lidar_mesh, 80)[0]
+        lidar_mesh_min_z = min(
+            struct.unpack_from('<f', lidar_mesh, 84 + triangle * 50 + 12 + vertex * 12 + 8)[0]
+            for triangle in range(triangle_count)
+            for vertex in range(3)
+        )
+        chassis_top = 0.0765 + 0.090 / 2
+        lidar_bottom = float(links['lidar_frame'].findtext('pose').split()[2]) + lidar_mesh_min_z
+        self.assertLess(chassis_top, lidar_bottom)
 
     def test_forklift_model_has_a_lifted_carriage_and_configurable_camera(self):
         root = ET.parse(FORKLIFT).getroot()
