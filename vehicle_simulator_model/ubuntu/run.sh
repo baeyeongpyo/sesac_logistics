@@ -6,6 +6,41 @@ export MENTORPI_IMAGE="${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"
 COMPOSE=(docker compose -f "$BUNDLE_DIR/compose.yaml")
 ROS_SETUP='source /opt/ros/humble/setup.bash && source /opt/mentorpi_ws/install/setup.bash'
 
+prepare_gpu() {
+  local render_node=''
+  local render_gid
+  local -a render_nodes
+
+  if [[ "$(uname -s)" != 'Linux' ]]; then
+    echo 'GPU mode requires native Linux with a DRI render node.' >&2
+    exit 2
+  fi
+
+  shopt -s nullglob
+  render_nodes=(/dev/dri/renderD*)
+  shopt -u nullglob
+  if ((${#render_nodes[@]} == 0)); then
+    echo 'GPU mode requires /dev/dri/renderD*.' >&2
+    exit 3
+  fi
+  for render_node in "${render_nodes[@]}"; do
+    [[ -r "$render_node" ]] && break
+    render_node=''
+  done
+  if [[ -z "$render_node" ]]; then
+    echo 'No readable /dev/dri/renderD* node is available.' >&2
+    exit 4
+  fi
+
+  render_gid="$(stat -c '%g' "$render_node")"
+  if [[ ! "$render_gid" =~ ^[0-9]+$ ]]; then
+    echo "Render node GID is not numeric: $render_gid" >&2
+    exit 5
+  fi
+  export RENDER_GID="$render_gid"
+  printf 'mentorpi gpu_render_node=%s render_gid=%s\n' "$render_node" "$RENDER_GID"
+}
+
 usage() {
   cat <<'EOF'
 Usage: ./run.sh <command>
@@ -28,6 +63,7 @@ case "${1:-}" in
     ;;
   sim-up)
     if [[ "${2:-}" == 'gpu' ]]; then
+      prepare_gpu
       COMPOSE+=( -f "$BUNDLE_DIR/compose.gpu.yaml" )
     elif [[ -n "${2:-}" ]]; then
       echo 'sim-up accepts only the optional gpu profile' >&2
@@ -55,8 +91,20 @@ case "${1:-}" in
       'gz sim --versions && ros2 pkg prefix mentorpi_description && ros2 pkg prefix mentorpi_gz_sim'
     ;;
   fork-up)
-    "${COMPOSE[@]}" run --rm --no-deps sim-adapter \
-      ros2 topic pub --once /robot_1/fork/command std_msgs/msg/Float64 '{data: 0.11}'
+    adapter_id="$("${COMPOSE[@]}" ps -q sim-adapter)"
+    if [[ -z "$adapter_id" ]]; then
+      echo 'sim-adapter is not running; start it with ./run.sh sim-up.' >&2
+      exit 3
+    fi
+    adapter_health="$(
+      docker inspect --format '{{.State.Health.Status}}' "$adapter_id" 2>/dev/null || true
+    )"
+    if [[ "$adapter_health" != 'healthy' ]]; then
+      echo "sim-adapter is not healthy: ${adapter_health:-unknown}" >&2
+      exit 4
+    fi
+    "${COMPOSE[@]}" exec -T sim-adapter bash -lc \
+      "$ROS_SETUP && timeout 10 ros2 topic pub --once /robot_1/fork/command std_msgs/msg/Float64 '{data: 0.11}'"
     ;;
   -h|--help|help|'')
     usage

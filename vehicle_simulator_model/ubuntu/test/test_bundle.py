@@ -33,16 +33,80 @@ class DeployOnlyBundleTest(unittest.TestCase):
         ):
             self.assertIn(required, entrypoint)
 
-    def test_sim_adapter_healthcheck_sources_ros_environment(self):
+    def test_healthchecks_require_payload_progression_for_both_robots(self):
         compose = (BUNDLE / 'compose.yaml').read_text()
+        health_path = BUNDLE / 'healthcheck.sh'
+        self.assertTrue(health_path.is_file(), 'healthcheck.sh')
+        health = health_path.read_text()
+        dockerfile = (BUNDLE / 'Dockerfile').read_text()
+        self.assertIn('set -o pipefail', health)
+        self.assertNotIn('set -uo pipefail', health)
+        self.assertIn(
+            'COPY healthcheck.sh /usr/local/bin/mentorpi-healthcheck',
+            dockerfile,
+        )
+
+        gazebo_server = compose.split('  gazebo-server:', 1)[1].split(
+            '  sim-adapter:', 1
+        )[0]
         sim_adapter = compose.split('  sim-adapter:', 1)[1].split('\nnetworks:', 1)[0]
+        self.assertIn('mentorpi-healthcheck', gazebo_server)
+        self.assertIn('server', gazebo_server)
+        self.assertIn('mentorpi-healthcheck', sim_adapter)
+        self.assertIn('adapter', sim_adapter)
+        for section in (gazebo_server, sim_adapter):
+            self.assertIn('start_period:', section)
         for required in (
-            'bash -lc',
             'source /opt/ros/humble/setup.bash',
             'source /opt/mentorpi_ws/install/setup.bash',
-            'ros2 topic list | grep -q /robot_1/scan_raw',
+            '/world/mentorpi_warehouse/stats',
+            'gz topic',
+            '-n 2',
+            'iterations:',
+            'check_ros_payload robot_1 scan_raw',
+            'check_ros_payload robot_1 odom',
+            'check_ros_payload robot_2 scan_raw',
+            'check_ros_payload robot_2 odom',
+            'tf2_echo',
+            'check_robot_tf robot_1',
+            'check_robot_tf robot_2',
+            'local parent="${robot}/odom"',
+            'local child="${robot}/base_footprint"',
+            'timeout',
         ):
-            self.assertIn(required, sim_adapter)
+            self.assertIn(required, health)
+        self.assertNotIn('ros2 topic list', health)
+
+    def test_gpu_profile_requires_readable_render_gid_preflight(self):
+        gpu_compose = (BUNDLE / 'compose.gpu.yaml').read_text()
+        script = (BUNDLE / 'run.sh').read_text()
+        self.assertIn('group_add:', gpu_compose)
+        self.assertIn('${RENDER_GID', gpu_compose)
+        for required in (
+            "uname -s",
+            '/dev/dri/renderD',
+            '-r "$render_node"',
+            "stat -c '%g'",
+            'export RENDER_GID',
+            'Linux',
+        ):
+            self.assertIn(required, script)
+        for forbidden in ('privileged:', 'chmod 666', 'network_mode: host'):
+            self.assertNotIn(forbidden, gpu_compose + script)
+
+    def test_fork_up_uses_healthy_running_adapter(self):
+        script = (BUNDLE / 'run.sh').read_text()
+        fork_up = script.split('  fork-up)', 1)[1].split('  -h|', 1)[0]
+        for required in (
+            'ps -q sim-adapter',
+            'State.Health.Status',
+            'healthy',
+            'exec -T sim-adapter bash -lc',
+            'timeout',
+            'ros2 topic pub --once',
+        ):
+            self.assertIn(required, fork_up)
+        self.assertNotIn(' run --rm', fork_up)
 
     def test_topic_diagnostic_sources_ros_environment(self):
         script = (BUNDLE / 'run.sh').read_text()
@@ -61,6 +125,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'compose.yaml',
             'compose.gpu.yaml',
             'entrypoint.sh',
+            'healthcheck.sh',
             'run.sh',
             'README.md',
             'ros2_ws/src/mentorpi_description/package.xml',
@@ -154,6 +219,8 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'sha256:',
             '브라우저',
             '오프스크린',
+            'native Ubuntu',
+            'release gate',
         ):
             self.assertIn(text, readme)
 

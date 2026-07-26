@@ -22,10 +22,11 @@ services:
       SERVICE_NAME: gazebo-server
     command: ros2 launch mentorpi_gz_sim gazebo_server.launch.py
     healthcheck:
-      test: ['CMD-SHELL', 'gz topic -l | grep -q /world/mentorpi_warehouse/stats']
-      interval: 5s
-      timeout: 3s
-      retries: 20
+      test: ['CMD', '/usr/local/bin/mentorpi-healthcheck', 'server']
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 5s
 
   sim-adapter:
     <<: *runtime
@@ -38,15 +39,11 @@ services:
       gazebo-server:
         condition: service_healthy
     healthcheck:
-      test:
-        - CMD-SHELL
-        - >-
-          bash -lc 'source /opt/ros/humble/setup.bash &&
-          source /opt/mentorpi_ws/install/setup.bash &&
-          ros2 topic list | grep -q /robot_1/scan_raw'
-      interval: 5s
-      timeout: 3s
-      retries: 20
+      test: ['CMD', '/usr/local/bin/mentorpi-healthcheck', 'adapter']
+      interval: 15s
+      timeout: 10s
+      retries: 12
+      start_period: 10s
 
 networks:
   mentorpi:

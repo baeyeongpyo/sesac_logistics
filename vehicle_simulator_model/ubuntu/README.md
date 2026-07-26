@@ -57,6 +57,11 @@ Docker Engine 및 Docker Compose v2가 설치된 Linux 서버에서 실행한다
 `sim-up`은 내부 `mentorpi` 네트워크에서 `gazebo-server`와 `sim-adapter`를 차례로 시작한다.
 외부 Gazebo Transport 포트와 ROS DDS 포트는 공개하지 않는다. Gazebo 서버 healthcheck가
 통과한 뒤 adapter가 시작하며, 두 서비스는 `GZ_PARTITION=mentorpi-sim`을 공유한다.
+서버 health는 진행 중인 stats payload 2개를, adapter health는 양 robot의 scan·odom
+payload와 robot별 odom-to-base TF를 확인한다. topic 이름만 존재하는 상태는 healthy가 아니다.
+
+`./run.sh fork-up`은 실행 중인 `sim-adapter`가 healthy일 때만 10초 제한 안에서 fork
+command를 publish한다. 서비스가 없거나 unhealthy면 새 container를 만들지 않고 실패한다.
 
 실행 중인 adapter의 ROS topic을 확인할 때는 `./run.sh topics`를 사용한다. Compose
 `exec`는 entrypoint가 source한 shell 환경을 상속하지 않으므로 이 명령과 adapter
@@ -75,7 +80,14 @@ docker compose exec sim-adapter bash -lc \
 ```
 
 이 profile은 Gazebo 서버에 `/dev/dri`를 전달하고 `LIBGL_ALWAYS_SOFTWARE=0`으로 바꾼다.
-기본 profile은 `LIBGL_ALWAYS_SOFTWARE=1`이므로 GPU 장치가 없어도 운영할 수 있다.
+`run.sh`는 native Linux에서 readable `/dev/dri/renderD*`를 선택하고 numeric render GID를
+Compose `group_add`에 전달한다. Mac과 DRI render node가 없는 Linux에서는 GPU mode가
+Docker 실행 전에 실패한다. 기본 profile은 `LIBGL_ALWAYS_SOFTWARE=1`이므로 GPU 장치가
+없어도 운영할 수 있다.
+
+native Ubuntu GPU smoke test는 release gate다. Ubuntu release 후보에서 `./run.sh sim-up gpu`
+실행 후 양 서비스 health, 양 robot scan payload, Gazebo 렌더 로그를 확인해야 한다. 이 검증은
+Mac Docker Desktop에서 대체할 수 없다.
 
 ## 렌더링 경계
 
