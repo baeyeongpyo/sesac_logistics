@@ -51,8 +51,6 @@ lock_dir="${lock_parent}/${SESSION_ID}.lock"
 
 mkdir -p "$stage_parent" "$lock_parent"
 [[ ! -e "$stage_dir" && ! -e "$final_dir" ]] || die "refusing to reuse existing session path for ${SESSION_ID}"
-mkdir "$lock_dir" 2>/dev/null || die "another mapping lifecycle owns session ${SESSION_ID}"
-[[ ! -e "$stage_dir" && ! -e "$final_dir" ]] || die "session path appeared while acquiring lock for ${SESSION_ID}"
 
 rosbag_pid=''
 slam_pid=''
@@ -140,7 +138,12 @@ cleanup() {
   release_lock
   return "$status"
 }
+if ! mv --version 2>/dev/null | grep -q 'GNU coreutils'; then
+  die 'GNU mv with -T and -n is required for safe no-clobber publication'
+fi
+mkdir "$lock_dir" 2>/dev/null || die "another mapping lifecycle owns session ${SESSION_ID}"
 trap cleanup EXIT
+[[ ! -e "$stage_dir" && ! -e "$final_dir" ]] || die "session path appeared while acquiring lock for ${SESSION_ID}"
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 installed_slam_config="${script_dir}/../../share/mentorpi_slam/config/slam.yaml"
@@ -174,12 +177,21 @@ wait_for_slam_services() {
   return 1
 }
 
-make_service_request() {
-  python3 - "$1" "$2" "$3" <<'PY'
+make_save_map_request() {
+  python3 - "$1" <<'PY'
 import json
 import sys
 
-print(json.dumps({sys.argv[1]: {sys.argv[2]: sys.argv[3]}}))
+print(json.dumps({'name': {'data': sys.argv[1]}}))
+PY
+}
+
+make_posegraph_request() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+print(json.dumps({'filename': sys.argv[1]}))
 PY
 }
 
@@ -233,10 +245,7 @@ publish_session() {
   if mv -T -n "$stage_dir" "$final_dir" 2>/dev/null; then
     [[ ! -e "$stage_dir" && -d "$final_dir" ]] || return 1
   else
-    # BSD mv lacks -T. The session lock plus immediate absence check prevents
-    # cooperating lifecycle instances from racing or nesting a stage directory.
-    [[ ! -e "$final_dir" ]] || return 1
-    mv "$stage_dir" "$final_dir"
+    return 1
   fi
   published=1
 }
@@ -248,8 +257,8 @@ finalize_session() {
   finalization_in_progress=1
   local save_request posegraph_request
   if ! wait_for_slam_services; then return 1; fi
-  save_request="$(make_service_request name data "${stage_dir}/map")"
-  posegraph_request="$(make_service_request filename data "${stage_dir}/posegraph/mentorpi")"
+  save_request="$(make_save_map_request "${stage_dir}/map")"
+  posegraph_request="$(make_posegraph_request "${stage_dir}/posegraph/mentorpi")"
   if ! run_ros2 service call /slam_toolbox/save_map slam_toolbox/srv/SaveMap "$save_request"; then return 1; fi
   if ! run_ros2 service call /slam_toolbox/serialize_map slam_toolbox/srv/SerializePoseGraph "$posegraph_request"; then return 1; fi
   if ! stop_recording_and_slam; then return 1; fi

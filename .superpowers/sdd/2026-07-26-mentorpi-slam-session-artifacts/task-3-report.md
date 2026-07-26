@@ -67,3 +67,24 @@ The fake ROS tests cover missing posegraph, metadata-only bag, service list and
 call hangs, signal-ignoring children with KILL escalation, repeated INT/TERM,
 unsafe root/timeout validation, JSON request parsing, target race no-nesting, and
 manifest SHA/checksum ordering.
+
+## Fix round 2: service schema and publication safety
+
+`SerializePoseGraph` takes a plain string `filename`; it is not a ROS string
+wrapper. The lifecycle now uses separate JSON encoders: SaveMap retains
+`{"name":{"data":"..."}}`, while SerializePoseGraph emits
+`{"filename":"..."}`. The fake ROS service parses each JSON request and rejects
+the wrong schema, so this is an executable service-type regression test.
+
+Lock cleanup is now armed immediately after successful lock creation, before the
+post-lock path recheck. The unsafe BSD check-then-rename fallback was removed:
+production requires GNU `mv -T -n` and safely fails before startup when it is not
+available. Tests include lock release after a target race and GNU-mv unavailability.
+
+```text
+bash -n vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/scripts/run_mapping_session.sh
+python3 -m unittest vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_mapping_session_script.py vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_session_artifacts.py vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_slam_contract.py -v
+
+Ran 16 tests in 19.426s
+OK
+```
