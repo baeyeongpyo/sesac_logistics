@@ -46,6 +46,7 @@ Docker Engine 및 Docker Compose v2가 설치된 Linux 서버에서 실행한다
 ```bash
 ./run.sh sim-up
 ./run.sh logs
+./run.sh topics
 ./run.sh fork-up
 ./run.sh down
 ```
@@ -56,6 +57,16 @@ Docker Engine 및 Docker Compose v2가 설치된 Linux 서버에서 실행한다
 `sim-up`은 내부 `mentorpi` 네트워크에서 `gazebo-server`와 `sim-adapter`를 차례로 시작한다.
 외부 Gazebo Transport 포트와 ROS DDS 포트는 공개하지 않는다. Gazebo 서버 healthcheck가
 통과한 뒤 adapter가 시작하며, 두 서비스는 `GZ_PARTITION=mentorpi-sim`을 공유한다.
+
+실행 중인 adapter의 ROS topic을 확인할 때는 `./run.sh topics`를 사용한다. Compose
+`exec`는 entrypoint가 source한 shell 환경을 상속하지 않으므로 이 명령과 adapter
+healthcheck는 `/opt/ros/humble/setup.bash`와 `/opt/mentorpi_ws/install/setup.bash`를
+각각 source한 shell에서 ROS CLI를 실행한다. 직접 진단해야 할 때도 같은 형태를 사용한다.
+
+```bash
+docker compose exec sim-adapter bash -lc \
+  'source /opt/ros/humble/setup.bash && source /opt/mentorpi_ws/install/setup.bash && ros2 topic list'
+```
 
 서버 GPU를 사용할 때만 다음처럼 명시한다.
 

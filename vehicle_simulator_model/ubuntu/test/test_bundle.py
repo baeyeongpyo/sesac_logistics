@@ -7,6 +7,28 @@ REPOSITORY_ROOT = BUNDLE.parents[1]
 
 
 class DeployOnlyBundleTest(unittest.TestCase):
+    def test_sim_adapter_healthcheck_sources_ros_environment(self):
+        compose = (BUNDLE / 'compose.yaml').read_text()
+        sim_adapter = compose.split('  sim-adapter:', 1)[1].split('\nnetworks:', 1)[0]
+        for required in (
+            'bash -lc',
+            'source /opt/ros/humble/setup.bash',
+            'source /opt/mentorpi_ws/install/setup.bash',
+            'ros2 topic list | grep -q /robot_1/scan_raw',
+        ):
+            self.assertIn(required, sim_adapter)
+
+    def test_topic_diagnostic_sources_ros_environment(self):
+        script = (BUNDLE / 'run.sh').read_text()
+        for required in (
+            'topics',
+            'source /opt/ros/humble/setup.bash',
+            'source /opt/mentorpi_ws/install/setup.bash',
+            'exec sim-adapter bash -lc',
+            'ros2 topic list',
+        ):
+            self.assertIn(required, script)
+
     def test_bundle_contains_all_runtime_assets(self):
         for relative_path in (
             'Dockerfile',
@@ -101,6 +123,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
             './run.sh logs',
             './run.sh down',
             './run.sh fork-up',
+            './run.sh topics',
             'MENTORPI_IMAGE',
             'sha256:',
             '브라우저',

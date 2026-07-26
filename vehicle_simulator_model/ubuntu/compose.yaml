@@ -37,7 +37,12 @@ services:
       gazebo-server:
         condition: service_healthy
     healthcheck:
-      test: ['CMD-SHELL', 'ros2 topic list | grep -q /robot_1/scan_raw']
+      test:
+        - CMD-SHELL
+        - >-
+          bash -lc 'source /opt/ros/humble/setup.bash &&
+          source /opt/mentorpi_ws/install/setup.bash &&
+          ros2 topic list | grep -q /robot_1/scan_raw'
       interval: 5s
       timeout: 3s
       retries: 20

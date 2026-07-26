@@ -4,6 +4,7 @@ set -euo pipefail
 BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export MENTORPI_IMAGE="${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"
 COMPOSE=(docker compose -f "$BUNDLE_DIR/compose.yaml")
+ROS_SETUP='source /opt/ros/humble/setup.bash && source /opt/mentorpi_ws/install/setup.bash'
 
 usage() {
   cat <<'EOF'
@@ -14,6 +15,7 @@ Commands:
   sim-up [gpu]       Start Gazebo and the ROS adapter in the background.
   down               Stop and remove the simulation services.
   logs               Follow Gazebo and adapter service logs.
+  topics             List ROS topics from the running adapter.
   test               Run static checks and validate the runtime image.
   fork-up             Publish the robot_1 fork target height of 0.11 m.
 EOF
@@ -38,6 +40,10 @@ case "${1:-}" in
     ;;
   logs)
     "${COMPOSE[@]}" logs -f gazebo-server sim-adapter
+    ;;
+  topics)
+    "${COMPOSE[@]}" exec sim-adapter bash -lc \
+      "$ROS_SETUP && ros2 topic list"
     ;;
   test)
     python3 -m unittest \
