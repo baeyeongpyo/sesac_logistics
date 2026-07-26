@@ -24,8 +24,9 @@ for required_variable in \
   require_environment "$required_variable"
 done
 
-if [[ ! "$SESSION_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
-  die 'SESSION_ID may contain only A-Z, a-z, 0-9, period, underscore, and hyphen'
+if [[ ! "$SESSION_ID" =~ ^[A-Za-z0-9._-]+$ \
+  || "$SESSION_ID" == '.' || "$SESSION_ID" == '..' ]]; then
+  die 'SESSION_ID may contain only A-Z, a-z, 0-9, period, underscore, and hyphen, but not . or ..'
 fi
 if [[ "$SLAM_DATA_ROOT" != /* || "$SLAM_DATA_ROOT" =~ [[:cntrl:]] || "$SLAM_DATA_ROOT" == *\"* || "$SLAM_DATA_ROOT" == *\'* ]]; then
   die 'SLAM_DATA_ROOT must be a safe absolute path without control characters or quotes'

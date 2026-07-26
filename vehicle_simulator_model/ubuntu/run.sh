@@ -43,8 +43,9 @@ prepare_gpu() {
 
 validate_session_id() {
   local session_id="${1:-}"
-  if [[ ! "$session_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
-    echo 'session ID may contain only A-Z, a-z, 0-9, period, underscore, and hyphen' >&2
+  if [[ ! "$session_id" =~ ^[A-Za-z0-9._-]+$ \
+    || "$session_id" == '.' || "$session_id" == '..' ]]; then
+    echo 'session ID may contain only A-Z, a-z, 0-9, period, underscore, and hyphen, but not . or ..' >&2
     return 2
   fi
 }
@@ -186,18 +187,19 @@ case "${1:-}" in
     fi
     MAPPING_STOP_TIMEOUT_SECONDS="${MAPPING_STOP_TIMEOUT_SECONDS:-90}"
     validate_mapping_stop_timeout
-    mapper_id="$("${COMPOSE[@]}" ps -q slam-mapper)"
+    mapper_id="$("${COMPOSE[@]}" ps -q --all slam-mapper)"
     if [[ -z "$mapper_id" ]]; then
       echo 'slam-mapper is not running; no mapping finalization is in progress' >&2
       exit 3
     fi
-    if ! "${COMPOSE[@]}" kill -s SIGINT slam-mapper; then
-      echo 'failed to send SIGINT to slam-mapper; simulation services remain running' >&2
-      exit 4
-    fi
+    kill_failed=0
+    if ! "${COMPOSE[@]}" kill -s SIGINT slam-mapper; then kill_failed=1; fi
     if ! mapper_exit_code="$(wait_for_mapper_exit "$mapper_id")"; then
-      echo 'mapping finalization status is unknown; leaving slam-mapper untouched' >&2
-      "${COMPOSE[@]}" stop gazebo-server sim-adapter || true
+      if ((kill_failed)); then
+        echo 'failed to send SIGINT to slam-mapper and its finalization state is unknown; services remain running' >&2
+        exit 4
+      fi
+      echo 'mapping finalization status is unknown; leaving mapper and simulation services running' >&2
       exit 5
     fi
     if [[ "$mapper_exit_code" == 0 ]]; then

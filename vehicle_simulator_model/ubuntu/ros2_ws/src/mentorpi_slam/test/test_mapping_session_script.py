@@ -38,12 +38,15 @@ class MappingSessionScriptTest(unittest.TestCase):
         self.assertLess(text.index('trap cleanup EXIT'), text.index('session path appeared while acquiring lock'))
         self.assertNotIn('mv -T -n', text)
 
-    def test_rejects_invalid_session_id_without_creating_a_final_session(self):
+    def test_rejects_invalid_session_id_without_creating_a_session_path(self):
         self.require_script()
         with self.fake_ros_environment() as environment:
-            result = self.run_script(environment, SESSION_ID='invalid/session')
-            self.assertNotEqual(result.returncode, 0)
-            self.assertFalse((environment['data_root'] / 'invalid').exists())
+            for session_id in ('invalid/session', '.', '..'):
+                with self.subTest(session_id=session_id):
+                    result = self.run_script(environment, SESSION_ID=session_id)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse((environment['data_root'] / 'invalid').exists())
+                    self.assertFalse((environment['data_root'] / '.inprogress').exists())
 
     def test_rejects_existing_stage_or_final_path(self):
         self.require_script()

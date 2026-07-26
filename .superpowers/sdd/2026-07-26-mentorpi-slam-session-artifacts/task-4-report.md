@@ -56,3 +56,35 @@ execution, Compose renders exported mapping metadata into `slam-mapper`, and
 The final-session inspector is read-only and never selects `.inprogress`; mapper
 finalization is not interrupted by an immediate `down`. Linux container lifecycle
 E2E remains intentionally unexecuted on this macOS host and is deferred to Task 5.
+
+## Fix round 1/5 (2026-07-26)
+
+Reviewer findings were addressed with boundary behavior tests before implementation:
+
+- `mapping-stop` now queries `docker compose ps -q --all slam-mapper`, so an exited
+  mapper is still found, its exit code is reported, and support services are
+  cleaned up. A failed `SIGINT` send re-checks that container state before deciding.
+- A mapper that remains running through the bounded stop wait now returns non-zero
+  without stopping Gazebo or the adapter.
+- Both the operator command and mapping lifecycle runner reject `.` and `..` before
+  creating a session/staging path.
+- The backup command mounts `mentorpi-slam-data` read-only; the restore command is
+  explicitly documented as writable.
+
+Fresh verification output summary:
+
+```bash
+python3 -m unittest \
+  vehicle_simulator_model/ubuntu/test/test_bundle.py \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_slam_contract.py \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_session_artifacts.py \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_mapping_session_script.py -v
+# Ran 34 tests in 19.705s — OK
+
+bash -n vehicle_simulator_model/ubuntu/run.sh \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/scripts/run_mapping_session.sh
+docker compose -f vehicle_simulator_model/ubuntu/compose.yaml config --quiet
+docker compose -f vehicle_simulator_model/ubuntu/compose.yaml --profile mapping config --quiet
+git diff --check
+# all exited 0
+```

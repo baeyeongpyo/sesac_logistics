@@ -127,9 +127,10 @@ volume은 host 경로에 의존하지 않는다. 운영 전후에는 다음처�
 volume에 archive를 풀어 넣는다.
 
 ```bash
-docker run --rm -v mentorpi-slam-data:/slam-data -v "$PWD":/backup \
+docker run --rm -v mentorpi-slam-data:/slam-data:ro -v "$PWD":/backup \
   alpine tar czf /backup/mentorpi-slam-data-backup.tgz -C /slam-data .
 
+# 복원은 volume에 써야 하므로 :ro를 붙이지 않는다.
 docker volume create mentorpi-slam-data
 docker run --rm -v mentorpi-slam-data:/slam-data -v "$PWD":/backup \
   alpine tar xzf /backup/mentorpi-slam-data-backup.tgz -C /slam-data

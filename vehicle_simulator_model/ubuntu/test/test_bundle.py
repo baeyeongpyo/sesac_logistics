@@ -1,5 +1,9 @@
+import os
+import subprocess
+import textwrap
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 
 BUNDLE = Path(__file__).resolve().parents[1]
@@ -234,6 +238,87 @@ class DeployOnlyBundleTest(unittest.TestCase):
         ):
             self.assertIn(required, mapping_status)
 
+    def test_mapping_stop_cleans_support_after_mapper_already_exited(self):
+        result, operations = self.run_mapping_stop_with_fake_docker(
+            mapper_state='false 0', kill_outcome='fail'
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('mapping finalization succeeded', result.stdout)
+        self.assertEqual(operations, ['kill', 'stop'])
+
+    def test_mapping_stop_timeout_leaves_mapper_and_support_running(self):
+        result, operations = self.run_mapping_stop_with_fake_docker(
+            mapper_state='true 0', kill_outcome='succeed', timeout='0'
+        )
+
+        self.assertEqual(result.returncode, 5, result.stderr)
+        self.assertIn('finalization status is unknown', result.stderr)
+        self.assertEqual(operations, ['kill'])
+
+    def test_mapping_commands_reject_dot_session_ids_before_docker(self):
+        for command in ('mapping-up', 'mapping-status'):
+            for session_id in ('.', '..'):
+                with self.subTest(command=command, session_id=session_id):
+                    result = subprocess.run(
+                        ['bash', str(BUNDLE / 'run.sh'), command, session_id],
+                        text=True,
+                        capture_output=True,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn('session ID may contain', result.stderr)
+
+    def run_mapping_stop_with_fake_docker(
+        self, mapper_state, kill_outcome, timeout='5'
+    ):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            bin_dir = root / 'bin'
+            bin_dir.mkdir()
+            state_path = root / 'mapper-state'
+            log_path = root / 'operations'
+            state_path.write_text(mapper_state)
+            docker = bin_dir / 'docker'
+            docker.write_text(textwrap.dedent('''\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                if [[ "$1" == inspect ]]; then
+                  cat "$FAKE_DOCKER_STATE_PATH"
+                  exit 0
+                fi
+                [[ "$1" == compose ]] || exit 99
+                case " $* " in
+                  *' ps -q --all slam-mapper '*)
+                    printf '%s\\n' mapper-test
+                    ;;
+                  *' kill -s SIGINT slam-mapper '*)
+                    printf '%s\\n' kill >> "$FAKE_DOCKER_LOG_PATH"
+                    [[ "$FAKE_DOCKER_KILL_OUTCOME" == succeed ]] || exit 1
+                    ;;
+                  *' stop gazebo-server sim-adapter '*)
+                    printf '%s\\n' stop >> "$FAKE_DOCKER_LOG_PATH"
+                    ;;
+                  *) exit 98 ;;
+                esac
+            '''))
+            docker.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update({
+                'PATH': f'{bin_dir}{os.pathsep}{environment["PATH"]}',
+                'FAKE_DOCKER_STATE_PATH': str(state_path),
+                'FAKE_DOCKER_LOG_PATH': str(log_path),
+                'FAKE_DOCKER_KILL_OUTCOME': kill_outcome,
+                'MAPPING_STOP_TIMEOUT_SECONDS': timeout,
+            })
+            result = subprocess.run(
+                ['bash', str(BUNDLE / 'run.sh'), 'mapping-stop'],
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
+            operations = log_path.read_text().splitlines() if log_path.exists() else []
+            return result, operations
+
     def test_bundle_contains_all_runtime_assets(self):
         for relative_path in (
             'Dockerfile',
@@ -341,6 +426,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
             './run.sh mapping-status',
             '.inprogress',
             'mentorpi-slam-data',
+            'mentorpi-slam-data:/slam-data:ro',
         ):
             self.assertIn(text, readme)
 
