@@ -89,6 +89,52 @@ native Ubuntu GPU smoke test는 release gate다. Ubuntu release 후보에서 `./
 실행 후 양 서비스 health, 양 robot scan payload, Gazebo 렌더 로그를 확인해야 한다. 이 검증은
 Mac Docker Desktop에서 대체할 수 없다.
 
+## SLAM 매핑 세션 운영
+
+매핑은 일회성 `slam-mapper` 서비스로 실행한다. 세션 ID는 영문 대소문자, 숫자, `.`, `_`, `-`만
+사용하며, 같은 ID는 publish된 결과 또는 진행 중인 작업과 재사용할 수 없다.
+
+```bash
+./run.sh mapping-up warehouse-20260726-01
+./run.sh mapping-stop
+./run.sh mapping-status warehouse-20260726-01
+```
+
+`mapping-up`은 Gazebo와 adapter가 healthy가 된 뒤 mapper를 시작하고, `SESSION_ID` 및 이미지·world·model·TF
+버전 metadata를 컨테이너에 전달한다. `mapping-stop`은 mapper에 먼저 `SIGINT`를 보내 map, posegraph, rosbag,
+manifest, checksum finalization이 끝날 때까지 제한 시간(기본 90초)만큼 기다린다. 완료 전에 `down`을 호출하지
+않으므로 finalization을 중단하지 않는다. mapper가 0으로 종료되면 성공을, 다른 종료 코드면 실패를 명확히
+보고한 뒤 Gazebo와 adapter를 정지한다. 제한 시간을 넘으면 mapper는 건드리지 않고 나머지 서비스만 정지한다.
+
+성공한 세션은 Docker named volume `mentorpi-slam-data`의 다음 최종 디렉터리에 원자적으로 publish된다.
+
+```text
+/slam-data/<session-id>/
+├── map.yaml
+├── map.pgm
+├── posegraph/mentorpi.posegraph
+├── rosbag2/mapping/
+├── manifest.json
+└── checksums.sha256
+```
+
+`mapping-status`는 volume을 read-only로 연결한 inspector 컨테이너에서 이 최종 디렉터리만 나열하고,
+그 안에서 `sha256sum -c checksums.sha256`를 실행한다. 따라서 `.inprogress/<session-id>`는 성공으로
+표시되지 않는다. 저장·posegraph·bag·checksum 중 하나라도 finalization에 실패하면 결과는
+`/slam-data/.inprogress/<session-id>/`에 남으며, 이를 복구된 성공 세션으로 취급하면 안 된다.
+
+volume은 host 경로에 의존하지 않는다. 운영 전후에는 다음처럼 tar archive로 백업하고, 복원할 때는 빈
+volume에 archive를 풀어 넣는다.
+
+```bash
+docker run --rm -v mentorpi-slam-data:/slam-data -v "$PWD":/backup \
+  alpine tar czf /backup/mentorpi-slam-data-backup.tgz -C /slam-data .
+
+docker volume create mentorpi-slam-data
+docker run --rm -v mentorpi-slam-data:/slam-data -v "$PWD":/backup \
+  alpine tar xzf /backup/mentorpi-slam-data-backup.tgz -C /slam-data
+```
+
 ## 렌더링 경계
 
 브라우저 렌더링은 사용자의 클라이언트에서 수행한다. 서버는 카메라·라이다 등 시뮬레이션

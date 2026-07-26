@@ -140,7 +140,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
 
     def test_fork_up_uses_healthy_running_adapter(self):
         script = (BUNDLE / 'run.sh').read_text()
-        fork_up = script.split('  fork-up)', 1)[1].split('  -h|', 1)[0]
+        fork_up = script.split('  fork-up)', 1)[1].split('  mapping-up)', 1)[0]
         for required in (
             'ps -q sim-adapter',
             'State.Health.Status',
@@ -162,6 +162,77 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'ros2 topic list',
         ):
             self.assertIn(required, script)
+
+    def test_mapping_profile_uses_one_shot_mapper_and_persistent_slam_volume(self):
+        compose = (BUNDLE / 'compose.yaml').read_text()
+        self.assertIn('  slam-mapper:', compose)
+        mapper = compose.split('  slam-mapper:', 1)[1].split('\nnetworks:', 1)[0]
+
+        for required in (
+            'profiles: [mapping]',
+            'restart: "no"',
+            'SLAM_DATA_ROOT: /slam-data',
+            'slam-data:/slam-data',
+            'condition: service_healthy',
+            'ros2 run mentorpi_slam run_mapping_session.sh',
+            'GIT_COMMIT: "${GIT_COMMIT:-unknown}"',
+            'WORLD_VERSION: "${WORLD_VERSION:-unknown}"',
+            'MODEL_VERSION: "${MODEL_VERSION:-unknown}"',
+            'TF_CALIBRATION_VERSION: "${TF_CALIBRATION_VERSION:-unknown}"',
+        ):
+            self.assertIn(required, mapper)
+        self.assertNotIn('GZ_RELAY_HOST', mapper)
+        self.assertIn('slam-data:', compose)
+        self.assertIn('name: mentorpi-slam-data', compose)
+
+    def test_mapping_commands_validate_session_and_preserve_finalization(self):
+        script = (BUNDLE / 'run.sh').read_text()
+        self.assertIn('  mapping-up)', script)
+        self.assertIn('  mapping-stop)', script)
+        self.assertIn('  mapping-status)', script)
+        mapping_up = script.split('  mapping-up)', 1)[1].split('  mapping-stop)', 1)[0]
+        mapping_stop = script.split('  mapping-stop)', 1)[1].split(
+            '  mapping-status)', 1
+        )[0]
+        mapping_status = script.split('  mapping-status)', 1)[1].split('  -h|', 1)[0]
+
+        for required in (
+            'validate_session_id',
+            '[[ "$#" -ne 2 ]]',
+            'export SESSION_ID="$2"',
+            'export IMAGE_VERSION="${IMAGE_VERSION:-mentorpi-sim:harmonic}"',
+            'export GIT_COMMIT="${GIT_COMMIT:-$(git -C "$BUNDLE_DIR" rev-parse HEAD)}"',
+            'export WORLD_VERSION="${WORLD_VERSION:-warehouse-v1}"',
+            'export MODEL_VERSION="${MODEL_VERSION:-mentorpi-m1-v1}"',
+            'export TF_CALIBRATION_VERSION="${TF_CALIBRATION_VERSION:-ground-truth-v1}"',
+            '--profile mapping up -d',
+            'gazebo-server sim-adapter slam-mapper',
+        ):
+            self.assertIn(required, mapping_up)
+
+        for required in (
+            'kill -s SIGINT slam-mapper',
+            'MAPPING_STOP_TIMEOUT_SECONDS',
+            'stop gazebo-server sim-adapter',
+            'mapping finalization succeeded',
+            'mapping finalization failed',
+        ):
+            self.assertIn(required, mapping_stop)
+        self.assertIn('State.Running', script)
+        self.assertIn('State.ExitCode', script)
+        self.assertLess(
+            mapping_stop.index('kill -s SIGINT slam-mapper'),
+            mapping_stop.index('stop gazebo-server sim-adapter'),
+        )
+
+        for required in (
+            'validate_session_id "$2"',
+            '--profile mapping run --rm --no-deps slam-inspector',
+            'session_dir="/slam-data/${SESSION_ID}"',
+            'checksums.sha256',
+            'sha256sum -c checksums.sha256',
+        ):
+            self.assertIn(required, mapping_status)
 
     def test_bundle_contains_all_runtime_assets(self):
         for relative_path in (
@@ -265,6 +336,11 @@ class DeployOnlyBundleTest(unittest.TestCase):
             '오프스크린',
             'native Ubuntu',
             'release gate',
+            './run.sh mapping-up',
+            './run.sh mapping-stop',
+            './run.sh mapping-status',
+            '.inprogress',
+            'mentorpi-slam-data',
         ):
             self.assertIn(text, readme)
 

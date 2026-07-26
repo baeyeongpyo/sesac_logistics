@@ -41,6 +41,47 @@ prepare_gpu() {
   printf 'mentorpi gpu_render_node=%s render_gid=%s\n' "$render_node" "$RENDER_GID"
 }
 
+validate_session_id() {
+  local session_id="${1:-}"
+  if [[ ! "$session_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo 'session ID may contain only A-Z, a-z, 0-9, period, underscore, and hyphen' >&2
+    return 2
+  fi
+}
+
+validate_mapping_stop_timeout() {
+  if [[ ! "$MAPPING_STOP_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
+    echo 'MAPPING_STOP_TIMEOUT_SECONDS must be a non-negative integer' >&2
+    return 2
+  fi
+}
+
+wait_for_mapper_exit() {
+  local mapper_id="$1"
+  local deadline=$((SECONDS + MAPPING_STOP_TIMEOUT_SECONDS))
+  local mapper_state
+
+  while :; do
+    mapper_state="$(
+      docker inspect --format '{{.State.Running}} {{.State.ExitCode}}' \
+        "$mapper_id" 2>/dev/null || true
+    )"
+    if [[ "$mapper_state" =~ ^false[[:space:]]+([0-9]+)$ ]]; then
+      printf '%s\n' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+    if [[ "$mapper_state" != true\ * ]]; then
+      echo 'slam-mapper container state is unavailable before finalization completed' >&2
+      return 2
+    fi
+    if ((SECONDS >= deadline)); then
+      echo "timed out waiting ${MAPPING_STOP_TIMEOUT_SECONDS}s for slam-mapper finalization" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 usage() {
   cat <<'EOF'
 Usage: ./run.sh <command>
@@ -53,6 +94,9 @@ Commands:
   topics             List ROS topics from the running adapter.
   test               Run static checks and validate the runtime image.
   fork-up             Publish the robot_1 fork target height of 0.11 m.
+  mapping-up <id>     Start a one-shot SLAM mapping session.
+  mapping-stop        Send SIGINT and wait for safe SLAM finalization.
+  mapping-status <id> Verify a published mapping session's checksums.
 EOF
 }
 
@@ -119,6 +163,78 @@ case "${1:-}" in
     fi
     "${COMPOSE[@]}" exec -T sim-adapter bash -lc \
       "$ROS_SETUP && timeout 10 ros2 topic pub --once /robot_1/fork/command std_msgs/msg/Float64 '{data: 0.11}'"
+    ;;
+  mapping-up)
+    if [[ "$#" -ne 2 ]]; then
+      echo 'mapping-up requires exactly one session ID' >&2
+      exit 2
+    fi
+    validate_session_id "$2"
+    export SESSION_ID="$2"
+    export IMAGE_VERSION="${IMAGE_VERSION:-mentorpi-sim:harmonic}"
+    export GIT_COMMIT="${GIT_COMMIT:-$(git -C "$BUNDLE_DIR" rev-parse HEAD)}"
+    export WORLD_VERSION="${WORLD_VERSION:-warehouse-v1}"
+    export MODEL_VERSION="${MODEL_VERSION:-mentorpi-m1-v1}"
+    export TF_CALIBRATION_VERSION="${TF_CALIBRATION_VERSION:-ground-truth-v1}"
+    "${COMPOSE[@]}" --profile mapping up -d \
+      gazebo-server sim-adapter slam-mapper
+    ;;
+  mapping-stop)
+    if [[ "$#" -ne 1 ]]; then
+      echo 'mapping-stop does not accept arguments' >&2
+      exit 2
+    fi
+    MAPPING_STOP_TIMEOUT_SECONDS="${MAPPING_STOP_TIMEOUT_SECONDS:-90}"
+    validate_mapping_stop_timeout
+    mapper_id="$("${COMPOSE[@]}" ps -q slam-mapper)"
+    if [[ -z "$mapper_id" ]]; then
+      echo 'slam-mapper is not running; no mapping finalization is in progress' >&2
+      exit 3
+    fi
+    if ! "${COMPOSE[@]}" kill -s SIGINT slam-mapper; then
+      echo 'failed to send SIGINT to slam-mapper; simulation services remain running' >&2
+      exit 4
+    fi
+    if ! mapper_exit_code="$(wait_for_mapper_exit "$mapper_id")"; then
+      echo 'mapping finalization status is unknown; leaving slam-mapper untouched' >&2
+      "${COMPOSE[@]}" stop gazebo-server sim-adapter || true
+      exit 5
+    fi
+    if [[ "$mapper_exit_code" == 0 ]]; then
+      echo 'mapping finalization succeeded'
+      finalization_status=0
+    else
+      echo "mapping finalization failed (slam-mapper exit code ${mapper_exit_code})" >&2
+      finalization_status="$mapper_exit_code"
+    fi
+    if ! "${COMPOSE[@]}" stop gazebo-server sim-adapter; then
+      echo 'mapping finalization completed, but simulation service cleanup failed' >&2
+      [[ "$finalization_status" == 0 ]] && exit 6
+    fi
+    exit "$finalization_status"
+    ;;
+  mapping-status)
+    if [[ "$#" -ne 2 ]]; then
+      echo 'mapping-status requires exactly one session ID' >&2
+      exit 2
+    fi
+    validate_session_id "$2"
+    SESSION_ID="$2" "${COMPOSE[@]}" --profile mapping run --rm --no-deps slam-inspector \
+      bash -lc '
+        set -euo pipefail
+        session_dir="/slam-data/${SESSION_ID}"
+        if [[ ! -d "$session_dir" ]]; then
+          echo "published mapping session not found: ${SESSION_ID}" >&2
+          exit 3
+        fi
+        if [[ ! -f "$session_dir/checksums.sha256" ]]; then
+          echo "published mapping session has no checksums: ${SESSION_ID}" >&2
+          exit 4
+        fi
+        find "$session_dir" -type f -print | sort
+        cd "$session_dir"
+        sha256sum -c checksums.sha256
+      '
     ;;
   -h|--help|help|'')
     usage

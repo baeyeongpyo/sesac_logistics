@@ -45,6 +45,44 @@ services:
       retries: 12
       start_period: 10s
 
+  slam-mapper:
+    <<: *runtime
+    profiles: [mapping]
+    restart: "no"
+    environment:
+      <<: *runtime-environment
+      SERVICE_NAME: slam-mapper
+      SLAM_DATA_ROOT: /slam-data
+      IMAGE_VERSION: "${IMAGE_VERSION:-mentorpi-sim:harmonic}"
+      GIT_COMMIT: "${GIT_COMMIT:-unknown}"
+      WORLD_VERSION: "${WORLD_VERSION:-unknown}"
+      MODEL_VERSION: "${MODEL_VERSION:-unknown}"
+      TF_CALIBRATION_VERSION: "${TF_CALIBRATION_VERSION:-unknown}"
+    command: ros2 run mentorpi_slam run_mapping_session.sh
+    depends_on:
+      sim-adapter:
+        condition: service_healthy
+    volumes:
+      - slam-data:/slam-data
+
+  slam-inspector:
+    <<: *runtime
+    profiles: [mapping]
+    restart: "no"
+    environment:
+      <<: *runtime-environment
+      SERVICE_NAME: slam-inspector
+    command: bash
+    volumes:
+      - type: volume
+        source: slam-data
+        target: /slam-data
+        read_only: true
+
 networks:
   mentorpi:
     internal: true
+
+volumes:
+  slam-data:
+    name: mentorpi-slam-data
