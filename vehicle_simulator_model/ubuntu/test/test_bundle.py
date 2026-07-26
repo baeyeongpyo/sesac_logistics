@@ -7,6 +7,32 @@ REPOSITORY_ROOT = BUNDLE.parents[1]
 
 
 class DeployOnlyBundleTest(unittest.TestCase):
+    def test_sim_adapter_configures_one_way_relay_host(self):
+        compose = (BUNDLE / 'compose.yaml').read_text()
+        gazebo_server = compose.split('  gazebo-server:', 1)[1].split(
+            '  sim-adapter:', 1
+        )[0]
+        sim_adapter = compose.split('  sim-adapter:', 1)[1].split('\nnetworks:', 1)[0]
+        self.assertIn('GZ_RELAY_HOST: gazebo-server', sim_adapter)
+        self.assertNotIn('GZ_RELAY_HOST', gazebo_server)
+        for forbidden in ('GZ_RELAY:', 'ipv4_address:', 'network_mode: host'):
+            self.assertNotIn(forbidden, compose)
+
+    def test_entrypoint_resolves_relay_ipv4_or_fails_fast(self):
+        entrypoint = (BUNDLE / 'entrypoint.sh').read_text()
+        for required in (
+            'if [[ -n "${GZ_RELAY_HOST:-}" ]]',
+            'getent ahostsv4',
+            'GZ_RELAY_RESOLVE_ATTEMPTS',
+            'valid_ipv4',
+            'export GZ_RELAY=',
+            'relay_target=%s',
+            'relay_error=resolve_failed',
+            'sleep 1',
+            'exit 70',
+        ):
+            self.assertIn(required, entrypoint)
+
     def test_sim_adapter_healthcheck_sources_ros_environment(self):
         compose = (BUNDLE / 'compose.yaml').read_text()
         sim_adapter = compose.split('  sim-adapter:', 1)[1].split('\nnetworks:', 1)[0]

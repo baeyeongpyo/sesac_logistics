@@ -32,6 +32,7 @@ services:
     environment:
       <<: *runtime-environment
       SERVICE_NAME: sim-adapter
+      GZ_RELAY_HOST: gazebo-server
     command: ros2 launch mentorpi_gz_sim sim_adapter.launch.py
     depends_on:
       gazebo-server:
