@@ -16,7 +16,7 @@ CAMERA_MESH = SOURCE / 'mentorpi_description/meshes/mecanum/cam_Link.STL'
 LIDAR_MESH = SOURCE / 'mentorpi_description/meshes/mecanum/lidar_Link.STL'
 LEGACY_MODEL = SOURCE / 'mentorpi_description/urdf/mentorpi_m1.urdf.xacro'
 DESCRIPTION_LAUNCH = SOURCE / 'mentorpi_description/launch/description.launch.py'
-SIM_LAUNCH = SOURCE / 'mentorpi_gz_sim/launch/two_robot_sim.launch.py'
+SIM_ADAPTER_LAUNCH = SOURCE / 'mentorpi_gz_sim/launch/sim_adapter.launch.py'
 SDF = SOURCE / 'mentorpi_gz_sim/models/mentorpi_m1/model.sdf.xacro'
 BRIDGE_CONFIGS = [
     SOURCE / 'mentorpi_gz_sim/config/robot_1_bridge.yaml',
@@ -34,12 +34,17 @@ class MecanumSourceModelTest(unittest.TestCase):
         self.assertEqual(MECANUM_URDF.readlink(), Path('mecanum.xacro'))
         self.assertFalse(LEGACY_MODEL.exists())
         description_launch = DESCRIPTION_LAUNCH.read_text()
-        simulation_launch = SIM_LAUNCH.read_text()
+        simulation_adapter_launch = SIM_ADAPTER_LAUNCH.read_text()
         self.assertIn('mecanum_forklift.xacro', description_launch)
-        self.assertIn('mecanum_forklift.xacro', simulation_launch)
+        self.assertIn('mecanum_forklift.xacro', simulation_adapter_launch)
+        self.assertIn("mappings={'robot_name': name}", simulation_adapter_launch)
+        self.assertIn("executable='gz_pose_to_odom.py'", simulation_adapter_launch)
         self.assertNotIn("' robot_name:='", description_launch)
         self.assertNotIn("' frame_prefix:='", description_launch)
-        self.assertNotIn("mappings={'robot_name': name, 'frame_prefix': f'{name}/'}", simulation_launch)
+        self.assertNotIn(
+            "mappings={'robot_name': name, 'frame_prefix': f'{name}/'}",
+            simulation_adapter_launch,
+        )
 
     def test_gazebo_matches_forklift_sensor_and_drive_contract(self):
         root = ET.parse(SDF).getroot()
