@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert Gazebo world dynamic pose output into planar ROS odometry and TF."""
+"""Convert Gazebo model pose output into planar ROS odometry and TF."""
 
 import math
 
@@ -39,7 +39,12 @@ class GazeboPoseToOdom(Node):
         self.previous = None
         self.odom_publisher = self.create_publisher(Odometry, 'odom', 10)
         self.tf_broadcaster = TransformBroadcaster(self)
-        self.create_subscription(TFMessage, '/gz/dynamic_pose', self.pose_callback, 10)
+        self.pose_subscription = self.create_subscription(
+            TFMessage,
+            'ground_truth/pose',
+            self.pose_callback,
+            10,
+        )
         self.timer = self.create_timer(1.0 / frequency, self.publish_odom)
 
     def pose_callback(self, msg):

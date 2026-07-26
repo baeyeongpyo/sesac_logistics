@@ -213,6 +213,40 @@ class MecanumSourceModelTest(unittest.TestCase):
         self.assertNotIn('ignition.msgs', combined)
         self.assertNotIn('ignition:expressed_in', combined)
 
+    def test_ground_truth_uses_robot_specific_model_pose_publishers(self):
+        model = ET.parse(SDF).getroot().find('model')
+        pose_publisher = next(
+            plugin for plugin in model.findall('plugin')
+            if plugin.attrib.get('name') == 'gz::sim::systems::PosePublisher'
+        )
+
+        self.assertEqual(pose_publisher.attrib['filename'], 'gz-sim-pose-publisher-system')
+        expected = {
+            'publish_link_pose': 'false',
+            'publish_visual_pose': 'false',
+            'publish_collision_pose': 'false',
+            'publish_sensor_pose': 'false',
+            'publish_nested_model_pose': 'false',
+            'publish_model_pose': 'true',
+            'use_pose_vector_msg': 'true',
+            'update_frequency': '30',
+            'topic': '/${robot_name}/ground_truth/pose',
+        }
+        for tag, value in expected.items():
+            self.assertEqual(pose_publisher.findtext(tag), value)
+
+        bridges = '\n'.join(path.read_text() for path in BRIDGE_CONFIGS)
+        for robot_name, bridge_path in zip(('robot_1', 'robot_2'), BRIDGE_CONFIGS):
+            self.assertIn(
+                f'ros_topic_name: /{robot_name}/ground_truth/pose, '
+                f'gz_topic_name: /{robot_name}/ground_truth/pose, '
+                'ros_type_name: tf2_msgs/msg/TFMessage, '
+                'gz_type_name: gz.msgs.Pose_V, direction: GZ_TO_ROS',
+                bridge_path.read_text(),
+            )
+        self.assertNotIn('/gz/dynamic_pose', bridges)
+        self.assertNotIn('/world/mentorpi_warehouse/dynamic_pose/info', bridges)
+
 
 if __name__ == '__main__':
     unittest.main()
