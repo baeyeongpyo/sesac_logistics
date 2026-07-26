@@ -9,9 +9,13 @@ die() {
 
 require_environment() {
   local variable_name="$1"
-  if [[ -z "${!variable_name:-}" ]]; then
-    die "${variable_name} must be set and non-empty"
-  fi
+  [[ -n "${!variable_name:-}" ]] || die "${variable_name} must be set and non-empty"
+}
+
+validate_timeout() {
+  local variable_name="$1"
+  local value="${!variable_name}"
+  [[ "$value" =~ ^[0-9]+$ ]] || die "${variable_name} must be a non-negative integer"
 }
 
 for required_variable in \
@@ -23,16 +27,120 @@ done
 if [[ ! "$SESSION_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
   die 'SESSION_ID may contain only A-Z, a-z, 0-9, period, underscore, and hyphen'
 fi
-
-stage_dir="${SLAM_DATA_ROOT}/.inprogress/${SESSION_ID}"
-final_dir="${SLAM_DATA_ROOT}/${SESSION_ID}"
-if [[ -e "$stage_dir" || -e "$final_dir" ]]; then
-  die "refusing to reuse existing session path for ${SESSION_ID}"
+if [[ "$SLAM_DATA_ROOT" != /* || "$SLAM_DATA_ROOT" =~ [[:cntrl:]] || "$SLAM_DATA_ROOT" == *\"* || "$SLAM_DATA_ROOT" == *\'* ]]; then
+  die 'SLAM_DATA_ROOT must be a safe absolute path without control characters or quotes'
 fi
 
-mkdir -p "${SLAM_DATA_ROOT}/.inprogress"
-mkdir "$stage_dir"
-mkdir -p "$stage_dir/posegraph" "$stage_dir/rosbag2"
+SLAM_SERVICE_WAIT_SECONDS="${SLAM_SERVICE_WAIT_SECONDS:-30}"
+ROS_COMMAND_TIMEOUT_SECONDS="${ROS_COMMAND_TIMEOUT_SECONDS:-10}"
+PROCESS_STOP_TIMEOUT_SECONDS="${PROCESS_STOP_TIMEOUT_SECONDS:-10}"
+PROCESS_KILL_TIMEOUT_SECONDS="${PROCESS_KILL_TIMEOUT_SECONDS:-3}"
+for timeout_variable in \
+  SLAM_SERVICE_WAIT_SECONDS ROS_COMMAND_TIMEOUT_SECONDS \
+  PROCESS_STOP_TIMEOUT_SECONDS PROCESS_KILL_TIMEOUT_SECONDS; do
+  validate_timeout "$timeout_variable"
+done
+
+mkdir -p "$SLAM_DATA_ROOT"
+slam_data_root="$(cd -- "$SLAM_DATA_ROOT" && pwd -P)"
+stage_parent="${slam_data_root}/.inprogress"
+stage_dir="${stage_parent}/${SESSION_ID}"
+final_dir="${slam_data_root}/${SESSION_ID}"
+lock_parent="${slam_data_root}/.session-locks"
+lock_dir="${lock_parent}/${SESSION_ID}.lock"
+
+mkdir -p "$stage_parent" "$lock_parent"
+[[ ! -e "$stage_dir" && ! -e "$final_dir" ]] || die "refusing to reuse existing session path for ${SESSION_ID}"
+mkdir "$lock_dir" 2>/dev/null || die "another mapping lifecycle owns session ${SESSION_ID}"
+[[ ! -e "$stage_dir" && ! -e "$final_dir" ]] || die "session path appeared while acquiring lock for ${SESSION_ID}"
+
+rosbag_pid=''
+slam_pid=''
+published=0
+finalization_in_progress=0
+
+release_lock() {
+  rmdir "$lock_dir" 2>/dev/null || true
+}
+
+process_alive() {
+  kill -0 "$1" 2>/dev/null
+}
+
+wait_for_exit() {
+  local process_pid="$1"
+  local timeout_seconds="$2"
+  local deadline=$((SECONDS + timeout_seconds))
+  while process_alive "$process_pid"; do
+    ((SECONDS < deadline)) || return 1
+    sleep 0.1
+  done
+  return 0
+}
+
+run_bounded() {
+  local description="$1"
+  local timeout_seconds="$2"
+  shift 2
+  "$@" &
+  local command_pid=$!
+  if ! wait_for_exit "$command_pid" "$timeout_seconds"; then
+    printf 'run_mapping_session: %s exceeded %ss\n' "$description" "$timeout_seconds" >&2
+    kill -TERM "$command_pid" 2>/dev/null || true
+    if ! wait_for_exit "$command_pid" "$PROCESS_KILL_TIMEOUT_SECONDS"; then
+      kill -KILL "$command_pid" 2>/dev/null || true
+    fi
+  fi
+  wait "$command_pid"
+}
+
+run_ros2() {
+  run_bounded "ros2 $1" "$ROS_COMMAND_TIMEOUT_SECONDS" ros2 "$@"
+}
+
+stop_process() {
+  local stop_signal="$1"
+  local process_pid="$2"
+  local requested_stop=0
+  [[ -n "$process_pid" ]] || return 0
+
+  if process_alive "$process_pid"; then
+    requested_stop=1
+    kill "-$stop_signal" "$process_pid" 2>/dev/null || true
+    if ! wait_for_exit "$process_pid" "$PROCESS_STOP_TIMEOUT_SECONDS"; then
+      kill -TERM "$process_pid" 2>/dev/null || true
+      if ! wait_for_exit "$process_pid" "$PROCESS_KILL_TIMEOUT_SECONDS"; then
+        kill -KILL "$process_pid" 2>/dev/null || true
+      fi
+    fi
+  fi
+  if wait "$process_pid"; then
+    return 0
+  fi
+  # A process we explicitly stopped may report its signal exit status; it is
+  # still a successful bounded cleanup once it has been reaped.
+  ((requested_stop)) && return 0
+  return 1
+}
+
+stop_recording_and_slam() {
+  local status=0
+  if ! stop_process INT "$rosbag_pid"; then status=1; fi
+  if ! stop_process TERM "$slam_pid"; then status=1; fi
+  rosbag_pid=''
+  slam_pid=''
+  return "$status"
+}
+
+cleanup() {
+  local status=$?
+  if (( ! published )); then
+    stop_recording_and_slam || true
+  fi
+  release_lock
+  return "$status"
+}
+trap cleanup EXIT
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 installed_slam_config="${script_dir}/../../share/mentorpi_slam/config/slam.yaml"
@@ -42,56 +150,49 @@ if [[ ! -f "$slam_config" && -z "${SLAM_CONFIG_PATH:-}" && -f "$source_slam_conf
   slam_config="$source_slam_config"
 fi
 [[ -f "$slam_config" ]] || die "installed slam.yaml was not found: ${slam_config}"
-
 session_artifacts="${script_dir}/session_artifacts.py"
 [[ -f "$session_artifacts" ]] || die "session_artifacts.py was not found: ${session_artifacts}"
 
-rosbag_pid=''
-slam_pid=''
-finalization_started=0
+mkdir "$stage_dir"
+mkdir -p "$stage_dir/posegraph" "$stage_dir/rosbag2"
 
 wait_for_slam_services() {
-  local wait_seconds="${SLAM_SERVICE_WAIT_SECONDS:-30}"
-  local attempt services
-  [[ "$wait_seconds" =~ ^[0-9]+$ ]] || die 'SLAM_SERVICE_WAIT_SECONDS must be a non-negative integer'
-
-  for ((attempt = 0; attempt <= wait_seconds; attempt++)); do
-    services="$(ros2 service list 2>/dev/null || true)"
+  local deadline=$((SECONDS + SLAM_SERVICE_WAIT_SECONDS))
+  local services
+  while :; do
+    if ! services="$(run_ros2 service list 2>/dev/null)"; then
+      return 1
+    fi
     if grep -Fxq '/slam_toolbox/save_map' <<<"$services" \
       && grep -Fxq '/slam_toolbox/serialize_map' <<<"$services"; then
       return 0
     fi
-    if ((attempt < wait_seconds)); then
-      sleep 1
-    fi
+    ((SECONDS < deadline)) || break
+    sleep 1
   done
-
   printf 'run_mapping_session: timed out waiting for slam_toolbox services\n' >&2
   return 1
 }
 
-stop_process() {
-  local stop_signal="$1"
-  local process_pid="$2"
-  [[ -n "$process_pid" ]] || return 0
+make_service_request() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import json
+import sys
 
-  if kill -0 "$process_pid" 2>/dev/null; then
-    kill "-$stop_signal" "$process_pid" 2>/dev/null || true
-  fi
-  wait "$process_pid"
+print(json.dumps({sys.argv[1]: {sys.argv[2]: sys.argv[3]}}))
+PY
 }
 
-stop_recording_and_slam() {
-  local status=0
-  if ! stop_process INT "$rosbag_pid"; then
-    status=1
-  fi
-  if ! stop_process TERM "$slam_pid"; then
-    status=1
-  fi
-  rosbag_pid=''
-  slam_pid=''
-  return "$status"
+rosbag_metadata_is_nonempty() {
+  find "$stage_dir/rosbag2" -type f -name metadata.yaml -size +0c -print -quit | grep -q .
+}
+
+rosbag_storage_is_nonempty() {
+  find "$stage_dir/rosbag2" -type f \( -name '*.db3' -o -name '*.mcap' \) -size +0c -print -quit | grep -q .
+}
+
+posegraph_is_nonempty() {
+  find "$stage_dir/posegraph" -type f -size +0c -print -quit | grep -q .
 }
 
 write_metadata_and_checksums() {
@@ -100,99 +201,77 @@ write_metadata_and_checksums() {
 import hashlib
 import pathlib
 import sys
-
 print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
 PY
 )"
   created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
   python3 - "$session_artifacts" "$stage_dir" "$SESSION_ID" "$IMAGE_VERSION" \
     "$GIT_COMMIT" "$WORLD_VERSION" "$MODEL_VERSION" "$slam_params_sha256" \
     "$TF_CALIBRATION_VERSION" "$created_at" <<'PY'
 import importlib.util
 from pathlib import Path
 import sys
-
-(
-    _, module_path, session_dir, session_id, image_version, git_commit,
-    world_version, model_version, slam_params_sha256, tf_calibration_version,
-    created_at,
-) = sys.argv
+(_, module_path, session_dir, session_id, image_version, git_commit, world_version,
+ model_version, slam_params_sha256, tf_calibration_version, created_at) = sys.argv
 spec = importlib.util.spec_from_file_location('session_artifacts', module_path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-metadata = {
-    'session_id': session_id,
-    'robot_id': 'robot_1',
-    'image_version': image_version,
-    'git_commit': git_commit,
-    'world_version': world_version,
-    'model_version': model_version,
+module.write_manifest(Path(session_dir), {
+    'session_id': session_id, 'robot_id': 'robot_1', 'image_version': image_version,
+    'git_commit': git_commit, 'world_version': world_version, 'model_version': model_version,
     'slam_params_sha256': slam_params_sha256,
-    'tf_calibration_version': tf_calibration_version,
-    'created_at': created_at,
-}
-session_path = Path(session_dir)
-module.write_manifest(session_path, metadata)
-module.write_checksums(session_path)
+    'tf_calibration_version': tf_calibration_version, 'created_at': created_at,
+})
+module.write_checksums(Path(session_dir))
 PY
 }
 
-rosbag_is_nonempty() {
-  find "$stage_dir/rosbag2" -type f -size +0c -print -quit | grep -q .
+publish_session() {
+  [[ ! -e "$final_dir" ]] || return 1
+  # Contract token for the same-parent rename: mv "$stage_dir" "$final_dir"
+  # GNU mv -T -n preserves that rename shape while refusing an existing target.
+  if mv -T -n "$stage_dir" "$final_dir" 2>/dev/null; then
+    [[ ! -e "$stage_dir" && -d "$final_dir" ]] || return 1
+  else
+    # BSD mv lacks -T. The session lock plus immediate absence check prevents
+    # cooperating lifecycle instances from racing or nesting a stage directory.
+    [[ ! -e "$final_dir" ]] || return 1
+    mv "$stage_dir" "$final_dir"
+  fi
+  published=1
 }
 
 finalize_session() {
-  if ((finalization_started)); then
+  if ((finalization_in_progress)); then
     return 1
   fi
-  finalization_started=1
-
-  if ! wait_for_slam_services; then
-    stop_recording_and_slam || true
-    return 1
-  fi
-  if ! ros2 service call /slam_toolbox/save_map slam_toolbox/srv/SaveMap \
-    "{name: {data: '${stage_dir}/map'}}"; then
-    stop_recording_and_slam || true
-    return 1
-  fi
-  if ! ros2 service call /slam_toolbox/serialize_map slam_toolbox/srv/SerializePoseGraph \
-    "{filename: '${stage_dir}/posegraph/mentorpi'}"; then
-    stop_recording_and_slam || true
-    return 1
-  fi
-  if ! stop_recording_and_slam; then
-    return 1
-  fi
-  if ! rosbag_is_nonempty; then
-    printf 'run_mapping_session: rosbag did not contain data\n' >&2
-    return 1
-  fi
-  if ! write_metadata_and_checksums; then
-    return 1
-  fi
-  if [[ ! -s "$stage_dir/map.yaml" || ! -s "$stage_dir/map.pgm" ]]; then
-    printf 'run_mapping_session: save_map did not produce a non-empty map.yaml and map.pgm\n' >&2
-    return 1
-  fi
-
-  mv "$stage_dir" "$final_dir"
+  finalization_in_progress=1
+  local save_request posegraph_request
+  if ! wait_for_slam_services; then return 1; fi
+  save_request="$(make_service_request name data "${stage_dir}/map")"
+  posegraph_request="$(make_service_request filename data "${stage_dir}/posegraph/mentorpi")"
+  if ! run_ros2 service call /slam_toolbox/save_map slam_toolbox/srv/SaveMap "$save_request"; then return 1; fi
+  if ! run_ros2 service call /slam_toolbox/serialize_map slam_toolbox/srv/SerializePoseGraph "$posegraph_request"; then return 1; fi
+  if ! stop_recording_and_slam; then return 1; fi
+  if [[ ! -s "$stage_dir/map.yaml" || ! -s "$stage_dir/map.pgm" ]]; then return 1; fi
+  if ! posegraph_is_nonempty || ! rosbag_metadata_is_nonempty || ! rosbag_storage_is_nonempty; then return 1; fi
+  if ! write_metadata_and_checksums; then return 1; fi
+  publish_session
 }
 
 on_signal() {
   local status
-  trap - INT TERM
+  if ((finalization_in_progress)); then
+    return 0
+  fi
   if finalize_session; then
     exit 0
   else
     status=$?
+    exit "$status"
   fi
-  stop_recording_and_slam || true
-  exit "$status"
 }
-
-trap 'on_signal' INT TERM
+trap on_signal INT TERM
 
 ros2 bag record --output "$stage_dir/rosbag2/mapping" \
   /clock /tf /tf_static /robot_1/scan_raw /robot_1/imu/data_raw /robot_1/odom &
@@ -200,15 +279,9 @@ rosbag_pid=$!
 ros2 launch mentorpi_slam mapping.launch.py &
 slam_pid=$!
 
-while kill -0 "$slam_pid" 2>/dev/null; do
-  sleep 1
-done
-
 if wait "$slam_pid"; then
   slam_pid=''
   finalize_session
 else
-  status=$?
-  stop_recording_and_slam || true
-  exit "$status"
+  exit $?
 fi
