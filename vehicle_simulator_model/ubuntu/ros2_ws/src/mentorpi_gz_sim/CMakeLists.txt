@@ -8,6 +8,8 @@ if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_harmonic_launch_contract
     test/test_harmonic_launch_contract.py)
+  ament_add_pytest_test(test_gz_pose_to_odom
+    test/test_gz_pose_to_odom.py)
 endif()
 
 ament_package()

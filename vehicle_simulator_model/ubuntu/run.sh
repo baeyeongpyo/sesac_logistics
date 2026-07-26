@@ -82,13 +82,27 @@ case "${1:-}" in
       "$ROS_SETUP && ros2 topic list"
     ;;
   test)
-    python3 -m unittest \
-      "$BUNDLE_DIR/test/test_bundle.py" \
-      "$BUNDLE_DIR/ros2_ws/src/mentorpi_description/test/test_original_model.py" \
-      "$BUNDLE_DIR/ros2_ws/src/mentorpi_gz_sim/test/test_gz_pose_to_odom.py" \
-      "$BUNDLE_DIR/ros2_ws/src/mentorpi_gz_sim/test/test_harmonic_launch_contract.py" -v
+    printf 'mentorpi test stage=host-static\n'
+    python3 "$BUNDLE_DIR/test/test_bundle.py" -v
+    python3 \
+      "$BUNDLE_DIR/ros2_ws/src/mentorpi_description/test/test_original_model.py" -v
+    python3 -m unittest discover \
+      -s "$BUNDLE_DIR/ros2_ws/src/mentorpi_gz_sim/test" \
+      -p 'test_harmonic_launch_contract.py' -v
+
+    printf 'mentorpi test stage=compose-config\n'
+    "${COMPOSE[@]}" config --quiet
+    RENDER_GID="${RENDER_GID:-0}" \
+      "${COMPOSE[@]}" -f "$BUNDLE_DIR/compose.gpu.yaml" config --quiet
+
+    printf 'mentorpi test stage=runtime-ctest\n'
     "${COMPOSE[@]}" run --rm --no-deps gazebo-server bash -lc \
-      'gz sim --versions && ros2 pkg prefix mentorpi_description && ros2 pkg prefix mentorpi_gz_sim'
+      "$ROS_SETUP && cd /opt/mentorpi_ws && \
+       gz sim --versions && \
+       ros2 pkg prefix mentorpi_description && \
+       ros2 pkg prefix mentorpi_gz_sim && \
+       colcon test --packages-select mentorpi_gz_sim --event-handlers console_direct+ && \
+       colcon test-result --verbose"
     ;;
   fork-up)
     adapter_id="$("${COMPOSE[@]}" ps -q sim-adapter)"

@@ -4,9 +4,53 @@ from pathlib import Path
 
 BUNDLE = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = BUNDLE.parents[1]
+GAZEBO_CMAKE = BUNDLE / 'ros2_ws/src/mentorpi_gz_sim/CMakeLists.txt'
 
 
 class DeployOnlyBundleTest(unittest.TestCase):
+    def test_odom_and_launch_contracts_are_registered_with_ctest(self):
+        cmake = GAZEBO_CMAKE.read_text()
+        for name, path in (
+            ('test_harmonic_launch_contract', 'test/test_harmonic_launch_contract.py'),
+            ('test_gz_pose_to_odom', 'test/test_gz_pose_to_odom.py'),
+        ):
+            self.assertIn(f'ament_add_pytest_test({name}', cmake)
+            self.assertIn(path, cmake)
+
+    def test_test_command_separates_host_static_and_runtime_ros_checks(self):
+        script = (BUNDLE / 'run.sh').read_text()
+        test_command = script.split('  test)', 1)[1].split('  fork-up)', 1)[0]
+
+        for static_test in (
+            'test/test_bundle.py',
+            'test/test_original_model.py',
+            'test_harmonic_launch_contract.py',
+        ):
+            self.assertIn(static_test, test_command)
+        self.assertIn('python3 "$BUNDLE_DIR/test/test_bundle.py" -v', test_command)
+        self.assertIn('python3 -m unittest discover', test_command)
+        self.assertIn("-p 'test_harmonic_launch_contract.py'", test_command)
+        self.assertNotIn('test/test_gz_pose_to_odom.py', test_command)
+        for runtime_check in (
+            'gz sim --versions',
+            'ros2 pkg prefix mentorpi_description',
+            'ros2 pkg prefix mentorpi_gz_sim',
+            'cd /opt/mentorpi_ws',
+            'colcon test --packages-select mentorpi_gz_sim',
+            'colcon test-result --verbose',
+        ):
+            self.assertIn(runtime_check, test_command)
+        for stage in ('host-static', 'compose-config', 'runtime-ctest'):
+            self.assertIn(f'mentorpi test stage={stage}', test_command)
+
+    def test_test_command_validates_base_and_gpu_compose_configs(self):
+        script = (BUNDLE / 'run.sh').read_text()
+        test_command = script.split('  test)', 1)[1].split('  fork-up)', 1)[0]
+
+        self.assertGreaterEqual(test_command.count('config --quiet'), 2)
+        self.assertIn('compose.gpu.yaml', test_command)
+        self.assertIn('RENDER_GID="${RENDER_GID:-0}"', test_command)
+
     def test_sim_adapter_configures_one_way_relay_host(self):
         compose = (BUNDLE / 'compose.yaml').read_text()
         gazebo_server = compose.split('  gazebo-server:', 1)[1].split(
