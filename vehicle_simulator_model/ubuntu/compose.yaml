@@ -10,13 +10,16 @@ x-runtime: &runtime
   image: "${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"
   platform: ${TARGET_PLATFORM:-linux/amd64}
   environment: *runtime-environment
+  restart: unless-stopped
+
+x-runtime-networked: &runtime-networked
+  <<: *runtime
   networks:
     - mentorpi
-  restart: unless-stopped
 
 services:
   gazebo-server:
-    <<: *runtime
+    <<: *runtime-networked
     environment:
       <<: *runtime-environment
       SERVICE_NAME: gazebo-server
@@ -29,7 +32,8 @@ services:
       start_period: 5s
 
   sim-adapter:
-    <<: *runtime
+    <<: *runtime-networked
+    ipc: shareable
     environment:
       <<: *runtime-environment
       SERVICE_NAME: sim-adapter
@@ -46,7 +50,7 @@ services:
       start_period: 10s
 
   slam-data-init:
-    <<: *runtime
+    <<: *runtime-networked
     profiles: [mapping]
     restart: "no"
     user: "0:0"
@@ -61,6 +65,8 @@ services:
     <<: *runtime
     profiles: [mapping]
     restart: "no"
+    ipc: "service:sim-adapter"
+    network_mode: "service:sim-adapter"
     environment:
       <<: *runtime-environment
       SERVICE_NAME: slam-mapper
@@ -80,7 +86,7 @@ services:
       - slam-data:/slam-data
 
   slam-inspector:
-    <<: *runtime
+    <<: *runtime-networked
     profiles: [mapping]
     restart: "no"
     environment:

@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import textwrap
@@ -188,6 +189,32 @@ class DeployOnlyBundleTest(unittest.TestCase):
         self.assertNotIn('GZ_RELAY_HOST', mapper)
         self.assertIn('slam-data:', compose)
         self.assertIn('name: mentorpi-slam-data', compose)
+
+    def test_mapper_shares_adapter_network_and_ipc_for_cross_container_ros_payload(self):
+        result = subprocess.run(
+            [
+                'docker',
+                'compose',
+                '-f',
+                str(BUNDLE / 'compose.yaml'),
+                '--profile',
+                'mapping',
+                'config',
+                '--format',
+                'json',
+            ],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        services = json.loads(result.stdout)['services']
+        adapter = services['sim-adapter']
+        mapper = services['slam-mapper']
+
+        self.assertEqual(adapter.get('ipc'), 'shareable')
+        self.assertEqual(mapper.get('ipc'), 'service:sim-adapter')
+        self.assertEqual(mapper.get('network_mode'), 'service:sim-adapter')
+        self.assertNotIn('networks', mapper)
 
     def test_mapping_volume_initializer_only_owns_volume_root_before_mapper(self):
         compose = (BUNDLE / 'compose.yaml').read_text()

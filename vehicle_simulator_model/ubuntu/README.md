@@ -60,6 +60,20 @@ Docker Engine 및 Docker Compose v2가 설치된 Linux 서버에서 실행한다
 서버 health는 진행 중인 stats payload 2개를, adapter health는 양 robot의 scan·odom
 payload와 robot별 odom-to-base TF를 확인한다. topic 이름만 존재하는 상태는 healthy가 아니다.
 
+ROS 2 컨테이너 경계는 Fast DDS의 discovery와 shared-memory data path를 함께 보존하도록
+project 내부에서만 결합한다. `sim-adapter`는 `ipc: shareable`인 namespace owner이고,
+`slam-mapper`는 `network_mode: service:sim-adapter`와 `ipc: service:sim-adapter`로 그
+network·IPC namespace에 합류한다. 별도 bridge namespace에서는 publisher discovery가,
+network만 공유하고 IPC를 분리하면 실제 sensor payload가 끊길 수 있기 때문이다. 이 설정은
+host network/host IPC를 사용하거나 포트를 공개하지 않으며, 신뢰된 mapper 한 서비스만 adapter와
+결합한다. `gazebo-server`는 계속 별도 컨테이너로 내부 `mentorpi` network에 연결되고 기존
+`GZ_RELAY_HOST=gazebo-server` 경로를 유지한다.
+
+따라서 mapper는 adapter보다 먼저 시작할 수 없고, 종료할 때도 mapper finalization 후 adapter를
+정지해야 한다. 배포용 Compose를 확장할 때 mapper의 두 `service:sim-adapter` 설정 중 하나만
+제거하지 않는다. 별도 network/IPC 경계가 필요하면 Fast DDS transport/discovery 설정을 명시하고
+scan·odom·TF·clock 및 `/map` 실제 payload를 다시 검증해야 한다.
+
 `./run.sh fork-up`은 실행 중인 `sim-adapter`가 healthy일 때만 10초 제한 안에서 fork
 command를 publish한다. 서비스가 없거나 unhealthy면 새 container를 만들지 않고 실패한다.
 

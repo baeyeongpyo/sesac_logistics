@@ -186,3 +186,81 @@ volume: only .inprogress/signal-diagnose-r3 remained; no final session was publi
 This proves PID 1 signal delivery and bounded lifecycle failure, not a replacement
 for the full Task 5 mapping-success E2E. The existing `mentorpi-slam-data` volume
 was inspected as `preserved volume=mentorpi-slam-data`; `smoke-002` was not touched.
+
+## Fix round 4/5 (2026-07-26)
+
+Task 5's `smoke-003` staging bag had zero messages because ROS 2 traffic stopped at
+the `sim-adapter` container boundary. The failure was reproduced before changing
+Compose, using only bounded debug projects:
+
+| Adapter/probe boundary | Discovery | scan/odom/TF/clock payload |
+|---|---:|---:|
+| Same internal bridge, separate network and IPC namespaces | no | no |
+| Same internal bridge, shared IPC only | no | no |
+| Shared adapter network namespace, separate IPC namespaces | yes | no (all echoes timed out with 124) |
+| Shared adapter network and IPC namespaces | yes | yes (all echoes exited 0) |
+
+In the baseline, `sim-adapter` was healthy and its own bounded
+`ros2 topic echo --once` received real `/robot_1/scan_raw`, `/robot_1/odom`,
+`/tf`, and `/clock` payloads. A separate runtime container on the same Compose
+bridge saw only `/parameter_events` and `/rosout`. Sharing only the network
+namespace exposed all publishers and their QoS (the scan publisher was RELIABLE)
+but still delivered no data. Sharing both namespaces delivered all four payloads.
+The containers use `rmw_fastrtps_cpp` and the same image machine ID. The observed
+root cause is therefore the combined Fast DDS discovery/network and shared-memory
+IPC boundary, not a topic-name, ROS domain, or scan QoS mismatch.
+
+The regression contract was added first and runs the real Compose renderer:
+
+```bash
+python3 -m unittest \
+  vehicle_simulator_model.ubuntu.test.test_bundle.DeployOnlyBundleTest.test_mapper_shares_adapter_network_and_ipc_for_cross_container_ros_payload -v
+# RED: sim-adapter ipc was None instead of shareable
+```
+
+Compose now makes `sim-adapter` a project-local `ipc: shareable` owner and joins
+only `slam-mapper` to it with both `network_mode: service:sim-adapter` and
+`ipc: service:sim-adapter`. The shared runtime anchor was split so the mapper has
+no mutually exclusive separate network attachment. No host network, host IPC,
+published DDS/Gazebo port, static IP, or wider privilege was added.
+`gazebo-server` remains on the internal `mentorpi` network and the existing
+`GZ_RELAY_HOST=gazebo-server` health path is unchanged.
+
+The post-change runtime gate used Compose project
+`mentorpi-task4-r4-map-gate`, session `task4-r4-map-001`, and temporary volume
+`mentorpi-task4-r4-slam-data`. The production `mentorpi-slam-data` volume and
+`smoke-001`/`002`/`003` were not mounted:
+
+```text
+adapter hostname=fcdda3fcf986 ipc=ipc:[4026532561] net=net:[4026532567]
+mapper  hostname=fcdda3fcf986 ipc=ipc:[4026532561] net=net:[4026532567]
+scan_raw status=0; odom status=0; tf status=0; clock status=0
+/map frame_id=map resolution=0.05 width=184 height=158
+rosbag recorder: all six requested topics subscribed; recording
+```
+
+`/map` arrived on the first bounded poll without driving. Every diagnostic echo
+had a 15-second timeout and every map poll had a 5-second timeout. Cleanup sent a
+final zero Twist, signalled the mapper with SIGINT, removed the debug Compose
+containers/network, and removed only `mentorpi-task4-r4-slam-data`. No debug
+container, network, volume, override file, or session was retained.
+
+Fresh verification output:
+
+```bash
+python3 -m unittest \
+  vehicle_simulator_model/ubuntu/test/test_bundle.py \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_slam_contract.py \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_session_artifacts.py \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_mapping_session_script.py -v
+# Ran 38 tests in 20.569s — OK
+
+docker compose -f vehicle_simulator_model/ubuntu/compose.yaml config --quiet
+docker compose -f vehicle_simulator_model/ubuntu/compose.yaml --profile mapping config --quiet
+# both exited 0
+```
+
+Only Compose, its contract test, operator documentation, and this report changed,
+so the already-built `mentorpi-sim:harmonic` image did not require rebuilding.
+The `/map` payload gate is complete; full Task 5 artifact finalization remains a
+separate E2E responsibility.
