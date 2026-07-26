@@ -35,6 +35,7 @@ class MappingSessionScriptTest(unittest.TestCase):
         self.assertIn('finalization_in_progress', text)
         self.assertIn('json.dumps', text)
         self.assertIn('atomic_publish.py', text)
+        self.assertNotIn('service list', text)
         self.assertLess(text.index('trap cleanup EXIT'), text.index('session path appeared while acquiring lock'))
         self.assertNotIn('mv -T -n', text)
 
@@ -89,6 +90,40 @@ class MappingSessionScriptTest(unittest.TestCase):
             self.assertIn('posegraph/mentorpi.posegraph', checksum_paths)
             self.assertIn('rosbag2/mapping/metadata.yaml', checksum_paths)
             self.assertFalse((environment['data_root'] / '.inprogress' / 'session-1').exists())
+            self.assertEqual(
+                int(environment['input_check_count'].read_text()),
+                2,
+                'successful finalization must validate live inputs before saving and publishing',
+            )
+
+    def test_sigint_refuses_finalization_when_live_inputs_are_unavailable(self):
+        self.require_script()
+        with self.fake_ros_environment() as environment:
+            environment['env']['FAKE_INPUT_CHECK_FAIL_AT'] = '1'
+            process = self.start_script(environment)
+            self.wait_for_ready_processes(environment)
+
+            _, errors = self.interrupt_and_wait(process)
+
+            self.assertNotEqual(process.returncode, 0, errors)
+            self.assertTrue(environment['stage'].is_dir())
+            self.assertFalse((environment['data_root'] / 'session-1').exists())
+            self.assertEqual(list(environment['request_dir'].iterdir()), [])
+
+    def test_input_loss_during_finalization_prevents_atomic_publish(self):
+        self.require_script()
+        with self.fake_ros_environment() as environment:
+            environment['env']['FAKE_INPUT_CHECK_FAIL_AT'] = '2'
+            process = self.start_script(environment)
+            self.wait_for_ready_processes(environment)
+
+            _, errors = self.interrupt_and_wait(process)
+
+            self.assertNotEqual(process.returncode, 0, errors)
+            self.assertTrue(environment['stage'].is_dir())
+            self.assertFalse((environment['data_root'] / 'session-1').exists())
+            self.assertTrue((environment['request_dir'] / 'save_map.json').is_file())
+            self.assertTrue((environment['request_dir'] / 'serialize_map.json').is_file())
 
     def test_sigterm_aborts_without_ros_service_calls_or_publishing(self):
         self.require_script()
@@ -142,19 +177,18 @@ class MappingSessionScriptTest(unittest.TestCase):
                 self.assertFalse((environment['ready_dir'] / 'bag').exists())
 
     def test_service_timeout_and_ignoring_children_are_bounded_and_cleaned_up(self):
-        for hang_flag in ('FAKE_ROS_HANG_LIST', 'FAKE_ROS_HANG_CALL'):
-            with self.subTest(hang_flag), self.fake_ros_environment() as environment:
-                environment['env'].update({
-                    hang_flag: '1',
-                    'ROS_COMMAND_TIMEOUT_SECONDS': '1',
-                    'PROCESS_STOP_TIMEOUT_SECONDS': '1',
-                    'PROCESS_KILL_TIMEOUT_SECONDS': '1',
-                })
-                process = self.start_script(environment)
-                self.wait_for_ready_processes(environment)
-                _, errors = self.interrupt_and_wait(process)
-                self.assertNotEqual(process.returncode, 0, errors)
-                self.assertFalse((environment['data_root'] / 'session-1').exists())
+        with self.fake_ros_environment() as environment:
+            environment['env'].update({
+                'FAKE_ROS_HANG_CALL': '1',
+                'ROS_COMMAND_TIMEOUT_SECONDS': '1',
+                'PROCESS_STOP_TIMEOUT_SECONDS': '1',
+                'PROCESS_KILL_TIMEOUT_SECONDS': '1',
+            })
+            process = self.start_script(environment)
+            self.wait_for_ready_processes(environment)
+            _, errors = self.interrupt_and_wait(process)
+            self.assertNotEqual(process.returncode, 0, errors)
+            self.assertFalse((environment['data_root'] / 'session-1').exists())
 
         with self.fake_ros_environment() as environment:
             environment['env'].update({
@@ -246,19 +280,21 @@ class MappingSessionScriptTest(unittest.TestCase):
             ready_dir = root / 'ready'
             pid_dir = root / 'pids'
             request_dir = root / 'requests'
+            input_check_count = root / 'input-check-count'
             data_root = root / 'sessions'
             bin_dir.mkdir()
             ready_dir.mkdir()
             pid_dir.mkdir()
             request_dir.mkdir()
+            input_check_count.write_text('0')
             fake_ros = bin_dir / 'ros2'
             fake_ros.write_text(textwrap.dedent('''\
             #!/usr/bin/env bash
             set -euo pipefail
             case "$1 $2" in
               'service list')
-                if [[ "${FAKE_ROS_HANG_LIST:-}" == 1 ]]; then exec python3 -c 'import time; time.sleep(60)'; fi
-                printf '%s\\n' /slam_toolbox/save_map /slam_toolbox/serialize_map
+                printf 'service graph introspection is unavailable\\n' >&2
+                exit 88
                 ;;
               'service call')
                 if [[ "${FAKE_ROS_HANG_CALL:-}" == 1 ]]; then exec python3 -c 'import time; time.sleep(60)'; fi
@@ -317,6 +353,19 @@ while True:
             esac
             '''))
             fake_ros.chmod(0o755)
+            fake_input_checker = bin_dir / 'mentorpi-healthcheck'
+            fake_input_checker.write_text(textwrap.dedent('''\
+                #!/usr/bin/env bash
+                set -euo pipefail
+                [[ "${1:-}" == adapter ]] || exit 64
+                count="$(cat "$FAKE_INPUT_CHECK_COUNT")"
+                count=$((count + 1))
+                printf '%s' "$count" > "$FAKE_INPUT_CHECK_COUNT"
+                if [[ "${FAKE_INPUT_CHECK_FAIL_AT:-}" == "$count" ]]; then
+                  exit 1
+                fi
+            '''))
+            fake_input_checker.chmod(0o755)
             fake_atomic_publisher = bin_dir / 'atomic_publish.py'
             fake_atomic_publisher.write_text(textwrap.dedent('''\
                 #!/usr/bin/env bash
@@ -340,15 +389,17 @@ while True:
                 'FAKE_READY_DIR': str(ready_dir),
                 'FAKE_PID_DIR': str(pid_dir),
                 'FAKE_REQUEST_DIR': str(request_dir),
+                'FAKE_INPUT_CHECK_COUNT': str(input_check_count),
                 'FAKE_STAGE': str(data_root / '.inprogress' / 'session-1'),
                 'FAKE_FINAL': str(data_root / 'session-1'),
+                'MAPPING_INPUT_CHECKER': str(fake_input_checker),
                 'ATOMIC_PUBLISHER': str(fake_atomic_publisher),
-                'SLAM_SERVICE_WAIT_SECONDS': '0',
                 'SLAM_CONFIG_PATH': str(PACKAGE / 'config' / 'slam.yaml'),
             })
             yield {
                 'env': environment, 'data_root': data_root, 'ready_dir': ready_dir,
                 'pid_dir': pid_dir, 'request_dir': request_dir,
+                'input_check_count': input_check_count,
                 'stage': data_root / '.inprogress' / 'session-1',
             }
 

@@ -32,13 +32,13 @@ if [[ "$SLAM_DATA_ROOT" != /* || "$SLAM_DATA_ROOT" =~ [[:cntrl:]] || "$SLAM_DATA
   die 'SLAM_DATA_ROOT must be a safe absolute path without control characters or quotes'
 fi
 
-SLAM_SERVICE_WAIT_SECONDS="${SLAM_SERVICE_WAIT_SECONDS:-30}"
 ROS_COMMAND_TIMEOUT_SECONDS="${ROS_COMMAND_TIMEOUT_SECONDS:-10}"
 PROCESS_STOP_TIMEOUT_SECONDS="${PROCESS_STOP_TIMEOUT_SECONDS:-10}"
 PROCESS_KILL_TIMEOUT_SECONDS="${PROCESS_KILL_TIMEOUT_SECONDS:-3}"
+MAPPING_INPUT_CHECK_TIMEOUT_SECONDS="${MAPPING_INPUT_CHECK_TIMEOUT_SECONDS:-12}"
 for timeout_variable in \
-  SLAM_SERVICE_WAIT_SECONDS ROS_COMMAND_TIMEOUT_SECONDS \
-  PROCESS_STOP_TIMEOUT_SECONDS PROCESS_KILL_TIMEOUT_SECONDS; do
+  ROS_COMMAND_TIMEOUT_SECONDS PROCESS_STOP_TIMEOUT_SECONDS PROCESS_KILL_TIMEOUT_SECONDS \
+  MAPPING_INPUT_CHECK_TIMEOUT_SECONDS; do
   validate_timeout "$timeout_variable"
 done
 
@@ -165,27 +165,11 @@ session_artifacts="${script_dir}/session_artifacts.py"
 [[ -f "$session_artifacts" ]] || die "session_artifacts.py was not found: ${session_artifacts}"
 atomic_publisher="${ATOMIC_PUBLISHER:-${script_dir}/atomic_publish.py}"
 [[ -x "$atomic_publisher" ]] || die "atomic_publish.py was not executable: ${atomic_publisher}"
+mapping_input_checker="${MAPPING_INPUT_CHECKER:-/usr/local/bin/mentorpi-healthcheck}"
+[[ -x "$mapping_input_checker" ]] || die "mapping input checker was not executable: ${mapping_input_checker}"
 
 mkdir "$stage_dir"
 mkdir -p "$stage_dir/posegraph" "$stage_dir/rosbag2"
-
-wait_for_slam_services() {
-  local deadline=$((SECONDS + SLAM_SERVICE_WAIT_SECONDS))
-  local services
-  while :; do
-    if ! services="$(run_ros2 service list 2>/dev/null)"; then
-      return 1
-    fi
-    if grep -Fxq '/slam_toolbox/save_map' <<<"$services" \
-      && grep -Fxq '/slam_toolbox/serialize_map' <<<"$services"; then
-      return 0
-    fi
-    ((SECONDS < deadline)) || break
-    sleep 1
-  done
-  printf 'run_mapping_session: timed out waiting for slam_toolbox services\n' >&2
-  return 1
-}
 
 make_save_map_request() {
   python3 - "$1" <<'PY'
@@ -215,6 +199,13 @@ rosbag_storage_is_nonempty() {
 
 posegraph_is_nonempty() {
   find "$stage_dir/posegraph" -type f -size +0c -print -quit | grep -q .
+}
+
+validate_mapping_inputs() {
+  run_bounded \
+    'mapping input continuity check' \
+    "$MAPPING_INPUT_CHECK_TIMEOUT_SECONDS" \
+    "$mapping_input_checker" adapter
 }
 
 write_metadata_and_checksums() {
@@ -274,7 +265,7 @@ finalize_session() {
   finalization_in_progress=1
   local save_request posegraph_request
   (( ! abort_requested )) || return 1
-  if ! wait_for_slam_services; then return 1; fi
+  if ! validate_mapping_inputs; then return 1; fi
   (( ! abort_requested )) || return 1
   save_request="$(make_save_map_request "${stage_dir}/map")"
   posegraph_request="$(make_posegraph_request "${stage_dir}/posegraph/mentorpi")"
@@ -287,6 +278,8 @@ finalize_session() {
   if [[ ! -s "$stage_dir/map.yaml" || ! -s "$stage_dir/map.pgm" ]]; then return 1; fi
   if ! posegraph_is_nonempty || ! rosbag_metadata_is_nonempty || ! rosbag_storage_is_nonempty; then return 1; fi
   if ! write_metadata_and_checksums; then return 1; fi
+  (( ! abort_requested )) || return 1
+  if ! validate_mapping_inputs; then return 1; fi
   (( ! abort_requested )) || return 1
   publish_session
 }

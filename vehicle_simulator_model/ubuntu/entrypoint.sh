@@ -13,17 +13,7 @@ printf 'mentorpi service=%s image_version=%s session_id=%s robot_ids=%s\n' \
   "${SESSION_ID:-none}" \
   "${ROBOT_IDS:-robot_1,robot_2}"
 
-valid_ipv4() {
-  local candidate="$1"
-  local first second third fourth octet
-
-  [[ "$candidate" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
-  IFS='.' read -r first second third fourth <<<"$candidate"
-  for octet in "$first" "$second" "$third" "$fourth"; do
-    ((10#$octet <= 255)) || return 1
-  done
-  ((10#$first >= 1 && 10#$first <= 223)) || return 1
-}
+source /usr/local/bin/mentorpi-dds-env
 
 if [[ -n "${GZ_RELAY_HOST:-}" ]]; then
   readonly GZ_RELAY_RESOLVE_ATTEMPTS=20

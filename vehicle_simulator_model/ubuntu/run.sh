@@ -4,7 +4,7 @@ set -euo pipefail
 BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export MENTORPI_IMAGE="${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"
 COMPOSE=(docker compose -f "$BUNDLE_DIR/compose.yaml")
-ROS_SETUP='source /opt/ros/humble/setup.bash && source /opt/mentorpi_ws/install/setup.bash'
+ROS_SETUP='source /usr/local/bin/mentorpi-dds-env && source /opt/ros/humble/setup.bash && source /opt/mentorpi_ws/install/setup.bash'
 
 prepare_gpu() {
   local render_node=''
@@ -57,9 +57,9 @@ validate_mapping_stop_timeout() {
   fi
 }
 
-validate_mapping_abort_timeout() {
-  if [[ ! "$MAPPING_ABORT_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
-    echo 'MAPPING_ABORT_TIMEOUT_SECONDS must be a non-negative integer' >&2
+validate_mapping_reconnect_timeout() {
+  if [[ ! "$MAPPING_RECONNECT_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
+    echo 'MAPPING_RECONNECT_TIMEOUT_SECONDS must be a non-negative integer' >&2
     return 2
   fi
 }
@@ -92,81 +92,38 @@ wait_for_mapper_exit() {
   done
 }
 
-mapping_owner_error=''
+wait_for_healthy_adapter() {
+  local deadline=$((SECONDS + MAPPING_RECONNECT_TIMEOUT_SECONDS))
+  local adapter_id adapter_state
+  local reconnecting=0
 
-mapper_has_current_healthy_owner() {
-  local mapper_id="$1"
-  local adapter_id adapter_state mapper_binding adapter_namespace mapper_namespace
-  local mapper_running mapper_network_owner mapper_ipc_owner expected_owner
-
-  adapter_id="$("${COMPOSE[@]}" ps -q sim-adapter)"
-  if [[ -z "$adapter_id" ]]; then
-    mapping_owner_error='current sim-adapter is not running'
-    return 1
-  fi
-  adapter_state="$(
-    docker inspect --format \
-      '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
-      "$adapter_id" 2>/dev/null || true
-  )"
-  if [[ "$adapter_state" != 'true healthy' ]]; then
-    mapping_owner_error="current sim-adapter is not healthy (container ${adapter_id}, state ${adapter_state:-unknown})"
-    return 1
-  fi
-
-  mapper_binding="$(
-    docker inspect --format \
-      '{{.State.Running}} {{.HostConfig.NetworkMode}} {{.HostConfig.IpcMode}}' \
-      "$mapper_id" 2>/dev/null || true
-  )"
-  read -r mapper_running mapper_network_owner mapper_ipc_owner <<<"$mapper_binding"
-  expected_owner="container:${adapter_id}"
-  if [[ "$mapper_running" != true \
-    || "$mapper_network_owner" != "$expected_owner" \
-    || "$mapper_ipc_owner" != "$expected_owner" ]]; then
-    mapping_owner_error="slam-mapper is not joined to the current healthy sim-adapter network and IPC namespaces (expected ${expected_owner}, network ${mapper_network_owner:-unknown}, IPC ${mapper_ipc_owner:-unknown})"
-    return 1
-  fi
-
-  adapter_namespace="$(
-    docker exec "$adapter_id" bash -c \
-      'printf "%s %s\n" "$(readlink /proc/1/ns/net)" "$(readlink /proc/1/ns/ipc)"' \
-      2>/dev/null || true
-  )"
-  mapper_namespace="$(
-    docker exec "$mapper_id" bash -c \
-      'printf "%s %s\n" "$(readlink /proc/1/ns/net)" "$(readlink /proc/1/ns/ipc)"' \
-      2>/dev/null || true
-  )"
-  if [[ ! "$adapter_namespace" =~ ^net:\[[0-9]+\][[:space:]]+ipc:\[[0-9]+\]$ \
-    || "$mapper_namespace" != "$adapter_namespace" ]]; then
-    mapping_owner_error="actual network and IPC namespace identities differ (adapter ${adapter_namespace:-unknown}, mapper ${mapper_namespace:-unknown})"
-    return 1
-  fi
-}
-
-abort_invalid_mapping() {
-  local mapper_id="$1"
-  local mapper_exit_code=''
-
-  echo "mapping session is invalid: ${mapping_owner_error}; aborting without finalization" >&2
-  "${COMPOSE[@]}" kill -s SIGTERM slam-mapper >/dev/null 2>&1 || true
-  if ! mapper_exit_code="$(
-    wait_for_mapper_exit "$mapper_id" "$MAPPING_ABORT_TIMEOUT_SECONDS" 'abort'
-  )"; then
-    echo 'forcing slam-mapper cleanup after bounded SIGTERM abort' >&2
-    "${COMPOSE[@]}" kill -s SIGKILL slam-mapper >/dev/null 2>&1 || true
-    if ! mapper_exit_code="$(
-      wait_for_mapper_exit "$mapper_id" "$MAPPING_ABORT_TIMEOUT_SECONDS" 'forced abort'
-    )"; then
-      echo 'slam-mapper abort could not be confirmed; leaving simulation services running' >&2
+  while :; do
+    adapter_id="$("${COMPOSE[@]}" ps -q sim-adapter)"
+    adapter_state=''
+    if [[ -n "$adapter_id" ]]; then
+      adapter_state="$(
+        docker inspect --format \
+          '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+          "$adapter_id" 2>/dev/null || true
+      )"
+    fi
+    if [[ "$adapter_state" == 'true healthy' ]]; then
+      if ((reconnecting)); then
+        printf 'mentorpi mapping adapter_state=recovered container=%s\n' "$adapter_id"
+      fi
+      return 0
+    fi
+    if ((!reconnecting)); then
+      printf 'mentorpi mapping adapter_state=reconnecting state=%s\n' \
+        "${adapter_state:-not-running}"
+      reconnecting=1
+    fi
+    if ((SECONDS >= deadline)); then
+      echo "adapter recovery timed out after ${MAPPING_RECONNECT_TIMEOUT_SECONDS}s; mapper and simulation services remain running" >&2
       return 1
     fi
-  fi
-  if ! "${COMPOSE[@]}" stop gazebo-server sim-adapter; then
-    echo 'slam-mapper was aborted, but simulation service cleanup failed' >&2
-  fi
-  echo "slam-mapper aborted with exit code ${mapper_exit_code}; staged .inprogress data was not published" >&2
+    sleep 1
+  done
 }
 
 usage() {
@@ -200,17 +157,23 @@ case "${1:-}" in
       echo 'sim-up accepts only the optional gpu profile' >&2
       exit 2
     fi
-    "${COMPOSE[@]}" up -d gazebo-server sim-adapter
+    "${COMPOSE[@]}" up -d dds-discovery gazebo-server sim-adapter
     ;;
   down)
     "${COMPOSE[@]}" down
     ;;
   logs)
-    "${COMPOSE[@]}" logs -f gazebo-server sim-adapter
+    "${COMPOSE[@]}" logs -f dds-discovery gazebo-server sim-adapter
     ;;
   topics)
     "${COMPOSE[@]}" exec sim-adapter bash -lc \
-      "$ROS_SETUP && ros2 topic list"
+      'set -eo pipefail
+       export DDS_SUPER_CLIENT=1
+       source /usr/local/bin/mentorpi-dds-env
+       trap '\''rm -f -- "$DDS_SUPER_CLIENT_PROFILE"'\'' EXIT
+       source /opt/ros/humble/setup.bash
+       source /opt/mentorpi_ws/install/setup.bash
+       ros2 topic list --no-daemon'
     ;;
   test)
     printf 'mentorpi test stage=host-static\n'
@@ -232,7 +195,8 @@ case "${1:-}" in
        gz sim --versions && \
        ros2 pkg prefix mentorpi_description && \
        ros2 pkg prefix mentorpi_gz_sim && \
-       colcon test --packages-select mentorpi_gz_sim --event-handlers console_direct+ && \
+       ros2 pkg prefix mentorpi_slam && \
+       colcon test --packages-select mentorpi_gz_sim mentorpi_slam --event-handlers console_direct+ && \
        colcon test-result --verbose"
     ;;
   fork-up)
@@ -264,7 +228,7 @@ case "${1:-}" in
     export MODEL_VERSION="${MODEL_VERSION:-mentorpi-m1-v1}"
     export TF_CALIBRATION_VERSION="${TF_CALIBRATION_VERSION:-ground-truth-v1}"
     "${COMPOSE[@]}" --profile mapping up -d \
-      gazebo-server sim-adapter slam-mapper
+      dds-discovery gazebo-server sim-adapter slam-mapper
     ;;
   mapping-stop)
     if [[ "$#" -ne 1 ]]; then
@@ -272,9 +236,9 @@ case "${1:-}" in
       exit 2
     fi
     MAPPING_STOP_TIMEOUT_SECONDS="${MAPPING_STOP_TIMEOUT_SECONDS:-90}"
-    MAPPING_ABORT_TIMEOUT_SECONDS="${MAPPING_ABORT_TIMEOUT_SECONDS:-10}"
+    MAPPING_RECONNECT_TIMEOUT_SECONDS="${MAPPING_RECONNECT_TIMEOUT_SECONDS:-30}"
     validate_mapping_stop_timeout
-    validate_mapping_abort_timeout
+    validate_mapping_reconnect_timeout
     mapper_id="$("${COMPOSE[@]}" ps -q --all slam-mapper)"
     if [[ -z "$mapper_id" ]]; then
       echo 'slam-mapper is not running; no mapping finalization is in progress' >&2
@@ -301,17 +265,14 @@ case "${1:-}" in
         echo "mapping finalization failed (slam-mapper exit code ${mapper_exit_code})" >&2
         finalization_status="$mapper_exit_code"
       fi
-      if ! "${COMPOSE[@]}" stop gazebo-server sim-adapter; then
+      if ! "${COMPOSE[@]}" stop gazebo-server sim-adapter dds-discovery; then
         echo 'mapping finalization completed, but simulation service cleanup failed' >&2
         [[ "$finalization_status" == 0 ]] && exit 6
       fi
       exit "$finalization_status"
     fi
 
-    if ! mapper_has_current_healthy_owner "$mapper_id"; then
-      if ! abort_invalid_mapping "$mapper_id"; then
-        exit 8
-      fi
+    if ! wait_for_healthy_adapter; then
       exit 7
     fi
 
@@ -334,7 +295,7 @@ case "${1:-}" in
       echo "mapping finalization failed (slam-mapper exit code ${mapper_exit_code})" >&2
       finalization_status="$mapper_exit_code"
     fi
-    if ! "${COMPOSE[@]}" stop gazebo-server sim-adapter; then
+    if ! "${COMPOSE[@]}" stop gazebo-server sim-adapter dds-discovery; then
       echo 'mapping finalization completed, but simulation service cleanup failed' >&2
       [[ "$finalization_status" == 0 ]] && exit 6
     fi

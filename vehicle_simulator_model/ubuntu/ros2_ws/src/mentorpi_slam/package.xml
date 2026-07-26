@@ -3,4 +3,5 @@
   <description>SLAM Toolbox configuration for the MentorPi mapping leader.</description>
   <maintainer email="robotics@example.com">sesac</maintainer><license>Apache-2.0</license>
   <buildtool_depend>ament_cmake</buildtool_depend><exec_depend>slam_toolbox</exec_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
   <export><build_type>ament_cmake</build_type></export></package>

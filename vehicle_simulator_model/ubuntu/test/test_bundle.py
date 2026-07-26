@@ -22,6 +22,19 @@ class DeployOnlyBundleTest(unittest.TestCase):
             self.assertIn(f'ament_add_pytest_test({name}', cmake)
             self.assertIn(path, cmake)
 
+    def test_slam_lifecycle_contracts_are_registered_with_ctest(self):
+        slam_cmake = (
+            BUNDLE / 'ros2_ws/src/mentorpi_slam/CMakeLists.txt'
+        ).read_text()
+        for name, path in (
+            ('test_slam_contract', 'test/test_slam_contract.py'),
+            ('test_session_artifacts', 'test/test_session_artifacts.py'),
+            ('test_atomic_publish', 'test/test_atomic_publish.py'),
+            ('test_mapping_session_script', 'test/test_mapping_session_script.py'),
+        ):
+            self.assertIn(f'ament_add_pytest_test({name}', slam_cmake)
+            self.assertIn(path, slam_cmake)
+
     def test_test_command_separates_host_static_and_runtime_ros_checks(self):
         script = (BUNDLE / 'run.sh').read_text()
         test_command = script.split('  test)', 1)[1].split('  fork-up)', 1)[0]
@@ -40,8 +53,9 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'gz sim --versions',
             'ros2 pkg prefix mentorpi_description',
             'ros2 pkg prefix mentorpi_gz_sim',
+            'ros2 pkg prefix mentorpi_slam',
             'cd /opt/mentorpi_ws',
-            'colcon test --packages-select mentorpi_gz_sim',
+            'colcon test --packages-select mentorpi_gz_sim mentorpi_slam',
             'colcon test-result --verbose',
         ):
             self.assertIn(runtime_check, test_command)
@@ -82,6 +96,90 @@ class DeployOnlyBundleTest(unittest.TestCase):
         ):
             self.assertIn(required, entrypoint)
 
+    def test_dds_environment_helper_resolves_docker_dns_for_every_process(self):
+        helper = BUNDLE / 'dds_env.sh'
+        self.assertTrue(helper.is_file())
+        with TemporaryDirectory() as directory:
+            bin_dir = Path(directory)
+            fake_getent = bin_dir / 'getent'
+            fake_getent.write_text(textwrap.dedent('''\
+                #!/usr/bin/env bash
+                printf '10.22.0.5 STREAM dds-discovery\\n'
+            '''))
+            fake_getent.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update({
+                'PATH': f'{bin_dir}{os.pathsep}{environment["PATH"]}',
+                'DDS_DISCOVERY_HOST': 'dds-discovery',
+                'DDS_DISCOVERY_PORT': '11811',
+            })
+
+            result = subprocess.run(
+                [
+                    'bash', '-c',
+                    'source "$1" && printf "%s" "$ROS_DISCOVERY_SERVER"',
+                    'bash', str(helper),
+                ],
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, '10.22.0.5:11811')
+
+    def test_dds_environment_helper_builds_super_client_profile_for_cli(self):
+        helper = BUNDLE / 'dds_env.sh'
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            bin_dir = root / 'bin'
+            profile = root / 'super-client.xml'
+            bin_dir.mkdir()
+            fake_getent = bin_dir / 'getent'
+            fake_getent.write_text(textwrap.dedent('''\
+                #!/usr/bin/env bash
+                printf '10.22.0.5 STREAM dds-discovery\\n'
+            '''))
+            fake_getent.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update({
+                'PATH': f'{bin_dir}{os.pathsep}{environment["PATH"]}',
+                'DDS_DISCOVERY_HOST': 'dds-discovery',
+                'DDS_DISCOVERY_PORT': '11811',
+                'DDS_SUPER_CLIENT': '1',
+                'DDS_SUPER_CLIENT_PROFILE': str(profile),
+            })
+
+            result = subprocess.run(
+                [
+                    'bash', '-c',
+                    'source "$1" && printf "%s\\n%s\\n%s" '
+                    '"${ROS_DISCOVERY_SERVER-unset}" '
+                    '"$FASTRTPS_DEFAULT_PROFILES_FILE" '
+                    '"$FASTDDS_DEFAULT_PROFILES_FILE"',
+                    'bash', str(helper),
+                ],
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
+
+            profile_text = profile.read_text()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ['unset', str(profile), str(profile)],
+        )
+        for required in (
+            'is_default_profile="true"',
+            '<discoveryProtocol>SUPER_CLIENT</discoveryProtocol>',
+            'prefix="44.53.00.5f.45.50.52.4f.53.49.4d.41"',
+            '<address>10.22.0.5</address>',
+            '<port>11811</port>',
+        ):
+            self.assertIn(required, profile_text)
+
     def test_healthchecks_require_payload_progression_for_both_robots(self):
         compose = (BUNDLE / 'compose.yaml').read_text()
         health_path = BUNDLE / 'healthcheck.sh'
@@ -116,6 +214,10 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'check_ros_payload robot_1 odom',
             'check_ros_payload robot_2 scan_raw',
             'check_ros_payload robot_2 odom',
+            'sensor_msgs/msg/LaserScan',
+            'nav_msgs/msg/Odometry',
+            'rosgraph_msgs/msg/Clock',
+            'check_clock_progress',
             'tf2_echo',
             'check_robot_tf robot_1',
             'check_robot_tf robot_2',
@@ -125,6 +227,10 @@ class DeployOnlyBundleTest(unittest.TestCase):
         ):
             self.assertIn(required, health)
         self.assertNotIn('ros2 topic list', health)
+
+    def test_runtime_image_contains_fastdds_discovery_cli(self):
+        dockerfile = (BUNDLE / 'Dockerfile').read_text()
+        self.assertIn('fastdds-tools', dockerfile)
 
     def test_gpu_profile_requires_readable_render_gid_preflight(self):
         gpu_compose = (BUNDLE / 'compose.gpu.yaml').read_text()
@@ -161,10 +267,11 @@ class DeployOnlyBundleTest(unittest.TestCase):
         script = (BUNDLE / 'run.sh').read_text()
         for required in (
             'topics',
+            'DDS_SUPER_CLIENT=1',
             'source /opt/ros/humble/setup.bash',
             'source /opt/mentorpi_ws/install/setup.bash',
             'exec sim-adapter bash -lc',
-            'ros2 topic list',
+            'ros2 topic list --no-daemon',
         ):
             self.assertIn(required, script)
 
@@ -190,7 +297,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
         self.assertIn('slam-data:', compose)
         self.assertIn('name: mentorpi-slam-data', compose)
 
-    def test_mapper_shares_adapter_network_and_ipc_for_cross_container_ros_payload(self):
+    def test_ros_services_use_stable_discovery_and_udp_without_namespace_sharing(self):
         result = subprocess.run(
             [
                 'docker',
@@ -208,16 +315,42 @@ class DeployOnlyBundleTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         services = json.loads(result.stdout)['services']
+        discovery = services['dds-discovery']
+        gazebo = services['gazebo-server']
         adapter = services['sim-adapter']
         mapper = services['slam-mapper']
 
-        self.assertEqual(adapter.get('ipc'), 'shareable')
+        self.assertEqual(
+            discovery['command'],
+            [
+                'fastdds', 'discovery', '-i', '0',
+                '-l', '0.0.0.0', '-p', '11811',
+            ],
+        )
+        self.assertNotIn('ports', discovery)
+        self.assertEqual(discovery.get('restart'), 'unless-stopped')
+        for service in (adapter, mapper):
+            self.assertIn('mentorpi', service.get('networks', {}))
+            self.assertNotIn('ipc', service)
+            self.assertNotIn('network_mode', service)
+            self.assertEqual(
+                service['environment']['DDS_DISCOVERY_HOST'],
+                'dds-discovery',
+            )
+            self.assertEqual(service['environment']['DDS_DISCOVERY_PORT'], '11811')
+            self.assertNotIn('ROS_DISCOVERY_SERVER', service['environment'])
+            self.assertEqual(
+                service['environment']['FASTDDS_BUILTIN_TRANSPORTS'],
+                'UDPv4',
+            )
+        for non_client in (discovery, gazebo, services['slam-data-init'],
+                           services['slam-inspector']):
+            self.assertNotIn('DDS_DISCOVERY_HOST', non_client['environment'])
+            self.assertNotIn('ROS_DISCOVERY_SERVER', non_client['environment'])
+
         self.assertEqual(adapter.get('restart'), 'unless-stopped')
-        self.assertEqual(mapper.get('ipc'), 'service:sim-adapter')
-        self.assertEqual(mapper.get('network_mode'), 'service:sim-adapter')
         self.assertEqual(mapper.get('restart'), 'no')
         self.assertEqual(mapper.get('stop_grace_period'), '30s')
-        self.assertNotIn('networks', mapper)
 
     def test_mapping_volume_initializer_only_owns_volume_root_before_mapper(self):
         compose = (BUNDLE / 'compose.yaml').read_text()
@@ -326,65 +459,39 @@ class DeployOnlyBundleTest(unittest.TestCase):
         self.assertIn('finalization status is unknown', result.stderr)
         self.assertEqual(operations, ['sigint'])
 
-    def test_mapping_stop_sigint_requires_healthy_current_namespace_owner(self):
+    def test_mapping_stop_sigint_after_current_adapter_is_healthy(self):
         result, operations = self.run_mapping_stop_with_fake_docker(
             mapper_state='true 0',
             sigint_state='false 0',
             adapter_health='healthy',
-            mapper_owner='adapter-current',
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('mapping finalization succeeded', result.stdout)
         self.assertEqual(operations, ['sigint', 'stop'])
 
-    def test_mapping_stop_aborts_unhealthy_or_recreated_namespace_owner(self):
-        for adapter_health, mapper_owner in (
-            ('unhealthy', 'adapter-current'),
-            ('healthy', 'adapter-previous'),
-        ):
-            with self.subTest(
-                adapter_health=adapter_health, mapper_owner=mapper_owner
-            ):
-                result, operations = self.run_mapping_stop_with_fake_docker(
-                    mapper_state='true 0',
-                    sigterm_state='false 143',
-                    adapter_health=adapter_health,
-                    mapper_owner=mapper_owner,
-                )
-
-                self.assertNotEqual(result.returncode, 0, result.stderr)
-                self.assertIn('mapping session is invalid', result.stderr)
-                self.assertEqual(operations, ['sigterm', 'stop'])
-                self.assertNotIn('sigint', operations)
-
-    def test_mapping_stop_aborts_same_id_owner_after_namespace_replacement(self):
+    def test_mapping_stop_waits_for_recreated_adapter_to_recover(self):
         result, operations = self.run_mapping_stop_with_fake_docker(
             mapper_state='true 0',
-            sigterm_state='false 143',
-            adapter_health='healthy',
-            mapper_owner='adapter-current',
-            mapper_namespace='stale',
+            sigint_state='false 0',
+            adapter_health='starting,unhealthy,healthy',
         )
 
-        self.assertNotEqual(result.returncode, 0, result.stderr)
-        self.assertIn('actual network and IPC namespace identities differ', result.stderr)
-        self.assertEqual(operations, ['sigterm', 'stop'])
-        self.assertNotIn('sigint', operations)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('adapter_state=reconnecting', result.stdout)
+        self.assertIn('adapter_state=recovered', result.stdout)
+        self.assertEqual(operations, ['sigint', 'stop'])
 
-    def test_mapping_stop_forces_bounded_abort_before_support_cleanup(self):
+    def test_mapping_stop_recovery_timeout_keeps_mapping_services_running(self):
         result, operations = self.run_mapping_stop_with_fake_docker(
             mapper_state='true 0',
-            sigterm_state='true 0',
-            sigkill_state='false 137',
             adapter_health='unhealthy',
             timeout='0',
         )
 
-        self.assertNotEqual(result.returncode, 0, result.stderr)
-        self.assertIn('forcing slam-mapper cleanup', result.stderr)
-        self.assertEqual(operations, ['sigterm', 'sigkill', 'stop'])
-        self.assertNotIn('sigint', operations)
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertIn('adapter recovery timed out', result.stderr)
+        self.assertEqual(operations, [])
 
     def test_mapping_commands_reject_dot_session_ids_before_docker(self):
         for command in ('mapping-up', 'mapping-status'):
@@ -405,8 +512,6 @@ class DeployOnlyBundleTest(unittest.TestCase):
         sigterm_state=None,
         sigkill_state=None,
         adapter_health='healthy',
-        mapper_owner='adapter-current',
-        mapper_namespace='current',
         timeout='5',
     ):
         with TemporaryDirectory() as directory:
@@ -415,29 +520,23 @@ class DeployOnlyBundleTest(unittest.TestCase):
             bin_dir.mkdir()
             state_path = root / 'mapper-state'
             log_path = root / 'operations'
+            health_index_path = root / 'health-index'
             state_path.write_text(mapper_state)
+            health_index_path.write_text('0')
             docker = bin_dir / 'docker'
             docker.write_text(textwrap.dedent('''\
                 #!/usr/bin/env bash
                 set -euo pipefail
-                if [[ "$1" == exec ]]; then
-                  if [[ "$2" == adapter-current ]]; then
-                    printf 'net:[100] ipc:[200]\\n'
-                  elif [[ "$FAKE_DOCKER_MAPPER_NAMESPACE" == current ]]; then
-                    printf 'net:[100] ipc:[200]\\n'
-                  else
-                    printf 'net:[300] ipc:[400]\\n'
-                  fi
-                  exit 0
-                fi
                 if [[ "$1" == inspect ]]; then
                   format="$3"
                   container_id="$4"
                   if [[ "$container_id" == adapter-current ]]; then
-                    printf 'true %s\\n' "$FAKE_DOCKER_ADAPTER_HEALTH"
-                  elif [[ "$format" == *HostConfig.NetworkMode* ]]; then
-                    printf 'true container:%s container:%s\\n' \
-                      "$FAKE_DOCKER_MAPPER_OWNER" "$FAKE_DOCKER_MAPPER_OWNER"
+                    IFS=',' read -r -a health_values <<< "$FAKE_DOCKER_ADAPTER_HEALTH"
+                    health_index="$(cat "$FAKE_DOCKER_HEALTH_INDEX_PATH")"
+                    last_index=$((${#health_values[@]} - 1))
+                    if ((health_index > last_index)); then health_index=$last_index; fi
+                    printf 'true %s\\n' "${health_values[$health_index]}"
+                    printf '%s' "$((health_index + 1))" > "$FAKE_DOCKER_HEALTH_INDEX_PATH"
                   else
                     cat "$FAKE_DOCKER_STATE_PATH"
                   fi
@@ -469,7 +568,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
                       printf '%s' "$FAKE_DOCKER_SIGKILL_STATE" > "$FAKE_DOCKER_STATE_PATH"
                     fi
                     ;;
-                  *' stop gazebo-server sim-adapter '*)
+                  *' stop gazebo-server sim-adapter dds-discovery '*)
                     printf '%s\\n' stop >> "$FAKE_DOCKER_LOG_PATH"
                     ;;
                   *) exit 98 ;;
@@ -481,14 +580,13 @@ class DeployOnlyBundleTest(unittest.TestCase):
                 'PATH': f'{bin_dir}{os.pathsep}{environment["PATH"]}',
                 'FAKE_DOCKER_STATE_PATH': str(state_path),
                 'FAKE_DOCKER_LOG_PATH': str(log_path),
+                'FAKE_DOCKER_HEALTH_INDEX_PATH': str(health_index_path),
                 'FAKE_DOCKER_ADAPTER_HEALTH': adapter_health,
-                'FAKE_DOCKER_MAPPER_OWNER': mapper_owner,
-                'FAKE_DOCKER_MAPPER_NAMESPACE': mapper_namespace,
                 'FAKE_DOCKER_SIGINT_STATE': sigint_state or '',
                 'FAKE_DOCKER_SIGTERM_STATE': sigterm_state or '',
                 'FAKE_DOCKER_SIGKILL_STATE': sigkill_state or '',
                 'MAPPING_STOP_TIMEOUT_SECONDS': timeout,
-                'MAPPING_ABORT_TIMEOUT_SECONDS': timeout,
+                'MAPPING_RECONNECT_TIMEOUT_SECONDS': timeout,
             })
             result = subprocess.run(
                 ['bash', str(BUNDLE / 'run.sh'), 'mapping-stop'],
@@ -551,7 +649,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
         script = (BUNDLE / 'run.sh').read_text()
         for command in ('build', 'sim-up', 'down', 'logs', 'test', 'fork-up'):
             self.assertIn(command, script)
-        self.assertIn('up -d gazebo-server sim-adapter', script)
+        self.assertIn('up -d dds-discovery gazebo-server sim-adapter', script)
         self.assertIn('MENTORPI_IMAGE', script)
         self.assertIn('docker build --platform', script)
         self.assertNotIn('"${COMPOSE[@]}" build', script)

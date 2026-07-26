@@ -11,6 +11,7 @@ RUN apt-get update \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         gz-harmonic \
+        fastdds-tools \
         libxml2-utils \
         mesa-utils \
         python3-colcon-common-extensions \
@@ -32,8 +33,12 @@ RUN useradd --create-home --uid 1000 --user-group --shell /bin/bash ros \
     && chown -R ros:ros /opt/mentorpi_ws /home/ros
 
 COPY entrypoint.sh /usr/local/bin/mentorpi-entrypoint
+COPY dds_env.sh /usr/local/bin/mentorpi-dds-env
 COPY healthcheck.sh /usr/local/bin/mentorpi-healthcheck
-RUN chmod +x /usr/local/bin/mentorpi-entrypoint /usr/local/bin/mentorpi-healthcheck
+RUN chmod +x \
+    /usr/local/bin/mentorpi-entrypoint \
+    /usr/local/bin/mentorpi-dds-env \
+    /usr/local/bin/mentorpi-healthcheck
 
 ENV DEBIAN_FRONTEND= \
     HOME=/home/ros

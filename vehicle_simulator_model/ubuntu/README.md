@@ -54,37 +54,44 @@ Docker Engine 및 Docker Compose v2가 설치된 Linux 서버에서 실행한다
 위 명령은 `MENTORPI_IMAGE`가 가리키는 동일한 이미지를 사용한다. 기본 local reference가 없는
 서버에서는 먼저 해당 reference를 pull하거나, registry tag/digest를 export한다.
 
-`sim-up`은 내부 `mentorpi` 네트워크에서 `gazebo-server`와 `sim-adapter`를 차례로 시작한다.
-외부 Gazebo Transport 포트와 ROS DDS 포트는 공개하지 않는다. Gazebo 서버 healthcheck가
-통과한 뒤 adapter가 시작하며, 두 서비스는 `GZ_PARTITION=mentorpi-sim`을 공유한다.
+`sim-up`은 내부 `mentorpi` 네트워크에서 `dds-discovery`, `gazebo-server`, `sim-adapter`를
+시작한다. 외부 Gazebo Transport 포트와 ROS DDS 포트는 공개하지 않는다. Gazebo 서버
+healthcheck가 통과한 뒤 adapter가 시작하며, Gazebo 서비스는
+`GZ_PARTITION=mentorpi-sim`을 공유한다.
 서버 health는 진행 중인 stats payload 2개를, adapter health는 양 robot의 scan·odom
-payload와 robot별 odom-to-base TF를 확인한다. topic 이름만 존재하는 상태는 healthy가 아니다.
+payload, robot별 odom-to-base TF, 연속 증가하는 `/clock`을 확인한다. topic 이름만 존재하는
+상태는 healthy가 아니다.
 
-ROS 2 컨테이너 경계는 Fast DDS의 discovery와 shared-memory data path를 함께 보존하도록
-project 내부에서만 결합한다. `sim-adapter`는 `ipc: shareable`인 namespace owner이고,
-`slam-mapper`는 `network_mode: service:sim-adapter`와 `ipc: service:sim-adapter`로 그
-network·IPC namespace에 합류한다. 별도 bridge namespace에서는 publisher discovery가,
-network만 공유하고 IPC를 분리하면 실제 sensor payload가 끊길 수 있기 때문이다. 이 설정은
-host network/host IPC를 사용하거나 포트를 공개하지 않으며, 신뢰된 mapper 한 서비스만 adapter와
-결합한다. `gazebo-server`는 계속 별도 컨테이너로 내부 `mentorpi` network에 연결되고 기존
-`GZ_RELAY_HOST=gazebo-server` 경로를 유지한다.
+ROS 2 discovery는 전용 `dds-discovery` 서비스가 담당한다. `sim-adapter`와 `slam-mapper`는
+각자 독립된 network·IPC namespace를 유지하면서 같은 내부 bridge network에 연결된다. 두
+서비스의 공통 DDS helper는 Docker DNS의 `dds-discovery`를 숫자 IPv4 locator로 해석해
+`ROS_DISCOVERY_SERVER=<IPv4>:11811`을 export하며, Fast DDS payload transport는
+`FASTDDS_BUILTIN_TRANSPORTS=UDPv4`로 고정한다. shared memory나
+`network_mode: service:sim-adapter`에 의존하지 않으므로 adapter container가 재시작·재생성되어도
+mapper container는 그대로 유지되고 새 DDS participant를 다시 발견한다.
 
-따라서 mapper는 adapter보다 먼저 시작할 수 없고, 종료할 때도 mapper finalization 후 adapter를
-정지해야 한다. 배포용 Compose를 확장할 때 mapper의 두 `service:sim-adapter` 설정 중 하나만
-제거하지 않는다. 별도 network/IPC 경계가 필요하면 Fast DDS transport/discovery 설정을 명시하고
-scan·odom·TF·clock 및 `/map` 실제 payload를 다시 검증해야 한다.
+`dds-discovery`는 외부 포트를 공개하지 않는 내부 제어 서비스이며 `restart: unless-stopped`로
+운영한다. adapter 재시작과 달리 discovery server 자체를 강제로 재생성하면 기존 client가
+해석한 내부 IP가 바뀔 수 있으므로, discovery service 교체는 전체 시뮬레이션 stack의 계획된
+재시작으로 수행한다.
 
 `./run.sh fork-up`은 실행 중인 `sim-adapter`가 healthy일 때만 10초 제한 안에서 fork
 command를 publish한다. 서비스가 없거나 unhealthy면 새 container를 만들지 않고 실패한다.
 
 실행 중인 adapter의 ROS topic을 확인할 때는 `./run.sh topics`를 사용한다. Compose
 `exec`는 entrypoint가 source한 shell 환경을 상속하지 않으므로 이 명령과 adapter
-healthcheck는 `/opt/ros/humble/setup.bash`와 `/opt/mentorpi_ws/install/setup.bash`를
-각각 source한 shell에서 ROS CLI를 실행한다. 직접 진단해야 할 때도 같은 형태를 사용한다.
+healthcheck는 DDS helper와 ROS setup을 각각 source한 shell에서 ROS CLI를 실행한다.
+Discovery Server v2의 일반 client는 필요한 endpoint만 전달받기 때문에 전체 graph 조회에는
+부족하다. `topics`는 진단 프로세스만 임시 Super Client로 구성하고 daemon을 사용하지 않아
+전체 topic graph를 조회한다. 실제 adapter와 mapper는 일반 client 구성을 유지한다.
 
 ```bash
 docker compose exec sim-adapter bash -lc \
-  'source /opt/ros/humble/setup.bash && source /opt/mentorpi_ws/install/setup.bash && ros2 topic list'
+  'export DDS_SUPER_CLIENT=1
+   source /usr/local/bin/mentorpi-dds-env
+   source /opt/ros/humble/setup.bash
+   source /opt/mentorpi_ws/install/setup.bash
+   ros2 topic list --no-daemon'
 ```
 
 서버 GPU를 사용할 때만 다음처럼 명시한다.
@@ -114,24 +121,21 @@ Mac Docker Desktop에서 대체할 수 없다.
 ./run.sh mapping-status warehouse-20260726-01
 ```
 
-`mapping-up`은 Gazebo와 adapter가 healthy가 된 뒤 mapper를 시작하고, `SESSION_ID` 및 이미지·world·model·TF
-버전 metadata를 컨테이너에 전달한다. 정상 종료는 `mapping-stop`만 사용한다. 이 명령은 host에서 현재
-`sim-adapter` container ID와 running/healthy 상태를 inspect하고, mapper의 network·IPC owner reference가
-모두 그 ID인지 확인한다. 이어 두 container의 실제 `/proc/1/ns/net`과 `/proc/1/ns/ipc` identity가 같은지
-검증한 경우에만 mapper에 `SIGINT`를 보내 map, posegraph, rosbag, manifest, checksum finalization이 끝날
-때까지 제한 시간(기본 90초)만큼 기다린다. 완료 전에 `down`을 호출하지 않으므로 finalization을 중단하지
-않는다. mapper가 0으로 종료되면 성공을, 다른 종료 코드면 실패를 명확히 보고한 뒤 Gazebo와 adapter를
-정지한다. 정상 finalization 제한 시간을 넘으면 mapper와 지원 서비스를 모두 유지한다.
+`mapping-up`은 Discovery Server, Gazebo, adapter가 준비된 뒤 mapper를 시작하고, `SESSION_ID`
+및 이미지·world·model·TF 버전 metadata를 컨테이너에 전달한다. 정상 종료는 `mapping-stop`만
+사용한다. adapter가 재시작 중이면 이 명령은 `MAPPING_RECONNECT_TIMEOUT_SECONDS` 동안 health
+복구를 기다린다. 복구되면 기존 mapper에 `SIGINT`를 보내 map, posegraph, rosbag, manifest,
+checksum finalization이 끝날 때까지 `MAPPING_STOP_TIMEOUT_SECONDS`만큼 기다린다. adapter가
+제한 시간 안에 복구되지 않으면 mapper나 지원 서비스를 중지하지 않고 nonzero를 반환하므로,
+복구 후 `mapping-stop`을 다시 실행할 수 있다.
 
-active mapping 중 adapter process가 crash해 `unless-stopped` 정책으로 같은 container ID로 자동 재시작해도
-Docker가 새 network·IPC namespace를 만들 수 있다. 이 경우 mapper의 owner reference는 같은 ID처럼 보여도
-실제 namespace와 sensor payload가 과거 namespace에 고립되므로 세션은 무효다. Compose
-`--force-recreate`처럼 adapter가 새 container ID로 바뀌는 경우도 기존 mapper는 과거 owner에 결합되어
-항상 무효다. `mapping-stop`이 unhealthy adapter, owner ID 불일치, 실제 namespace identity 불일치 중 하나를
-찾으면 `SIGINT` finalization을 시도하지 않는다. 대신 mapper에 `SIGTERM`을 보내 제한 시간
-(`MAPPING_ABORT_TIMEOUT_SECONDS`, 기본 10초) 동안 abort를 기다리고, 필요하면 `SIGKILL`로 bounded cleanup한
-뒤 지원 서비스를 정지하며 nonzero를 반환한다. 이 경로는 최종 세션을 publish하지 않고
-`.inprogress/<session-id>`만 보존한다.
+mapper lifecycle은 finalization 시작 직전과 atomic publish 직전에 각각 adapter input guard를
+실행한다. 이 guard는 양 robot의 scan·odom payload, odom-to-base TF, 연속 증가하는 `/clock`을
+검증한다. adapter가 finalization 도중 다시 끊기면 최종 session directory를 publish하지 않고
+`.inprogress/<session-id>`를 보존한다. 따라서 adapter container ID 변경 자체는 실패 조건이
+아니며, 실제 센서 데이터 복구 여부가 finalization 조건이다. 지도와 posegraph 저장은 graph
+목록 조회 결과에 의존하지 않고 명시적 service type으로 직접 호출하며,
+`ROS_COMMAND_TIMEOUT_SECONDS` 안에 service가 연결되지 않으면 실패 처리한다.
 
 일반 `down`, Compose recreate, orchestration cleanup이 보내는 `SIGTERM`도 lifecycle에서는 abort 신호다.
 `SIGTERM`은 map save나 posegraph serialization을 호출하지 않으며, mapper의 30초 stop grace 안에서 recorder와

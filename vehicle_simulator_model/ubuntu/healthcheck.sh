@@ -43,17 +43,53 @@ check_server() {
 check_ros_payload() {
   local robot="$1"
   local kind="$2"
+  local message_type="$3"
   local topic="/${robot}/${kind}"
   local payload
 
   if ! payload="$(
-    timeout "$HEALTH_TIMEOUT_SECONDS" ros2 topic echo --once "$topic" 2>&1
+    timeout "$HEALTH_TIMEOUT_SECONDS" \
+      ros2 topic echo --once "$topic" "$message_type" 2>&1
   )"; then
     health_error adapter "check=payload robot=$robot topic=$topic reason=no_message"
     return 1
   fi
   if ! grep -q '^header:' <<<"$payload"; then
     health_error adapter "check=payload robot=$robot topic=$topic reason=invalid_message"
+    return 1
+  fi
+}
+
+read_clock_stamp() {
+  local payload sec nanosec
+
+  if ! payload="$(
+    timeout "$HEALTH_TIMEOUT_SECONDS" \
+      ros2 topic echo --once /clock rosgraph_msgs/msg/Clock 2>&1
+  )"; then
+    return 1
+  fi
+  sec="$(awk '$1 == "sec:" {print $2; exit}' <<<"$payload")"
+  nanosec="$(awk '$1 == "nanosec:" {print $2; exit}' <<<"$payload")"
+  if [[ ! "$sec" =~ ^[0-9]+$ || ! "$nanosec" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  printf '%s %s\n' "$sec" "$nanosec"
+}
+
+check_clock_progress() {
+  local first second first_sec first_nanosec second_sec second_nanosec
+
+  if ! first="$(read_clock_stamp)" || ! second="$(read_clock_stamp)"; then
+    health_error adapter "check=clock_progress reason=no_two_valid_samples"
+    return 1
+  fi
+  read -r first_sec first_nanosec <<<"$first"
+  read -r second_sec second_nanosec <<<"$second"
+  if ((second_sec < first_sec)) \
+      || ((second_sec == first_sec && second_nanosec <= first_nanosec)); then
+    health_error adapter \
+      "check=clock_progress reason=not_advancing first=${first_sec}.${first_nanosec} second=${second_sec}.${second_nanosec}"
     return 1
   fi
 }
@@ -81,6 +117,10 @@ check_adapter() {
   local pid
   local -a pids=()
 
+  if ! source /usr/local/bin/mentorpi-dds-env; then
+    health_error adapter "check=dds_setup reason=discovery_resolve_failed"
+    return 1
+  fi
   if ! source /opt/ros/humble/setup.bash; then
     health_error adapter "check=ros_setup reason=humble_setup_failed"
     return 1
@@ -90,12 +130,13 @@ check_adapter() {
     return 1
   fi
 
-  check_ros_payload robot_1 scan_raw & pids+=("$!")
-  check_ros_payload robot_1 odom & pids+=("$!")
+  check_ros_payload robot_1 scan_raw sensor_msgs/msg/LaserScan & pids+=("$!")
+  check_ros_payload robot_1 odom nav_msgs/msg/Odometry & pids+=("$!")
   check_robot_tf robot_1 & pids+=("$!")
-  check_ros_payload robot_2 scan_raw & pids+=("$!")
-  check_ros_payload robot_2 odom & pids+=("$!")
+  check_ros_payload robot_2 scan_raw sensor_msgs/msg/LaserScan & pids+=("$!")
+  check_ros_payload robot_2 odom nav_msgs/msg/Odometry & pids+=("$!")
   check_robot_tf robot_2 & pids+=("$!")
+  check_clock_progress & pids+=("$!")
 
   for pid in "${pids[@]}"; do
     if ! wait "$pid"; then
