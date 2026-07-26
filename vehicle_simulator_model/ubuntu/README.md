@@ -5,19 +5,39 @@ MentorPi Gazebo Harmonic 시뮬레이션을 Docker Compose로 운영하는 headl
 않는다. 기본 렌더러는 Mesa 소프트웨어 렌더링이고, GPU 장치는 명시적인 `gpu` profile에서만
 전달한다.
 
-## 개발과 이미지 빌드
+## 이미지 참조와 개발 빌드
 
 Mac에서는 Docker 컨테이너 GUI 대신 네이티브 Gazebo GUI 개발 환경을 사용한다. 이 번들은
 MentorPi 서버에서 센서와 물리 시뮬레이션을 운영하기 위한 `linux/amd64` 이미지다.
 
+모든 명령은 `MENTORPI_IMAGE` 하나를 이미지 reference, Compose의 `IMAGE_VERSION` 로그 값으로
+공유한다. 기본값은 Task 5와 호환되는 `mentorpi-sim:harmonic`이다.
+
 ```bash
 cd vehicle_simulator_model/ubuntu
+export MENTORPI_IMAGE=mentorpi-sim:harmonic
 ./run.sh build
 ./run.sh test
 ```
 
-`build`는 이미지 안의 `/opt/mentorpi_ws`에 ROS 패키지를 빌드한다. 서버 운영 중에는 소스를
-마운트하지 않으므로 소스 변경을 배포하려면 이미지를 다시 빌드한다.
+`build`는 위 reference로 `docker build --platform linux/amd64`를 실행하고 이미지 안의
+`/opt/mentorpi_ws`에 ROS 패키지를 빌드한다. Compose 파일에는 `build:`가 없으므로 `sim-up`과
+`test`는 절대로 암묵적으로 소스를 빌드하지 않으며, 방금 build한 동일한 reference를 사용한다.
+
+서버 배포에서는 CI가 만든 명시적 tag 또는 digest를 전달한다.
+
+```bash
+export MENTORPI_IMAGE=registry.example.com/mentorpi-sim:2026.07.26
+./run.sh sim-up
+
+export MENTORPI_IMAGE='registry.example.com/mentorpi-sim@sha256:<digest>'
+./run.sh sim-up
+```
+
+버전 tag는 레지스트리에서 다른 이미지로 이동할 수 있으므로 그 자체로 불변하지 않다. digest
+reference만 내용 불변성을 제공한다. 이 번들의 운영 불변성은 Compose가 source bind mount나
+build context를 갖지 않아 배포 서버에서 소스를 재빌드하지 않는 범위까지다. digest로 운영하는
+서버에서는 `./run.sh build`를 실행하지 말고, 검증된 digest를 pull하여 사용한다.
 
 ## 서버 운영
 
@@ -29,6 +49,9 @@ Docker Engine 및 Docker Compose v2가 설치된 Linux 서버에서 실행한다
 ./run.sh fork-up
 ./run.sh down
 ```
+
+위 명령은 `MENTORPI_IMAGE`가 가리키는 동일한 이미지를 사용한다. 기본 local reference가 없는
+서버에서는 먼저 해당 reference를 pull하거나, registry tag/digest를 export한다.
 
 `sim-up`은 내부 `mentorpi` 네트워크에서 `gazebo-server`와 `sim-adapter`를 차례로 시작한다.
 외부 Gazebo Transport 포트와 ROS DDS 포트는 공개하지 않는다. Gazebo 서버 healthcheck가

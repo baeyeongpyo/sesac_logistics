@@ -2,6 +2,7 @@
 set -euo pipefail
 
 BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export MENTORPI_IMAGE="${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"
 COMPOSE=(docker compose -f "$BUNDLE_DIR/compose.yaml")
 
 usage() {
@@ -20,7 +21,8 @@ EOF
 
 case "${1:-}" in
   build)
-    "${COMPOSE[@]}" build
+    docker build --platform "${TARGET_PLATFORM:-linux/amd64}" \
+      --tag "$MENTORPI_IMAGE" "$BUNDLE_DIR"
     ;;
   sim-up)
     if [[ "${2:-}" == 'gpu' ]]; then

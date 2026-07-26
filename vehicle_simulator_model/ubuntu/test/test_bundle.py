@@ -44,6 +44,12 @@ class DeployOnlyBundleTest(unittest.TestCase):
             self.assertNotIn(removed, compose)
         for forbidden_port in ('10317:', '10318:', '9002:'):
             self.assertNotIn(forbidden_port, compose)
+        self.assertNotIn('build:', compose)
+        self.assertIn('image: "${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"', compose)
+        self.assertIn(
+            'IMAGE_VERSION: "${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"',
+            compose,
+        )
 
         gpu_compose = (BUNDLE / 'compose.gpu.yaml').read_text()
         self.assertIn('/dev/dri:/dev/dri', gpu_compose)
@@ -53,6 +59,9 @@ class DeployOnlyBundleTest(unittest.TestCase):
         for command in ('build', 'sim-up', 'down', 'logs', 'test', 'fork-up'):
             self.assertIn(command, script)
         self.assertIn('up -d gazebo-server sim-adapter', script)
+        self.assertIn('MENTORPI_IMAGE', script)
+        self.assertIn('docker build --platform', script)
+        self.assertNotIn('"${COMPOSE[@]}" build', script)
         for removed in ('ssh -Y', 'vglrun', 'DISPLAY'):
             self.assertNotIn(removed, script)
 
@@ -85,6 +94,8 @@ class DeployOnlyBundleTest(unittest.TestCase):
             './run.sh logs',
             './run.sh down',
             './run.sh fork-up',
+            'MENTORPI_IMAGE',
+            'sha256:',
             '브라우저',
             '오프스크린',
         ):

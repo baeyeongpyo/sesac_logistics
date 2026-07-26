@@ -2,14 +2,12 @@ x-runtime-environment: &runtime-environment
   GZ_PARTITION: mentorpi-sim
   ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
   LIBGL_ALWAYS_SOFTWARE: "${LIBGL_ALWAYS_SOFTWARE:-1}"
-  IMAGE_VERSION: "${IMAGE_VERSION:-development}"
+  IMAGE_VERSION: "${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"
   SESSION_ID: "${SESSION_ID:-none}"
   ROBOT_IDS: "${ROBOT_IDS:-robot_1,robot_2}"
 
 x-runtime: &runtime
-  build:
-    context: .
-  image: mentorpi-gazebo:humble
+  image: "${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"
   platform: ${TARGET_PLATFORM:-linux/amd64}
   environment: *runtime-environment
   networks:
