@@ -70,7 +70,7 @@ services:
       WORLD_VERSION: "${WORLD_VERSION:-unknown}"
       MODEL_VERSION: "${MODEL_VERSION:-unknown}"
       TF_CALIBRATION_VERSION: "${TF_CALIBRATION_VERSION:-unknown}"
-    command: ros2 run mentorpi_slam run_mapping_session.sh
+    command: /opt/mentorpi_ws/install/mentorpi_slam/lib/mentorpi_slam/run_mapping_session.sh
     depends_on:
       sim-adapter:
         condition: service_healthy

@@ -66,6 +66,15 @@ process_alive() {
   kill -0 "$1" 2>/dev/null
 }
 
+process_finished() {
+  local process_pid="$1"
+  local process_state
+
+  if ! process_alive "$process_pid"; then return 0; fi
+  process_state="$(ps -o stat= -p "$process_pid" 2>/dev/null || true)"
+  [[ "$process_state" == *Z* ]]
+}
+
 wait_for_exit() {
   local process_pid="$1"
   local timeout_seconds="$2"
@@ -283,6 +292,9 @@ rosbag_pid=$!
 ros2 launch mentorpi_slam mapping.launch.py &
 slam_pid=$!
 
+while ! process_finished "$slam_pid"; do
+  sleep 0.1
+done
 if wait "$slam_pid"; then
   slam_pid=''
   finalize_session

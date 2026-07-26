@@ -168,6 +168,20 @@ class MappingSessionScriptTest(unittest.TestCase):
             self.assertEqual(save_request['name']['data'], str((environment['stage'] / 'map').resolve()))
             self.assertEqual(graph_request['filename'], str((environment['stage'] / 'posegraph' / 'mentorpi').resolve()))
 
+    def test_main_lifecycle_wait_polls_so_pid_one_can_process_sigint(self):
+        text = SCRIPT.read_text()
+
+        self.assertIn('process_finished()', text)
+        self.assertIn('while ! process_finished "$slam_pid"; do', text)
+        self.assertIn('sleep 0.1', text)
+        self.assertIn(
+            'while ! process_finished "$slam_pid"; do\n'
+            '  sleep 0.1\n'
+            'done\n'
+            'if wait "$slam_pid"; then',
+            text,
+        )
+
     def test_final_target_race_never_nests_staging_directory(self):
         with self.fake_ros_environment() as environment:
             environment['env']['FAKE_ROS_CREATE_FINAL'] = '1'

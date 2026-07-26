@@ -110,6 +110,10 @@ manifest, checksum finalization이 끝날 때까지 제한 시간(기본 90초)�
 실행해 `/slam-data` root만 image의 `ros:ros`(uid/gid 1000)로 설정한다. mapper는 계속 non-root로 실행된다.
 initializer는 recursive chown을 하지 않으므로 기존 세션 내용을 변경하지 않는다.
 
+mapper는 `ros2 run` wrapper 대신 설치된 lifecycle Bash executable을 직접 command로 사용한다. image
+entrypoint가 ROS 환경을 source한 뒤 `exec`하므로 이 Bash가 container PID 1이 되고, `mapping-stop`의
+`SIGINT`가 lifecycle finalization trap에 직접 전달된다.
+
 성공한 세션은 Docker named volume `mentorpi-slam-data`의 다음 최종 디렉터리에 원자적으로 publish된다.
 
 ```text

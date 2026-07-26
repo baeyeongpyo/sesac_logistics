@@ -135,3 +135,54 @@ docker run --rm --user 1000:1000 -v mentorpi-task4-init-check-r2:/slam-data \
 
 The temporary volume was removed afterward; `docker volume inspect mentorpi-slam-data`
 reported `preserved volume=mentorpi-slam-data`.
+
+## Fix round 3/5 (2026-07-26)
+
+Task 5 retry showed that `ros2 run` was container PID 1 and the lifecycle Bash was
+its child, so `docker compose kill -s SIGINT` did not reliably reach the lifecycle
+trap. `slam-mapper` now directly commands the installed executable:
+
+```text
+/opt/mentorpi_ws/install/mentorpi_slam/lib/mentorpi_slam/run_mapping_session.sh
+```
+
+The image entrypoint sources ROS/workspace setup and ends with `exec "$@"`, so the
+kernel executes this shebang Bash as PID 1. During runtime probing, the direct Bash
+could still defer the trap while blocked in `wait "$slam_pid"`; the lifecycle now
+polls child completion in 100 ms intervals before reaping it, which leaves PID 1
+available to process SIGINT.
+
+Fresh verification output summary:
+
+```bash
+python3 -m unittest \
+  vehicle_simulator_model/ubuntu/test/test_bundle.py \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_slam_contract.py \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_session_artifacts.py \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_mapping_session_script.py -v
+# Ran 37 tests in 20.789s — OK
+
+bash -n vehicle_simulator_model/ubuntu/run.sh \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/scripts/run_mapping_session.sh
+docker compose -f vehicle_simulator_model/ubuntu/compose.yaml config --quiet
+docker compose -f vehicle_simulator_model/ubuntu/compose.yaml --profile mapping config --quiet
+git diff --check
+# all exited 0
+```
+
+A bounded isolated signal smoke used temporary volume/container names
+`mentorpi-task4-signal-diagnose-r3` (removed afterward), mounted the current
+lifecycle scripts read-only, and set all lifecycle timeout variables to two seconds.
+It verified all of the following before no-stack cleanup:
+
+```text
+PID1: bash /tmp/mentorpi-slam-scripts/run_mapping_session.sh
+services: /slam_toolbox/save_map, /slam_toolbox/serialize_map
+SIGINT result: exited 1 (bounded failure because the isolated smoke has no map data)
+logs: SaveMap request, bounded ros2 service timeout, recorder shutdown
+volume: only .inprogress/signal-diagnose-r3 remained; no final session was published
+```
+
+This proves PID 1 signal delivery and bounded lifecycle failure, not a replacement
+for the full Task 5 mapping-success E2E. The existing `mentorpi-slam-data` volume
+was inspected as `preserved volume=mentorpi-slam-data`; `smoke-002` was not touched.

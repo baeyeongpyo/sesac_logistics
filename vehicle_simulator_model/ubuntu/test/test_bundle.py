@@ -178,7 +178,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'SLAM_DATA_ROOT: /slam-data',
             'slam-data:/slam-data',
             'condition: service_healthy',
-            'ros2 run mentorpi_slam run_mapping_session.sh',
+            '/opt/mentorpi_ws/install/mentorpi_slam/lib/mentorpi_slam/run_mapping_session.sh',
             'GIT_COMMIT: "${GIT_COMMIT:-unknown}"',
             'WORLD_VERSION: "${WORLD_VERSION:-unknown}"',
             'MODEL_VERSION: "${MODEL_VERSION:-unknown}"',
@@ -213,6 +213,25 @@ class DeployOnlyBundleTest(unittest.TestCase):
         self.assertIn('condition: service_completed_successfully', mapper)
         self.assertIn('sim-adapter:', mapper)
         self.assertIn('condition: service_healthy', mapper)
+
+    def test_mapper_execs_installed_lifecycle_script_as_pid_one(self):
+        compose = (BUNDLE / 'compose.yaml').read_text()
+        mapper = compose.split('  slam-mapper:', 1)[1].split(
+            '  slam-inspector:', 1
+        )[0]
+        entrypoint = (BUNDLE / 'entrypoint.sh').read_text()
+
+        self.assertIn(
+            'command: /opt/mentorpi_ws/install/mentorpi_slam/lib/mentorpi_slam/run_mapping_session.sh',
+            mapper,
+        )
+        self.assertNotIn('ros2 run mentorpi_slam run_mapping_session.sh', mapper)
+        for required in (
+            'source /opt/ros/humble/setup.bash',
+            'source /opt/mentorpi_ws/install/setup.bash',
+            'exec "$@"',
+        ):
+            self.assertIn(required, entrypoint)
 
     def test_mapping_commands_validate_session_and_preserve_finalization(self):
         script = (BUNDLE / 'run.sh').read_text()
