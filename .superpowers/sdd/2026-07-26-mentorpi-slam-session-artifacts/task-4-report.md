@@ -264,3 +264,103 @@ Only Compose, its contract test, operator documentation, and this report changed
 so the already-built `mentorpi-sim:harmonic` image did not require rebuilding.
 The `/map` payload gate is complete; full Task 5 artifact finalization remains a
 separate E2E responsibility.
+
+## Fix round 5/5 (2026-07-27)
+
+The mapper lifecycle now treats only operator `SIGINT` as permission to finalize
+and publish. `SIGTERM` sets an abort request, never starts ROS save/serialize
+service calls, performs bounded recorder/SLAM child cleanup, preserves staging,
+and exits nonzero. A `SIGTERM` received during `SIGINT` finalization prevents
+publication; the publish boundary rolls a just-renamed final directory back to
+staging if the abort arrives across that boundary. An unexpected natural
+`slam_toolbox` exit also preserves staging instead of implicitly finalizing.
+Compose gives the mapper a 30-second stop grace for its bounded child cleanup.
+
+`mapping-stop` now performs a host-side runtime gate before sending `SIGINT`:
+
+1. inspect the current Compose `sim-adapter` full container ID and require it to
+   be running and healthy;
+2. require the running mapper's `HostConfig.NetworkMode` and `IpcMode` to both
+   name that exact current container ID;
+3. read `/proc/1/ns/net` and `/proc/1/ns/ipc` in both running containers and
+   require the actual namespace identities to match.
+
+Any failed gate invalidates the session. `mapping-stop` sends `SIGTERM`, waits
+`MAPPING_ABORT_TIMEOUT_SECONDS` (default 10), uses `SIGKILL` only as a bounded
+fallback, stops support services after confirmed mapper exit, and returns
+nonzero. The final session is not published and `.inprogress` remains.
+
+The behavior tests were added before implementation. RED showed that lifecycle
+`SIGTERM` published with exit 0, unhealthy/recreated owners still received
+`SIGINT`, and a same-ID owner with replaced actual namespaces still entered the
+finalization wait. GREEN covers standalone and mid-finalization `SIGTERM`,
+healthy current-owner `SIGINT`, unhealthy/new-ID/same-ID-stale aborts, already
+exited cleanup, normal finalization timeout preservation, and forced bounded
+abort cleanup. The real Compose renderer also checks `unless-stopped` adapter,
+one-shot mapper, network+IPC service ownership, and the 30-second stop grace.
+
+The runtime-gate image was built from the official Dockerfile as
+`mentorpi-sim:harmonic` (image `7cf7e6495046`). After adding the atomic-boundary
+abort regression, the same cached official build completed again as final image
+`2a9e44f481fa`. The first ordinary legacy build
+was bounded and cancelled after `docker-credential-desktop list` stalled. The
+documented empty `DOCKER_CONFIG` plus `DOCKER_BUILDKIT=0` recovery reused the
+local `ros:humble-ros-base-jammy` and apt layers, rebuilt all three colcon
+packages, and completed all 14 Dockerfile steps.
+
+Three isolated runtime gates used only temporary projects, volumes, and session
+IDs:
+
+- Automatic crash restart: project `mentorpi-task4-r5-auto4`, volume
+  `mentorpi-task4-r5-auto4-data`, session `task4-r5-auto-004`. A temporary
+  adapter PID-1 wrapper exited 137 after bounded child cleanup so Docker, rather
+  than a manual `docker stop/kill`, exercised `unless-stopped`. The adapter
+  recovered healthy with the same full ID and restart count 1, but the actual
+  namespaces changed: adapter `net:[4026532825] ipc:[4026532567]`, mapper
+  `net:[4026532570] ipc:[4026532563]`. Mapper-side scan timed out with 124 and
+  odom/TF/clock all returned nonzero. `mapping-stop` detected the actual identity
+  mismatch, aborted the mapper with exit 143, returned 7, and left only staging.
+- Explicit Compose recreate: project `mentorpi-task4-r5-recreate2`, volume
+  `mentorpi-task4-r5-recreate2-data`, session `task4-r5-recreate-002`.
+  `docker compose up -d --no-deps --force-recreate sim-adapter` exited 0 and
+  changed the adapter ID from `3331436...` to `313d7e4...`; the still-running
+  mapper named the old ID for both namespaces. `mapping-stop` sent no `SIGINT`,
+  aborted the mapper with exit 143, returned 7, and mapper logs contained no
+  SaveMap, serialize-map, or service-call request. Read-only inspection found
+  final absent and staging present.
+- Normal current owner: project `mentorpi-task4-r5-normal`, volume
+  `mentorpi-task4-r5-normal-data`, session `task4-r5-normal-001`. Adapter and
+  mapper both reported `net:[4026532563] ipc:[4026532560]`; mapper received a
+  `/map` payload; `mapping-stop` used `SIGINT`, returned 0, published final,
+  removed staging, and passed `sha256sum -c`.
+
+Every runtime cleanup sent a final zero Twist best-effort, removed only its exact
+temporary Compose resources and volume, and retained no debug artifact. The
+production `mentorpi-slam-data` volume was inspected by name and preserved;
+`smoke-001` through `smoke-003` were never mounted or modified.
+
+Fresh verification:
+
+```bash
+python3 -m unittest \
+  vehicle_simulator_model/ubuntu/test/test_bundle.py \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_slam_contract.py \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_session_artifacts.py \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_mapping_session_script.py -v
+# Ran 44 tests — OK
+
+python3 vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_atomic_publish.py -v
+# Ran 3 tests — OK (skipped=2 Linux-only cases on this Darwin host)
+
+vehicle_simulator_model/ubuntu/run.sh test
+# host/static suites passed; runtime ctest: 12 tests, 0 errors, 0 failures
+
+docker compose -f vehicle_simulator_model/ubuntu/compose.yaml config --quiet
+docker compose -f vehicle_simulator_model/ubuntu/compose.yaml --profile mapping config --quiet
+RENDER_GID=0 docker compose -f vehicle_simulator_model/ubuntu/compose.yaml \
+  -f vehicle_simulator_model/ubuntu/compose.gpu.yaml config --quiet
+bash -n vehicle_simulator_model/ubuntu/run.sh \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/scripts/run_mapping_session.sh
+git diff --check
+# all exited 0
+```

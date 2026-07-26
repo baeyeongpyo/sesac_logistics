@@ -115,10 +115,29 @@ Mac Docker Desktop에서 대체할 수 없다.
 ```
 
 `mapping-up`은 Gazebo와 adapter가 healthy가 된 뒤 mapper를 시작하고, `SESSION_ID` 및 이미지·world·model·TF
-버전 metadata를 컨테이너에 전달한다. `mapping-stop`은 mapper에 먼저 `SIGINT`를 보내 map, posegraph, rosbag,
-manifest, checksum finalization이 끝날 때까지 제한 시간(기본 90초)만큼 기다린다. 완료 전에 `down`을 호출하지
-않으므로 finalization을 중단하지 않는다. mapper가 0으로 종료되면 성공을, 다른 종료 코드면 실패를 명확히
-보고한 뒤 Gazebo와 adapter를 정지한다. 제한 시간을 넘으면 mapper와 지원 서비스를 모두 유지한다.
+버전 metadata를 컨테이너에 전달한다. 정상 종료는 `mapping-stop`만 사용한다. 이 명령은 host에서 현재
+`sim-adapter` container ID와 running/healthy 상태를 inspect하고, mapper의 network·IPC owner reference가
+모두 그 ID인지 확인한다. 이어 두 container의 실제 `/proc/1/ns/net`과 `/proc/1/ns/ipc` identity가 같은지
+검증한 경우에만 mapper에 `SIGINT`를 보내 map, posegraph, rosbag, manifest, checksum finalization이 끝날
+때까지 제한 시간(기본 90초)만큼 기다린다. 완료 전에 `down`을 호출하지 않으므로 finalization을 중단하지
+않는다. mapper가 0으로 종료되면 성공을, 다른 종료 코드면 실패를 명확히 보고한 뒤 Gazebo와 adapter를
+정지한다. 정상 finalization 제한 시간을 넘으면 mapper와 지원 서비스를 모두 유지한다.
+
+active mapping 중 adapter process가 crash해 `unless-stopped` 정책으로 같은 container ID로 자동 재시작해도
+Docker가 새 network·IPC namespace를 만들 수 있다. 이 경우 mapper의 owner reference는 같은 ID처럼 보여도
+실제 namespace와 sensor payload가 과거 namespace에 고립되므로 세션은 무효다. Compose
+`--force-recreate`처럼 adapter가 새 container ID로 바뀌는 경우도 기존 mapper는 과거 owner에 결합되어
+항상 무효다. `mapping-stop`이 unhealthy adapter, owner ID 불일치, 실제 namespace identity 불일치 중 하나를
+찾으면 `SIGINT` finalization을 시도하지 않는다. 대신 mapper에 `SIGTERM`을 보내 제한 시간
+(`MAPPING_ABORT_TIMEOUT_SECONDS`, 기본 10초) 동안 abort를 기다리고, 필요하면 `SIGKILL`로 bounded cleanup한
+뒤 지원 서비스를 정지하며 nonzero를 반환한다. 이 경로는 최종 세션을 publish하지 않고
+`.inprogress/<session-id>`만 보존한다.
+
+일반 `down`, Compose recreate, orchestration cleanup이 보내는 `SIGTERM`도 lifecycle에서는 abort 신호다.
+`SIGTERM`은 map save나 posegraph serialization을 호출하지 않으며, mapper의 30초 stop grace 안에서 recorder와
+SLAM child를 bounded cleanup한 후 nonzero로 끝난다. 따라서 abort된 세션을 이어서 publish하거나 같은 ID로
+재사용하지 않는다. 보존된 staging 자료가 필요하면 read-only로 별도 조사·백업하고, 복구 운용은 반드시 새
+session ID로 `mapping-up`부터 다시 시작한다.
 
 새 Docker volume의 root는 처음에 `root:root`이므로, 첫 mapping-up은 별도 one-shot initializer를 root로
 실행해 `/slam-data` root만 image의 `ros:ros`(uid/gid 1000)로 설정한다. mapper는 계속 non-root로 실행된다.

@@ -65,6 +65,7 @@ services:
     <<: *runtime
     profiles: [mapping]
     restart: "no"
+    stop_grace_period: 30s
     ipc: "service:sim-adapter"
     network_mode: "service:sim-adapter"
     environment:

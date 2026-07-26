@@ -212,8 +212,11 @@ class DeployOnlyBundleTest(unittest.TestCase):
         mapper = services['slam-mapper']
 
         self.assertEqual(adapter.get('ipc'), 'shareable')
+        self.assertEqual(adapter.get('restart'), 'unless-stopped')
         self.assertEqual(mapper.get('ipc'), 'service:sim-adapter')
         self.assertEqual(mapper.get('network_mode'), 'service:sim-adapter')
+        self.assertEqual(mapper.get('restart'), 'no')
+        self.assertEqual(mapper.get('stop_grace_period'), '30s')
         self.assertNotIn('networks', mapper)
 
     def test_mapping_volume_initializer_only_owns_volume_root_before_mapper(self):
@@ -295,10 +298,6 @@ class DeployOnlyBundleTest(unittest.TestCase):
             self.assertIn(required, mapping_stop)
         self.assertIn('State.Running', script)
         self.assertIn('State.ExitCode', script)
-        self.assertLess(
-            mapping_stop.index('kill -s SIGINT slam-mapper'),
-            mapping_stop.index('stop gazebo-server sim-adapter'),
-        )
 
         for required in (
             'validate_session_id "$2"',
@@ -311,21 +310,81 @@ class DeployOnlyBundleTest(unittest.TestCase):
 
     def test_mapping_stop_cleans_support_after_mapper_already_exited(self):
         result, operations = self.run_mapping_stop_with_fake_docker(
-            mapper_state='false 0', kill_outcome='fail'
+            mapper_state='false 0'
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('mapping finalization succeeded', result.stdout)
-        self.assertEqual(operations, ['kill', 'stop'])
+        self.assertEqual(operations, ['stop'])
 
     def test_mapping_stop_timeout_leaves_mapper_and_support_running(self):
         result, operations = self.run_mapping_stop_with_fake_docker(
-            mapper_state='true 0', kill_outcome='succeed', timeout='0'
+            mapper_state='true 0', sigint_state='true 0', timeout='0'
         )
 
         self.assertEqual(result.returncode, 5, result.stderr)
         self.assertIn('finalization status is unknown', result.stderr)
-        self.assertEqual(operations, ['kill'])
+        self.assertEqual(operations, ['sigint'])
+
+    def test_mapping_stop_sigint_requires_healthy_current_namespace_owner(self):
+        result, operations = self.run_mapping_stop_with_fake_docker(
+            mapper_state='true 0',
+            sigint_state='false 0',
+            adapter_health='healthy',
+            mapper_owner='adapter-current',
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('mapping finalization succeeded', result.stdout)
+        self.assertEqual(operations, ['sigint', 'stop'])
+
+    def test_mapping_stop_aborts_unhealthy_or_recreated_namespace_owner(self):
+        for adapter_health, mapper_owner in (
+            ('unhealthy', 'adapter-current'),
+            ('healthy', 'adapter-previous'),
+        ):
+            with self.subTest(
+                adapter_health=adapter_health, mapper_owner=mapper_owner
+            ):
+                result, operations = self.run_mapping_stop_with_fake_docker(
+                    mapper_state='true 0',
+                    sigterm_state='false 143',
+                    adapter_health=adapter_health,
+                    mapper_owner=mapper_owner,
+                )
+
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn('mapping session is invalid', result.stderr)
+                self.assertEqual(operations, ['sigterm', 'stop'])
+                self.assertNotIn('sigint', operations)
+
+    def test_mapping_stop_aborts_same_id_owner_after_namespace_replacement(self):
+        result, operations = self.run_mapping_stop_with_fake_docker(
+            mapper_state='true 0',
+            sigterm_state='false 143',
+            adapter_health='healthy',
+            mapper_owner='adapter-current',
+            mapper_namespace='stale',
+        )
+
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn('actual network and IPC namespace identities differ', result.stderr)
+        self.assertEqual(operations, ['sigterm', 'stop'])
+        self.assertNotIn('sigint', operations)
+
+    def test_mapping_stop_forces_bounded_abort_before_support_cleanup(self):
+        result, operations = self.run_mapping_stop_with_fake_docker(
+            mapper_state='true 0',
+            sigterm_state='true 0',
+            sigkill_state='false 137',
+            adapter_health='unhealthy',
+            timeout='0',
+        )
+
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn('forcing slam-mapper cleanup', result.stderr)
+        self.assertEqual(operations, ['sigterm', 'sigkill', 'stop'])
+        self.assertNotIn('sigint', operations)
 
     def test_mapping_commands_reject_dot_session_ids_before_docker(self):
         for command in ('mapping-up', 'mapping-status'):
@@ -340,7 +399,15 @@ class DeployOnlyBundleTest(unittest.TestCase):
                     self.assertIn('session ID may contain', result.stderr)
 
     def run_mapping_stop_with_fake_docker(
-        self, mapper_state, kill_outcome, timeout='5'
+        self,
+        mapper_state,
+        sigint_state=None,
+        sigterm_state=None,
+        sigkill_state=None,
+        adapter_health='healthy',
+        mapper_owner='adapter-current',
+        mapper_namespace='current',
+        timeout='5',
     ):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -353,8 +420,27 @@ class DeployOnlyBundleTest(unittest.TestCase):
             docker.write_text(textwrap.dedent('''\
                 #!/usr/bin/env bash
                 set -euo pipefail
+                if [[ "$1" == exec ]]; then
+                  if [[ "$2" == adapter-current ]]; then
+                    printf 'net:[100] ipc:[200]\\n'
+                  elif [[ "$FAKE_DOCKER_MAPPER_NAMESPACE" == current ]]; then
+                    printf 'net:[100] ipc:[200]\\n'
+                  else
+                    printf 'net:[300] ipc:[400]\\n'
+                  fi
+                  exit 0
+                fi
                 if [[ "$1" == inspect ]]; then
-                  cat "$FAKE_DOCKER_STATE_PATH"
+                  format="$3"
+                  container_id="$4"
+                  if [[ "$container_id" == adapter-current ]]; then
+                    printf 'true %s\\n' "$FAKE_DOCKER_ADAPTER_HEALTH"
+                  elif [[ "$format" == *HostConfig.NetworkMode* ]]; then
+                    printf 'true container:%s container:%s\\n' \
+                      "$FAKE_DOCKER_MAPPER_OWNER" "$FAKE_DOCKER_MAPPER_OWNER"
+                  else
+                    cat "$FAKE_DOCKER_STATE_PATH"
+                  fi
                   exit 0
                 fi
                 [[ "$1" == compose ]] || exit 99
@@ -362,9 +448,26 @@ class DeployOnlyBundleTest(unittest.TestCase):
                   *' ps -q --all slam-mapper '*)
                     printf '%s\\n' mapper-test
                     ;;
+                  *' ps -q sim-adapter '*)
+                    printf '%s\\n' adapter-current
+                    ;;
                   *' kill -s SIGINT slam-mapper '*)
-                    printf '%s\\n' kill >> "$FAKE_DOCKER_LOG_PATH"
-                    [[ "$FAKE_DOCKER_KILL_OUTCOME" == succeed ]] || exit 1
+                    printf '%s\\n' sigint >> "$FAKE_DOCKER_LOG_PATH"
+                    if [[ -n "$FAKE_DOCKER_SIGINT_STATE" ]]; then
+                      printf '%s' "$FAKE_DOCKER_SIGINT_STATE" > "$FAKE_DOCKER_STATE_PATH"
+                    fi
+                    ;;
+                  *' kill -s SIGTERM slam-mapper '*)
+                    printf '%s\\n' sigterm >> "$FAKE_DOCKER_LOG_PATH"
+                    if [[ -n "$FAKE_DOCKER_SIGTERM_STATE" ]]; then
+                      printf '%s' "$FAKE_DOCKER_SIGTERM_STATE" > "$FAKE_DOCKER_STATE_PATH"
+                    fi
+                    ;;
+                  *' kill -s SIGKILL slam-mapper '*)
+                    printf '%s\\n' sigkill >> "$FAKE_DOCKER_LOG_PATH"
+                    if [[ -n "$FAKE_DOCKER_SIGKILL_STATE" ]]; then
+                      printf '%s' "$FAKE_DOCKER_SIGKILL_STATE" > "$FAKE_DOCKER_STATE_PATH"
+                    fi
                     ;;
                   *' stop gazebo-server sim-adapter '*)
                     printf '%s\\n' stop >> "$FAKE_DOCKER_LOG_PATH"
@@ -378,8 +481,14 @@ class DeployOnlyBundleTest(unittest.TestCase):
                 'PATH': f'{bin_dir}{os.pathsep}{environment["PATH"]}',
                 'FAKE_DOCKER_STATE_PATH': str(state_path),
                 'FAKE_DOCKER_LOG_PATH': str(log_path),
-                'FAKE_DOCKER_KILL_OUTCOME': kill_outcome,
+                'FAKE_DOCKER_ADAPTER_HEALTH': adapter_health,
+                'FAKE_DOCKER_MAPPER_OWNER': mapper_owner,
+                'FAKE_DOCKER_MAPPER_NAMESPACE': mapper_namespace,
+                'FAKE_DOCKER_SIGINT_STATE': sigint_state or '',
+                'FAKE_DOCKER_SIGTERM_STATE': sigterm_state or '',
+                'FAKE_DOCKER_SIGKILL_STATE': sigkill_state or '',
                 'MAPPING_STOP_TIMEOUT_SECONDS': timeout,
+                'MAPPING_ABORT_TIMEOUT_SECONDS': timeout,
             })
             result = subprocess.run(
                 ['bash', str(BUNDLE / 'run.sh'), 'mapping-stop'],

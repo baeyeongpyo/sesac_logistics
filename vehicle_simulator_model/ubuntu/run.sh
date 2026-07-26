@@ -57,9 +57,18 @@ validate_mapping_stop_timeout() {
   fi
 }
 
+validate_mapping_abort_timeout() {
+  if [[ ! "$MAPPING_ABORT_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
+    echo 'MAPPING_ABORT_TIMEOUT_SECONDS must be a non-negative integer' >&2
+    return 2
+  fi
+}
+
 wait_for_mapper_exit() {
   local mapper_id="$1"
-  local deadline=$((SECONDS + MAPPING_STOP_TIMEOUT_SECONDS))
+  local timeout_seconds="$2"
+  local operation="$3"
+  local deadline=$((SECONDS + timeout_seconds))
   local mapper_state
 
   while :; do
@@ -72,15 +81,92 @@ wait_for_mapper_exit() {
       return 0
     fi
     if [[ "$mapper_state" != true\ * ]]; then
-      echo 'slam-mapper container state is unavailable before finalization completed' >&2
+      echo "slam-mapper container state is unavailable before ${operation} completed" >&2
       return 2
     fi
     if ((SECONDS >= deadline)); then
-      echo "timed out waiting ${MAPPING_STOP_TIMEOUT_SECONDS}s for slam-mapper finalization" >&2
+      echo "timed out waiting ${timeout_seconds}s for slam-mapper ${operation}" >&2
       return 1
     fi
     sleep 1
   done
+}
+
+mapping_owner_error=''
+
+mapper_has_current_healthy_owner() {
+  local mapper_id="$1"
+  local adapter_id adapter_state mapper_binding adapter_namespace mapper_namespace
+  local mapper_running mapper_network_owner mapper_ipc_owner expected_owner
+
+  adapter_id="$("${COMPOSE[@]}" ps -q sim-adapter)"
+  if [[ -z "$adapter_id" ]]; then
+    mapping_owner_error='current sim-adapter is not running'
+    return 1
+  fi
+  adapter_state="$(
+    docker inspect --format \
+      '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' \
+      "$adapter_id" 2>/dev/null || true
+  )"
+  if [[ "$adapter_state" != 'true healthy' ]]; then
+    mapping_owner_error="current sim-adapter is not healthy (container ${adapter_id}, state ${adapter_state:-unknown})"
+    return 1
+  fi
+
+  mapper_binding="$(
+    docker inspect --format \
+      '{{.State.Running}} {{.HostConfig.NetworkMode}} {{.HostConfig.IpcMode}}' \
+      "$mapper_id" 2>/dev/null || true
+  )"
+  read -r mapper_running mapper_network_owner mapper_ipc_owner <<<"$mapper_binding"
+  expected_owner="container:${adapter_id}"
+  if [[ "$mapper_running" != true \
+    || "$mapper_network_owner" != "$expected_owner" \
+    || "$mapper_ipc_owner" != "$expected_owner" ]]; then
+    mapping_owner_error="slam-mapper is not joined to the current healthy sim-adapter network and IPC namespaces (expected ${expected_owner}, network ${mapper_network_owner:-unknown}, IPC ${mapper_ipc_owner:-unknown})"
+    return 1
+  fi
+
+  adapter_namespace="$(
+    docker exec "$adapter_id" bash -c \
+      'printf "%s %s\n" "$(readlink /proc/1/ns/net)" "$(readlink /proc/1/ns/ipc)"' \
+      2>/dev/null || true
+  )"
+  mapper_namespace="$(
+    docker exec "$mapper_id" bash -c \
+      'printf "%s %s\n" "$(readlink /proc/1/ns/net)" "$(readlink /proc/1/ns/ipc)"' \
+      2>/dev/null || true
+  )"
+  if [[ ! "$adapter_namespace" =~ ^net:\[[0-9]+\][[:space:]]+ipc:\[[0-9]+\]$ \
+    || "$mapper_namespace" != "$adapter_namespace" ]]; then
+    mapping_owner_error="actual network and IPC namespace identities differ (adapter ${adapter_namespace:-unknown}, mapper ${mapper_namespace:-unknown})"
+    return 1
+  fi
+}
+
+abort_invalid_mapping() {
+  local mapper_id="$1"
+  local mapper_exit_code=''
+
+  echo "mapping session is invalid: ${mapping_owner_error}; aborting without finalization" >&2
+  "${COMPOSE[@]}" kill -s SIGTERM slam-mapper >/dev/null 2>&1 || true
+  if ! mapper_exit_code="$(
+    wait_for_mapper_exit "$mapper_id" "$MAPPING_ABORT_TIMEOUT_SECONDS" 'abort'
+  )"; then
+    echo 'forcing slam-mapper cleanup after bounded SIGTERM abort' >&2
+    "${COMPOSE[@]}" kill -s SIGKILL slam-mapper >/dev/null 2>&1 || true
+    if ! mapper_exit_code="$(
+      wait_for_mapper_exit "$mapper_id" "$MAPPING_ABORT_TIMEOUT_SECONDS" 'forced abort'
+    )"; then
+      echo 'slam-mapper abort could not be confirmed; leaving simulation services running' >&2
+      return 1
+    fi
+  fi
+  if ! "${COMPOSE[@]}" stop gazebo-server sim-adapter; then
+    echo 'slam-mapper was aborted, but simulation service cleanup failed' >&2
+  fi
+  echo "slam-mapper aborted with exit code ${mapper_exit_code}; staged .inprogress data was not published" >&2
 }
 
 usage() {
@@ -186,15 +272,54 @@ case "${1:-}" in
       exit 2
     fi
     MAPPING_STOP_TIMEOUT_SECONDS="${MAPPING_STOP_TIMEOUT_SECONDS:-90}"
+    MAPPING_ABORT_TIMEOUT_SECONDS="${MAPPING_ABORT_TIMEOUT_SECONDS:-10}"
     validate_mapping_stop_timeout
+    validate_mapping_abort_timeout
     mapper_id="$("${COMPOSE[@]}" ps -q --all slam-mapper)"
     if [[ -z "$mapper_id" ]]; then
       echo 'slam-mapper is not running; no mapping finalization is in progress' >&2
       exit 3
     fi
+    mapper_state="$(
+      docker inspect --format '{{.State.Running}} {{.State.ExitCode}}' \
+        "$mapper_id" 2>/dev/null || true
+    )"
+    if [[ "$mapper_state" =~ ^false[[:space:]]+([0-9]+)$ ]]; then
+      mapper_exit_code="${BASH_REMATCH[1]}"
+    elif [[ "$mapper_state" == true\ * ]]; then
+      mapper_exit_code=''
+    else
+      echo 'slam-mapper container state is unavailable before mapping-stop' >&2
+      exit 4
+    fi
+
+    if [[ -n "$mapper_exit_code" ]]; then
+      if [[ "$mapper_exit_code" == 0 ]]; then
+        echo 'mapping finalization succeeded'
+        finalization_status=0
+      else
+        echo "mapping finalization failed (slam-mapper exit code ${mapper_exit_code})" >&2
+        finalization_status="$mapper_exit_code"
+      fi
+      if ! "${COMPOSE[@]}" stop gazebo-server sim-adapter; then
+        echo 'mapping finalization completed, but simulation service cleanup failed' >&2
+        [[ "$finalization_status" == 0 ]] && exit 6
+      fi
+      exit "$finalization_status"
+    fi
+
+    if ! mapper_has_current_healthy_owner "$mapper_id"; then
+      if ! abort_invalid_mapping "$mapper_id"; then
+        exit 8
+      fi
+      exit 7
+    fi
+
     kill_failed=0
     if ! "${COMPOSE[@]}" kill -s SIGINT slam-mapper; then kill_failed=1; fi
-    if ! mapper_exit_code="$(wait_for_mapper_exit "$mapper_id")"; then
+    if ! mapper_exit_code="$(
+      wait_for_mapper_exit "$mapper_id" "$MAPPING_STOP_TIMEOUT_SECONDS" 'finalization'
+    )"; then
       if ((kill_failed)); then
         echo 'failed to send SIGINT to slam-mapper and its finalization state is unknown; services remain running' >&2
         exit 4

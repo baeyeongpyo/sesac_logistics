@@ -57,6 +57,7 @@ rosbag_pid=''
 slam_pid=''
 published=0
 finalization_in_progress=0
+abort_requested=0
 
 release_lock() {
   rmdir "$lock_dir" 2>/dev/null || true
@@ -247,9 +248,21 @@ module.write_checksums(Path(session_dir))
 PY
 }
 
+rollback_to_staging() {
+  [[ ! -e "$stage_dir" && -d "$final_dir" ]] || return 1
+  "$atomic_publisher" "$final_dir" "$stage_dir" || return 1
+  [[ -d "$stage_dir" && ! -e "$final_dir" ]] || return 1
+  published=0
+}
+
 publish_session() {
   # Contract token for the same-parent rename: mv "$stage_dir" "$final_dir"
+  (( ! abort_requested )) || return 1
   if ! "$atomic_publisher" "$stage_dir" "$final_dir"; then return 1; fi
+  if ((abort_requested)); then
+    rollback_to_staging || return 1
+    return 1
+  fi
   [[ ! -e "$stage_dir" && -d "$final_dir" ]] || return 1
   published=1
 }
@@ -260,31 +273,58 @@ finalize_session() {
   fi
   finalization_in_progress=1
   local save_request posegraph_request
+  (( ! abort_requested )) || return 1
   if ! wait_for_slam_services; then return 1; fi
+  (( ! abort_requested )) || return 1
   save_request="$(make_save_map_request "${stage_dir}/map")"
   posegraph_request="$(make_posegraph_request "${stage_dir}/posegraph/mentorpi")"
   if ! run_ros2 service call /slam_toolbox/save_map slam_toolbox/srv/SaveMap "$save_request"; then return 1; fi
+  (( ! abort_requested )) || return 1
   if ! run_ros2 service call /slam_toolbox/serialize_map slam_toolbox/srv/SerializePoseGraph "$posegraph_request"; then return 1; fi
+  (( ! abort_requested )) || return 1
   if ! stop_recording_and_slam; then return 1; fi
+  (( ! abort_requested )) || return 1
   if [[ ! -s "$stage_dir/map.yaml" || ! -s "$stage_dir/map.pgm" ]]; then return 1; fi
   if ! posegraph_is_nonempty || ! rosbag_metadata_is_nonempty || ! rosbag_storage_is_nonempty; then return 1; fi
   if ! write_metadata_and_checksums; then return 1; fi
+  (( ! abort_requested )) || return 1
   publish_session
 }
 
-on_signal() {
+on_sigint() {
   local status
   if ((finalization_in_progress)); then
     return 0
   fi
   if finalize_session; then
+    if ((abort_requested)); then
+      if ((published)); then
+        rollback_to_staging || true
+      fi
+      exit 143
+    fi
     exit 0
   else
     status=$?
     exit "$status"
   fi
 }
-trap on_signal INT TERM
+
+on_sigterm() {
+  abort_requested=1
+  if ((published)); then
+    trap - TERM
+    rollback_to_staging || true
+    exit 143
+  fi
+  if ((finalization_in_progress)); then
+    return 0
+  fi
+  trap - TERM
+  exit 143
+}
+trap on_sigint INT
+trap on_sigterm TERM
 
 ros2 bag record --output "$stage_dir/rosbag2/mapping" \
   /clock /tf /tf_static /robot_1/scan_raw /robot_1/imu/data_raw /robot_1/odom &
@@ -297,7 +337,7 @@ while ! process_finished "$slam_pid"; do
 done
 if wait "$slam_pid"; then
   slam_pid=''
-  finalize_session
+  die 'slam_toolbox exited before operator SIGINT; preserving staged session'
 else
   exit $?
 fi

@@ -90,6 +90,23 @@ class MappingSessionScriptTest(unittest.TestCase):
             self.assertIn('rosbag2/mapping/metadata.yaml', checksum_paths)
             self.assertFalse((environment['data_root'] / '.inprogress' / 'session-1').exists())
 
+    def test_sigterm_aborts_without_ros_service_calls_or_publishing(self):
+        self.require_script()
+        with self.fake_ros_environment() as environment:
+            process = self.start_script(environment)
+            self.wait_for_ready_processes(environment)
+
+            process.send_signal(signal.SIGTERM)
+            _, errors = process.communicate(timeout=10)
+
+            self.assertNotEqual(process.returncode, 0, errors)
+            self.assertTrue(environment['stage'].is_dir())
+            self.assertFalse((environment['data_root'] / 'session-1').exists())
+            self.assertEqual(list(environment['request_dir'].iterdir()), [])
+            self.assertFalse(
+                (environment['data_root'] / '.session-locks' / 'session-1.lock').exists()
+            )
+
     def test_finalization_failure_retains_only_inprogress_session(self):
         self.require_script()
         with self.fake_ros_environment() as environment:
@@ -153,7 +170,7 @@ class MappingSessionScriptTest(unittest.TestCase):
                 with self.assertRaises(ProcessLookupError):
                     os.kill(int(pid_path.read_text()), 0)
 
-    def test_repeated_signal_keeps_finalization_active_and_requests_are_json(self):
+    def test_sigterm_during_sigint_finalization_prevents_publish(self):
         with self.fake_ros_environment() as environment:
             environment['env']['FAKE_ROS_CALL_DELAY'] = '1'
             process = self.start_script(environment)
@@ -162,11 +179,28 @@ class MappingSessionScriptTest(unittest.TestCase):
             time.sleep(0.1)
             process.send_signal(signal.SIGTERM)
             _, errors = process.communicate(timeout=10)
-            self.assertEqual(process.returncode, 0, errors)
-            save_request = json.loads((environment['request_dir'] / 'save_map.json').read_text())
-            graph_request = json.loads((environment['request_dir'] / 'serialize_map.json').read_text())
-            self.assertEqual(save_request['name']['data'], str((environment['stage'] / 'map').resolve()))
-            self.assertEqual(graph_request['filename'], str((environment['stage'] / 'posegraph' / 'mentorpi').resolve()))
+            self.assertNotEqual(process.returncode, 0, errors)
+            self.assertTrue(environment['stage'].is_dir())
+            self.assertFalse((environment['data_root'] / 'session-1').exists())
+
+    def test_sigterm_across_atomic_publish_rolls_final_back_to_staging(self):
+        with self.fake_ros_environment() as environment:
+            environment['env']['FAKE_ATOMIC_PUBLISH_DELAY_AFTER_MOVE'] = '1'
+            process = self.start_script(environment)
+            self.wait_for_ready_processes(environment)
+            process.send_signal(signal.SIGINT)
+
+            final_dir = environment['data_root'] / 'session-1'
+            deadline = time.monotonic() + 5
+            while not final_dir.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(final_dir.is_dir(), 'atomic publisher did not expose final')
+
+            process.send_signal(signal.SIGTERM)
+            _, errors = process.communicate(timeout=10)
+            self.assertNotEqual(process.returncode, 0, errors)
+            self.assertTrue(environment['stage'].is_dir())
+            self.assertFalse(final_dir.exists())
 
     def test_main_lifecycle_wait_polls_so_pid_one_can_process_sigint(self):
         text = SCRIPT.read_text()
@@ -289,7 +323,8 @@ while True:
                 set -euo pipefail
                 if [[ "${FAKE_ATOMIC_PUBLISH_UNSUPPORTED:-}" == 1 ]]; then exit 2; fi
                 [[ -d "$1" && ! -e "$2" ]] || exit 1
-                exec /bin/mv "$1" "$2"
+                /bin/mv "$1" "$2"
+                if [[ "${FAKE_ATOMIC_PUBLISH_DELAY_AFTER_MOVE:-}" == 1 ]]; then sleep 1; fi
             '''))
             fake_atomic_publisher.chmod(0o755)
             environment = os.environ.copy()
