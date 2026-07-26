@@ -17,6 +17,8 @@ RUN apt-get update \
         python3-rosdep \
         ros-humble-robot-state-publisher \
         ros-humble-ros-gzharmonic \
+        ros-humble-rosbag2 \
+        ros-humble-slam-toolbox \
         ros-humble-tf2-ros \
         ros-humble-xacro \
     && rm -rf /var/lib/apt/lists/*
