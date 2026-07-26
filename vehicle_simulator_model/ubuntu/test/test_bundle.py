@@ -71,10 +71,17 @@ class DeployOnlyBundleTest(unittest.TestCase):
 
     def test_runtime_image_uses_humble_with_harmonic(self):
         dockerfile = (BUNDLE / 'Dockerfile').read_text()
-        self.assertIn('FROM osrf/ros:humble-desktop-full-jammy AS runtime', dockerfile)
+        self.assertIn('FROM ros:humble-ros-base-jammy AS runtime', dockerfile)
+        self.assertNotIn('humble-desktop-full', dockerfile)
         self.assertIn('https://packages.osrfoundation.org/gazebo.gpg', dockerfile)
         self.assertIn('gz-harmonic', dockerfile)
-        self.assertIn('ros-humble-ros-gzharmonic', dockerfile)
+        for required in (
+            'ros-humble-robot-state-publisher',
+            'ros-humble-ros-gzharmonic',
+            'ros-humble-tf2-ros',
+            'ros-humble-xacro',
+        ):
+            self.assertIn(required, dockerfile)
         for removed in ('ros-humble-ros-gz \\', 'VirtualGL', 'x11-apps', 'xauth', 'dbus-x11'):
             self.assertNotIn(removed, dockerfile)
         self.assertFalse((BUNDLE / 'vendor/virtualgl_3.1.4_amd64.deb').exists())

@@ -1,4 +1,4 @@
-FROM osrf/ros:humble-desktop-full-jammy AS runtime
+FROM ros:humble-ros-base-jammy AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -15,7 +15,9 @@ RUN apt-get update \
         mesa-utils \
         python3-colcon-common-extensions \
         python3-rosdep \
+        ros-humble-robot-state-publisher \
         ros-humble-ros-gzharmonic \
+        ros-humble-tf2-ros \
         ros-humble-xacro \
     && rm -rf /var/lib/apt/lists/*
 
