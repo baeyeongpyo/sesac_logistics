@@ -14,7 +14,6 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'entrypoint.sh',
             'run.sh',
             'README.md',
-            'vendor/virtualgl_3.1.4_amd64.deb',
             'ros2_ws/src/mentorpi_description/package.xml',
             'ros2_ws/src/mentorpi_gz_sim/package.xml',
         ):
@@ -31,16 +30,21 @@ class DeployOnlyBundleTest(unittest.TestCase):
         self.assertIn('RENDER_GID', compose)
         self.assertIn('IGN_IP: 127.0.0.1', compose)
 
-        dockerfile = (BUNDLE / 'Dockerfile').read_text()
-        self.assertIn('ARG VIRTUALGL_VERSION=3.1.4', dockerfile)
-        self.assertIn('COPY vendor/virtualgl_${VIRTUALGL_VERSION}_amd64.deb', dockerfile)
-        self.assertIn('02edc6b599571c385389af1a006f07a70c298e1d97c580a9bfd4b39d835c51e6', dockerfile)
-
         script = (BUNDLE / 'run.sh').read_text()
         for command in ('build', 'shell', 'headless', 'gui', 'test', 'fork-up'):
             self.assertIn(command, script)
         self.assertIn('/opt/VirtualGL/bin/vglrun -d egl -c proxy', script)
         self.assertIn('source install/setup.bash', script)
+
+    def test_runtime_image_uses_humble_with_harmonic(self):
+        dockerfile = (BUNDLE / 'Dockerfile').read_text()
+        self.assertIn('FROM osrf/ros:humble-desktop-full-jammy AS runtime', dockerfile)
+        self.assertIn('https://packages.osrfoundation.org/gazebo.gpg', dockerfile)
+        self.assertIn('gz-harmonic', dockerfile)
+        self.assertIn('ros-humble-ros-gzharmonic', dockerfile)
+        for removed in ('ros-humble-ros-gz \\', 'VirtualGL', 'x11-apps', 'xauth', 'dbus-x11'):
+            self.assertNotIn(removed, dockerfile)
+        self.assertFalse((BUNDLE / 'vendor/virtualgl_3.1.4_amd64.deb').exists())
 
     def test_repository_has_no_duplicate_root_runtime_layout(self):
         for legacy_path in ('docker', 'ros2_ws', 'compose.yaml', 'test'):
