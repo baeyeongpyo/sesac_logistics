@@ -104,7 +104,11 @@ Mac Docker Desktop에서 대체할 수 없다.
 버전 metadata를 컨테이너에 전달한다. `mapping-stop`은 mapper에 먼저 `SIGINT`를 보내 map, posegraph, rosbag,
 manifest, checksum finalization이 끝날 때까지 제한 시간(기본 90초)만큼 기다린다. 완료 전에 `down`을 호출하지
 않으므로 finalization을 중단하지 않는다. mapper가 0으로 종료되면 성공을, 다른 종료 코드면 실패를 명확히
-보고한 뒤 Gazebo와 adapter를 정지한다. 제한 시간을 넘으면 mapper는 건드리지 않고 나머지 서비스만 정지한다.
+보고한 뒤 Gazebo와 adapter를 정지한다. 제한 시간을 넘으면 mapper와 지원 서비스를 모두 유지한다.
+
+새 Docker volume의 root는 처음에 `root:root`이므로, 첫 mapping-up은 별도 one-shot initializer를 root로
+실행해 `/slam-data` root만 image의 `ros:ros`(uid/gid 1000)로 설정한다. mapper는 계속 non-root로 실행된다.
+initializer는 recursive chown을 하지 않으므로 기존 세션 내용을 변경하지 않는다.
 
 성공한 세션은 Docker named volume `mentorpi-slam-data`의 다음 최종 디렉터리에 원자적으로 publish된다.
 

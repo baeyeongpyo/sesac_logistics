@@ -88,3 +88,50 @@ docker compose -f vehicle_simulator_model/ubuntu/compose.yaml --profile mapping 
 git diff --check
 # all exited 0
 ```
+
+## Fix round 2/5 (2026-07-26)
+
+Task 5 exposed a fresh named-volume ownership failure: Docker created
+`mentorpi-slam-data` as `root:root` while the mapper runs as uid/gid 1000. The
+mapping profile now has one-shot `slam-data-init`, the only root-running service.
+It executes non-recursive `chown 1000:1000 /slam-data`; `slam-mapper` remains
+non-root and depends on both its successful completion and a healthy adapter.
+No session subtree is recursively chowned or otherwise modified. The inspector
+continues to mount the volume read-only.
+
+The first mapping-up performs this root-directory ownership setup. Repeated runs
+only reassert the mount-root owner and do not alter existing session contents.
+
+Fresh verification output summary:
+
+```bash
+python3 -m unittest \
+  vehicle_simulator_model/ubuntu/test/test_bundle.py \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_slam_contract.py \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_session_artifacts.py \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_mapping_session_script.py -v
+# Ran 35 tests in 19.125s — OK
+
+bash -n vehicle_simulator_model/ubuntu/run.sh \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/scripts/run_mapping_session.sh
+docker compose -f vehicle_simulator_model/ubuntu/compose.yaml config --quiet
+docker compose -f vehicle_simulator_model/ubuntu/compose.yaml --profile mapping config --quiet
+git diff --check
+# all exited 0
+```
+
+A bounded (30-second per container) temporary-volume smoke check used
+`mentorpi-task4-init-check-r2`, not `mentorpi-slam-data`:
+
+```bash
+docker run --rm --user 0:0 -v mentorpi-task4-init-check-r2:/slam-data \
+  --entrypoint /bin/bash mentorpi-sim:harmonic -lc 'chown 1000:1000 /slam-data'
+docker run --rm --user 1000:1000 -v mentorpi-task4-init-check-r2:/slam-data \
+  --entrypoint /bin/bash mentorpi-sim:harmonic -lc \
+  'test "$(stat -c %u:%g /slam-data)" = 1000:1000 && test -w /slam-data && \
+   mkdir /slam-data/.initializer-write-check && rmdir /slam-data/.initializer-write-check'
+# temporary volume initializer check: uid_gid=1000:1000 mapper_write=ok
+```
+
+The temporary volume was removed afterward; `docker volume inspect mentorpi-slam-data`
+reported `preserved volume=mentorpi-slam-data`.

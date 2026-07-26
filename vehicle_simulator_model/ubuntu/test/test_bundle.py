@@ -189,6 +189,31 @@ class DeployOnlyBundleTest(unittest.TestCase):
         self.assertIn('slam-data:', compose)
         self.assertIn('name: mentorpi-slam-data', compose)
 
+    def test_mapping_volume_initializer_only_owns_volume_root_before_mapper(self):
+        compose = (BUNDLE / 'compose.yaml').read_text()
+        self.assertIn('  slam-data-init:', compose)
+        initializer = compose.split('  slam-data-init:', 1)[1].split(
+            '  slam-mapper:', 1
+        )[0]
+        mapper = compose.split('  slam-mapper:', 1)[1].split(
+            '  slam-inspector:', 1
+        )[0]
+
+        for required in (
+            'profiles: [mapping]',
+            'restart: "no"',
+            'user: "0:0"',
+            'chown 1000:1000 /slam-data',
+            'slam-data:/slam-data',
+        ):
+            self.assertIn(required, initializer)
+        self.assertNotIn('chown -R', initializer)
+        self.assertNotIn('chmod -R', initializer)
+        self.assertIn('slam-data-init:', mapper)
+        self.assertIn('condition: service_completed_successfully', mapper)
+        self.assertIn('sim-adapter:', mapper)
+        self.assertIn('condition: service_healthy', mapper)
+
     def test_mapping_commands_validate_session_and_preserve_finalization(self):
         script = (BUNDLE / 'run.sh').read_text()
         self.assertIn('  mapping-up)', script)
@@ -427,6 +452,8 @@ class DeployOnlyBundleTest(unittest.TestCase):
             '.inprogress',
             'mentorpi-slam-data',
             'mentorpi-slam-data:/slam-data:ro',
+            '첫 mapping-up',
+            '기존 세션 내용을 변경하지 않는다',
         ):
             self.assertIn(text, readme)
 

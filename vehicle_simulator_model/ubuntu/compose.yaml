@@ -45,6 +45,18 @@ services:
       retries: 12
       start_period: 10s
 
+  slam-data-init:
+    <<: *runtime
+    profiles: [mapping]
+    restart: "no"
+    user: "0:0"
+    environment:
+      <<: *runtime-environment
+      SERVICE_NAME: slam-data-init
+    command: chown 1000:1000 /slam-data
+    volumes:
+      - slam-data:/slam-data
+
   slam-mapper:
     <<: *runtime
     profiles: [mapping]
@@ -62,6 +74,8 @@ services:
     depends_on:
       sim-adapter:
         condition: service_healthy
+      slam-data-init:
+        condition: service_completed_successfully
     volumes:
       - slam-data:/slam-data
 
