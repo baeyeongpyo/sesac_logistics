@@ -10,8 +10,7 @@ from launch.substitutions import LaunchConfiguration
 def generate_launch_description():
     package_share = get_package_share_directory('mentorpi_gz_sim')
     world = str(Path(package_share) / 'worlds' / 'warehouse.sdf')
-    verbosity = LaunchConfiguration('verbosity')
-    gz_args = f'-r -s --headless-rendering -v {verbosity} {world}'
+    gz_args = ['-r -s --headless-rendering -v ', LaunchConfiguration('verbosity'), ' ', world]
 
     return LaunchDescription([
         DeclareLaunchArgument('verbosity', default_value='2'),
