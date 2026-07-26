@@ -11,6 +11,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
         for relative_path in (
             'Dockerfile',
             'compose.yaml',
+            'compose.gpu.yaml',
             'entrypoint.sh',
             'run.sh',
             'README.md',
@@ -20,21 +21,44 @@ class DeployOnlyBundleTest(unittest.TestCase):
             self.assertTrue((BUNDLE / relative_path).is_file(), relative_path)
 
         compose = (BUNDLE / 'compose.yaml').read_text()
-        self.assertIn('context: .', compose)
-        self.assertIn('mentorpi-sim:', compose)
-        self.assertIn('mentorpi-gui:', compose)
-        self.assertIn('./ros2_ws:/ws', compose)
-        self.assertIn('/dev/dri/renderD128:/dev/dri/renderD128', compose)
-        self.assertIn('network_mode: host', compose)
-        self.assertIn('/tmp/.Xauthority:ro', compose)
-        self.assertIn('RENDER_GID', compose)
-        self.assertIn('IGN_IP: 127.0.0.1', compose)
+        for service in ('gazebo-server:', 'sim-adapter:'):
+            self.assertIn(service, compose)
+        for required in (
+            'GZ_PARTITION: mentorpi-sim',
+            'condition: service_healthy',
+            'LIBGL_ALWAYS_SOFTWARE',
+            'ros2 launch mentorpi_gz_sim gazebo_server.launch.py',
+            'ros2 launch mentorpi_gz_sim sim_adapter.launch.py',
+            'mentorpi:',
+        ):
+            self.assertIn(required, compose)
+        for removed in (
+            'mentorpi-gui:',
+            'DISPLAY:',
+            'XAUTHORITY:',
+            'VirtualGL',
+            '/dev/dri/renderD128:/dev/dri/renderD128',
+            'network_mode: host',
+            './ros2_ws:/ws',
+        ):
+            self.assertNotIn(removed, compose)
+        for forbidden_port in ('10317:', '10318:', '9002:'):
+            self.assertNotIn(forbidden_port, compose)
+
+        gpu_compose = (BUNDLE / 'compose.gpu.yaml').read_text()
+        self.assertIn('/dev/dri:/dev/dri', gpu_compose)
+        self.assertIn('LIBGL_ALWAYS_SOFTWARE: "0"', gpu_compose)
 
         script = (BUNDLE / 'run.sh').read_text()
-        for command in ('build', 'shell', 'headless', 'gui', 'test', 'fork-up'):
+        for command in ('build', 'sim-up', 'down', 'logs', 'test', 'fork-up'):
             self.assertIn(command, script)
-        self.assertIn('/opt/VirtualGL/bin/vglrun -d egl -c proxy', script)
-        self.assertIn('source install/setup.bash', script)
+        self.assertIn('up -d gazebo-server sim-adapter', script)
+        for removed in ('ssh -Y', 'vglrun', 'DISPLAY'):
+            self.assertNotIn(removed, script)
+
+        entrypoint = (BUNDLE / 'entrypoint.sh').read_text()
+        for required in ('SERVICE_NAME', 'IMAGE_VERSION', 'SESSION_ID', 'ROBOT_IDS'):
+            self.assertIn(required, entrypoint)
 
     def test_runtime_image_uses_humble_with_harmonic(self):
         dockerfile = (BUNDLE / 'Dockerfile').read_text()
@@ -52,9 +76,18 @@ class DeployOnlyBundleTest(unittest.TestCase):
 
     def test_operator_docs_describe_in_place_bundle_changes(self):
         readme = (BUNDLE / 'README.md').read_text()
-        self.assertNotIn('refresh-workspace.sh', readme)
-        self.assertIn('deploy/ubuntu', readme)
-        for text in ('scp -r', 'ssh -Y', 'XAUTHORITY', './run.sh build', './run.sh headless', './run.sh gui'):
+        for removed in ('ssh -Y', 'XAUTHORITY', 'VirtualGL', 'XQuartz'):
+            self.assertNotIn(removed, readme)
+        for text in (
+            'linux/amd64',
+            './run.sh build',
+            './run.sh sim-up',
+            './run.sh logs',
+            './run.sh down',
+            './run.sh fork-up',
+            '브라우저',
+            '오프스크린',
+        ):
             self.assertIn(text, readme)
 
 

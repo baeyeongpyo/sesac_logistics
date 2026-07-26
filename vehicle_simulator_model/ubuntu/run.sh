@@ -9,13 +9,12 @@ usage() {
 Usage: ./run.sh <command>
 
 Commands:
-  build     Build the Ubuntu MentorPi image.
-  shell     Open a ROS-enabled shell in the source-mounted container.
-  headless  Start the two-robot simulation without a GUI.
-  gui       Render on the Ubuntu GPU and display it through trusted SSH X11.
-  test      Build both ROS packages and check their installed prefixes.
-  fork-up [headless|gui]
-            Publish the robot_1 fork target height of 0.11 m on the matching network.
+  build              Build the immutable linux/amd64 MentorPi image.
+  sim-up [gpu]       Start Gazebo and the ROS adapter in the background.
+  down               Stop and remove the simulation services.
+  logs               Follow Gazebo and adapter service logs.
+  test               Run static checks and validate the runtime image.
+  fork-up             Publish the robot_1 fork target height of 0.11 m.
 EOF
 }
 
@@ -23,45 +22,32 @@ case "${1:-}" in
   build)
     "${COMPOSE[@]}" build
     ;;
-  shell)
-    "${COMPOSE[@]}" run --rm mentorpi-sim bash
-    ;;
-  headless)
-    "${COMPOSE[@]}" run --rm mentorpi-sim \
-      ros2 launch mentorpi_gz_sim two_robot_sim.launch.py headless:=true
-    ;;
-  gui)
-    if [[ -z "${DISPLAY:-}" ]]; then
-      echo 'DISPLAY is empty; reconnect to the Ubuntu server with ssh -Y.' >&2
+  sim-up)
+    if [[ "${2:-}" == 'gpu' ]]; then
+      COMPOSE+=( -f "$BUNDLE_DIR/compose.gpu.yaml" )
+    elif [[ -n "${2:-}" ]]; then
+      echo 'sim-up accepts only the optional gpu profile' >&2
       exit 2
     fi
-    auth_file="${XAUTHORITY:-$HOME/.Xauthority}"
-    if [[ ! -r "$auth_file" ]]; then
-      echo "Xauthority is not readable: $auth_file" >&2
-      exit 3
-    fi
-    if [[ ! -e /dev/dri/renderD128 ]]; then
-      echo 'Ubuntu GPU render node is unavailable: /dev/dri/renderD128' >&2
-      exit 4
-    fi
-    export XAUTHORITY="$auth_file"
-    export RENDER_GID="${RENDER_GID:-$(stat -c '%g' /dev/dri/renderD128)}"
-    "${COMPOSE[@]}" run --rm --no-deps mentorpi-gui bash -lc \
-      '/opt/VirtualGL/bin/vglrun -d egl -c proxy ros2 launch mentorpi_gz_sim two_robot_sim.launch.py headless:=false'
+    "${COMPOSE[@]}" up -d gazebo-server sim-adapter
+    ;;
+  down)
+    "${COMPOSE[@]}" down
+    ;;
+  logs)
+    "${COMPOSE[@]}" logs -f gazebo-server sim-adapter
     ;;
   test)
-    "${COMPOSE[@]}" run --rm mentorpi-sim bash -lc \
-      'colcon build --symlink-install && source install/setup.bash && ros2 pkg prefix mentorpi_description && ros2 pkg prefix mentorpi_gz_sim'
+    python3 -m unittest \
+      "$BUNDLE_DIR/test/test_bundle.py" \
+      "$BUNDLE_DIR/ros2_ws/src/mentorpi_description/test/test_original_model.py" \
+      "$BUNDLE_DIR/ros2_ws/src/mentorpi_gz_sim/test/test_gz_pose_to_odom.py" \
+      "$BUNDLE_DIR/ros2_ws/src/mentorpi_gz_sim/test/test_harmonic_launch_contract.py" -v
+    "${COMPOSE[@]}" run --rm --no-deps gazebo-server bash -lc \
+      'gz sim --versions && ros2 pkg prefix mentorpi_description && ros2 pkg prefix mentorpi_gz_sim'
     ;;
   fork-up)
-    service=mentorpi-sim
-    if [[ "${2:-headless}" == 'gui' ]]; then
-      service=mentorpi-host
-    elif [[ "${2:-headless}" != 'headless' ]]; then
-      echo 'fork-up mode must be headless or gui' >&2
-      exit 2
-    fi
-    "${COMPOSE[@]}" run --rm "$service" \
+    "${COMPOSE[@]}" run --rm --no-deps sim-adapter \
       ros2 topic pub --once /robot_1/fork/command std_msgs/msg/Float64 '{data: 0.11}'
     ;;
   -h|--help|help|'')

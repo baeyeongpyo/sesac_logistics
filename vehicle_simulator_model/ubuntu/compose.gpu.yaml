@@ -1,0 +1,6 @@
+services:
+  gazebo-server:
+    devices:
+      - /dev/dri:/dev/dri
+    environment:
+      LIBGL_ALWAYS_SOFTWARE: "0"

@@ -1,37 +1,49 @@
+x-runtime-environment: &runtime-environment
+  GZ_PARTITION: mentorpi-sim
+  ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+  LIBGL_ALWAYS_SOFTWARE: "${LIBGL_ALWAYS_SOFTWARE:-1}"
+  IMAGE_VERSION: "${IMAGE_VERSION:-development}"
+  SESSION_ID: "${SESSION_ID:-none}"
+  ROBOT_IDS: "${ROBOT_IDS:-robot_1,robot_2}"
+
+x-runtime: &runtime
+  build:
+    context: .
+  image: mentorpi-gazebo:humble
+  platform: ${TARGET_PLATFORM:-linux/amd64}
+  environment: *runtime-environment
+  networks:
+    - mentorpi
+  restart: unless-stopped
+
 services:
-  mentorpi-sim:
-    build:
-      context: .
-    image: mentorpi-gazebo:humble
-    platform: ${TARGET_PLATFORM:-linux/amd64}
-    working_dir: /ws
-    volumes:
-      - ./ros2_ws:/ws
+  gazebo-server:
+    <<: *runtime
     environment:
-      # Gazebo server, GUI, and ROS bridges all run in this container.
-      # Loopback prevents Gazebo Transport from choosing an unusable host NIC.
-      IGN_IP: 127.0.0.1
-      QT_X11_NO_MITSHM: "1"
-    stdin_open: true
-    tty: true
+      <<: *runtime-environment
+      SERVICE_NAME: gazebo-server
+    command: ros2 launch mentorpi_gz_sim gazebo_server.launch.py
+    healthcheck:
+      test: ['CMD-SHELL', 'gz topic -l | grep -q /world/mentorpi_warehouse/stats']
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
-  mentorpi-gui:
-    extends:
-      service: mentorpi-sim
-    network_mode: host
+  sim-adapter:
+    <<: *runtime
     environment:
-      DISPLAY: ${DISPLAY:-}
-      XAUTHORITY: /tmp/.Xauthority
-      QT_X11_NO_MITSHM: "1"
-    volumes:
-      - ./ros2_ws:/ws
-      - ${XAUTHORITY:-/tmp/.Xauthority}:/tmp/.Xauthority:ro
-    devices:
-      - /dev/dri/renderD128:/dev/dri/renderD128
-    group_add:
-      - "${RENDER_GID:-991}"
+      <<: *runtime-environment
+      SERVICE_NAME: sim-adapter
+    command: ros2 launch mentorpi_gz_sim sim_adapter.launch.py
+    depends_on:
+      gazebo-server:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'ros2 topic list | grep -q /robot_1/scan_raw']
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
-  mentorpi-host:
-    extends:
-      service: mentorpi-sim
-    network_mode: host
+networks:
+  mentorpi:
+    internal: true
