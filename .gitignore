@@ -42,5 +42,6 @@ Thumbs.db
 !.agents/hooks.json
 docs/superpowers/
 .superpowers/
+.worktrees/
 .env
 .venv
