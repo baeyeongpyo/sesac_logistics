@@ -88,3 +88,28 @@ python3 -m unittest vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/tes
 Ran 16 tests in 19.426s
 OK
 ```
+
+## Fix round 3: kernel-atomic no-replace publication
+
+GNU `mv -T -n` cannot provide the required no-replace guarantee across its user
+space check/rename sequence. Publication now delegates to installed
+`scripts/atomic_publish.py`, which calls Linux `renameat2` via `ctypes` with
+`RENAME_NOREPLACE`. `EEXIST`, unsupported architectures, unsupported kernels, and
+cross-filesystem publication return failure without moving the stage; there is no
+fallback rename path.
+
+`test_atomic_publish.py` directly invokes the helper. On Linux it verifies a
+successful publish and the deterministic already-created-target race, including
+the absence of overwrite or nested stage. On this macOS test host, that Linux-only
+pair is skipped and the helper's unsupported-platform stage-retention test passes.
+The lifecycle fake publisher is used only to exercise the surrounding signal and
+artifact lifecycle on a non-Linux host.
+
+```text
+bash -n vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/scripts/run_mapping_session.sh
+python3 -m py_compile vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/scripts/atomic_publish.py
+python3 -m unittest vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_mapping_session_script.py vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_atomic_publish.py vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_session_artifacts.py vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/test/test_slam_contract.py -v
+
+Ran 19 tests in 18.342s
+OK (skipped=2 Linux-only renameat2 tests on macOS)
+```

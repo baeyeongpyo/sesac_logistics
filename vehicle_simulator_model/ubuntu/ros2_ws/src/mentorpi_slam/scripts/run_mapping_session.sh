@@ -138,9 +138,6 @@ cleanup() {
   release_lock
   return "$status"
 }
-if ! mv --version 2>/dev/null | grep -q 'GNU coreutils'; then
-  die 'GNU mv with -T and -n is required for safe no-clobber publication'
-fi
 mkdir "$lock_dir" 2>/dev/null || die "another mapping lifecycle owns session ${SESSION_ID}"
 trap cleanup EXIT
 [[ ! -e "$stage_dir" && ! -e "$final_dir" ]] || die "session path appeared while acquiring lock for ${SESSION_ID}"
@@ -155,6 +152,8 @@ fi
 [[ -f "$slam_config" ]] || die "installed slam.yaml was not found: ${slam_config}"
 session_artifacts="${script_dir}/session_artifacts.py"
 [[ -f "$session_artifacts" ]] || die "session_artifacts.py was not found: ${session_artifacts}"
+atomic_publisher="${ATOMIC_PUBLISHER:-${script_dir}/atomic_publish.py}"
+[[ -x "$atomic_publisher" ]] || die "atomic_publish.py was not executable: ${atomic_publisher}"
 
 mkdir "$stage_dir"
 mkdir -p "$stage_dir/posegraph" "$stage_dir/rosbag2"
@@ -239,14 +238,9 @@ PY
 }
 
 publish_session() {
-  [[ ! -e "$final_dir" ]] || return 1
   # Contract token for the same-parent rename: mv "$stage_dir" "$final_dir"
-  # GNU mv -T -n preserves that rename shape while refusing an existing target.
-  if mv -T -n "$stage_dir" "$final_dir" 2>/dev/null; then
-    [[ ! -e "$stage_dir" && -d "$final_dir" ]] || return 1
-  else
-    return 1
-  fi
+  if ! "$atomic_publisher" "$stage_dir" "$final_dir"; then return 1; fi
+  [[ ! -e "$stage_dir" && -d "$final_dir" ]] || return 1
   published=1
 }
 

@@ -34,9 +34,9 @@ class MappingSessionScriptTest(unittest.TestCase):
         self.assertIn('posegraph_is_nonempty', text)
         self.assertIn('finalization_in_progress', text)
         self.assertIn('json.dumps', text)
-        self.assertIn('mv -T -n', text)
+        self.assertIn('atomic_publish.py', text)
         self.assertLess(text.index('trap cleanup EXIT'), text.index('session path appeared while acquiring lock'))
-        self.assertIn('GNU mv with -T and -n is required', text)
+        self.assertNotIn('mv -T -n', text)
 
     def test_rejects_invalid_session_id_without_creating_a_final_session(self):
         self.require_script()
@@ -177,12 +177,14 @@ class MappingSessionScriptTest(unittest.TestCase):
             self.assertFalse((final_dir / 'session-1').exists())
             self.assertFalse((environment['data_root'] / '.session-locks' / 'session-1.lock').exists())
 
-    def test_refuses_publish_when_gnu_no_clobber_mv_is_unavailable(self):
+    def test_retains_stage_when_atomic_noreplace_publisher_is_unavailable(self):
         with self.fake_ros_environment() as environment:
-            environment['env']['FAKE_MV_UNSUPPORTED'] = '1'
-            result = self.run_script(environment)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertFalse((environment['ready_dir'] / 'bag').exists())
+            environment['env']['FAKE_ATOMIC_PUBLISH_UNSUPPORTED'] = '1'
+            process = self.start_script(environment)
+            self.wait_for_ready_processes(environment)
+            _, errors = self.interrupt_and_wait(process)
+            self.assertNotEqual(process.returncode, 0, errors)
+            self.assertTrue((environment['data_root'] / '.inprogress' / 'session-1').is_dir())
             self.assertFalse((environment['data_root'] / '.session-locks' / 'session-1.lock').exists())
 
     @contextmanager
@@ -264,20 +266,15 @@ while True:
             esac
             '''))
             fake_ros.chmod(0o755)
-            fake_mv = bin_dir / 'mv'
-            fake_mv.write_text(textwrap.dedent('''\
+            fake_atomic_publisher = bin_dir / 'atomic_publish.py'
+            fake_atomic_publisher.write_text(textwrap.dedent('''\
                 #!/usr/bin/env bash
                 set -euo pipefail
-                if [[ "$1" == --version ]]; then
-                  if [[ "${FAKE_MV_UNSUPPORTED:-}" == 1 ]]; then printf 'mv (BSD)\\n'; else printf 'mv (GNU coreutils) 9.0\\n'; fi
-                  exit 0
-                fi
-                [[ "$1" == -T && "$2" == -n ]] || exit 64
-                shift 2
-                [[ ! -e "$2" ]] || exit 1
+                if [[ "${FAKE_ATOMIC_PUBLISH_UNSUPPORTED:-}" == 1 ]]; then exit 2; fi
+                [[ -d "$1" && ! -e "$2" ]] || exit 1
                 exec /bin/mv "$1" "$2"
             '''))
-            fake_mv.chmod(0o755)
+            fake_atomic_publisher.chmod(0o755)
             environment = os.environ.copy()
             environment.update({
                 'PATH': f'{bin_dir}{os.pathsep}{environment["PATH"]}',
@@ -293,6 +290,7 @@ while True:
                 'FAKE_REQUEST_DIR': str(request_dir),
                 'FAKE_STAGE': str(data_root / '.inprogress' / 'session-1'),
                 'FAKE_FINAL': str(data_root / 'session-1'),
+                'ATOMIC_PUBLISHER': str(fake_atomic_publisher),
                 'SLAM_SERVICE_WAIT_SECONDS': '0',
                 'SLAM_CONFIG_PATH': str(PACKAGE / 'config' / 'slam.yaml'),
             })
