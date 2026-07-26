@@ -2,7 +2,7 @@
 <package format="3">
   <name>mentorpi_gz_sim</name>
   <version>0.2.0</version>
-  <description>Gazebo Fortress simulation for two MentorPi M1 robots.</description>
+  <description>Gazebo Harmonic simulation</description>
   <maintainer email="robotics@example.com">sesac</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_cmake</buildtool_depend>

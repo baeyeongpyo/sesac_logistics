@@ -67,7 +67,7 @@ class MecanumSourceModelTest(unittest.TestCase):
         self.assertIn('<xacro:wheel name="back_right" x="-0.067621" y="-0.07591" z="0.051592"', text)
         drive_plugin = next(
             plugin for plugin in model.findall('plugin')
-            if plugin.attrib['name'] == 'ignition::gazebo::systems::MecanumDrive'
+            if plugin.attrib['name'] == 'gz::sim::systems::MecanumDrive'
         )
         self.assertEqual(drive_plugin.findtext('wheelbase'), '0.13468')
         self.assertEqual(drive_plugin.findtext('wheel_separation'), '0.15182')
@@ -186,10 +186,27 @@ class MecanumSourceModelTest(unittest.TestCase):
                 f'ros_topic_name: /{robot_name}/fork/command, '
                 f'gz_topic_name: /{robot_name}/fork/command, '
                 'ros_type_name: std_msgs/msg/Float64, '
-                'gz_type_name: ignition.msgs.Double, direction: ROS_TO_GZ',
+                'gz_type_name: gz.msgs.Double, direction: ROS_TO_GZ',
                 bridge_text,
             )
-        self.assertIn('<exec_depend>std_msgs</exec_depend>', GAZEBO_PACKAGE_XML.read_text())
+        gazebo_package = GAZEBO_PACKAGE_XML.read_text()
+        self.assertIn('<exec_depend>std_msgs</exec_depend>', gazebo_package)
+        self.assertIn('<description>Gazebo Harmonic simulation</description>', gazebo_package)
+
+    def test_gazebo_assets_use_harmonic_names(self):
+        world = (SOURCE / 'mentorpi_gz_sim/worlds/warehouse.sdf').read_text()
+        model = SDF.read_text()
+        bridges = '\n'.join(path.read_text() for path in BRIDGE_CONFIGS)
+        combined = '\n'.join((world, model, bridges))
+
+        self.assertIn('gz-sim-physics-system', world)
+        self.assertIn('gz::sim::systems::MecanumDrive', model)
+        self.assertIn('gz.msgs.LaserScan', bridges)
+        self.assertIn('xmlns:gz="http://gazebosim.org/schema"', model)
+        self.assertNotIn('ignition-gazebo', combined)
+        self.assertNotIn('ignition::gazebo', combined)
+        self.assertNotIn('ignition.msgs', combined)
+        self.assertNotIn('ignition:expressed_in', combined)
 
 
 if __name__ == '__main__':
