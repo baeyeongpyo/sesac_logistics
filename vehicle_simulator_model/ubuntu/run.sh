@@ -196,6 +196,11 @@ case "${1:-}" in
        ros2 pkg prefix mentorpi_description && \
        ros2 pkg prefix mentorpi_gz_sim && \
        ros2 pkg prefix mentorpi_slam && \
+       xacro \
+         /opt/mentorpi_ws/install/mentorpi_gz_sim/share/mentorpi_gz_sim/models/mentorpi_m1/model.sdf.xacro \
+         robot_name:=robot_1 \
+         | tee /tmp/robot_1.sdf \
+         | grep -F 'model://mentorpi_description/meshes/mecanum/lidar_Link.STL' && \
        colcon test --packages-select mentorpi_gz_sim mentorpi_slam --event-handlers console_direct+ && \
        colcon test-result --verbose"
     ;;

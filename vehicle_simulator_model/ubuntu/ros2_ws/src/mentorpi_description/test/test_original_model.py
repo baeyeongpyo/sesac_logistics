@@ -94,7 +94,7 @@ class MecanumSourceModelTest(unittest.TestCase):
             self.assertEqual(links[link_name].findall('collision'), [])
             mesh = visuals[visual_name].find('geometry/mesh')
             self.assertIsNotNone(mesh)
-            self.assertEqual(mesh.findtext('uri'), f'file://$(find mentorpi_description)/meshes/mecanum/{mesh_name}')
+            self.assertEqual(mesh.findtext('uri'), f'model://mentorpi_description/meshes/mecanum/{mesh_name}')
             self.assertIsNone(mesh.find('scale'))
 
         self.assertEqual(links['imu_link'].findall('visual'), [])
@@ -105,6 +105,19 @@ class MecanumSourceModelTest(unittest.TestCase):
         self.assertEqual(links['lidar_frame'].findtext('sensor/gz_frame_id'), '${robot_name}/lidar_frame')
         self.assertEqual(links['depth_cam'].findtext('sensor/gz_frame_id'), '${robot_name}/depth_cam')
         self.assertEqual(links['imu_link'].findtext('sensor/gz_frame_id'), '${robot_name}/imu_link')
+
+    def test_gazebo_mesh_uris_are_portable_between_server_and_gui(self):
+        model = SDF.read_text()
+        self.assertIn(
+            'model://mentorpi_description/meshes/mecanum/lidar_Link.STL',
+            model,
+        )
+        self.assertIn(
+            'model://mentorpi_description/meshes/mecanum/cam_Link.STL',
+            model,
+        )
+        self.assertNotIn('file://$(find mentorpi_description)', model)
+        self.assertNotIn('/opt/mentorpi_ws', model)
 
     def test_gazebo_chassis_is_below_the_lidar_mesh(self):
         root = ET.parse(SDF).getroot()
