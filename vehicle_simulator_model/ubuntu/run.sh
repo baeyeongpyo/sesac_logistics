@@ -92,16 +92,106 @@ validate_mapping_reconnect_timeout() {
 }
 
 validate_public_viewer() {
+  local normalized_allowlist
+  local normalized_domain
+  local validation_status
+
   : "${VIEWER_DOMAIN:?VIEWER_DOMAIN is required for public viewer}"
   : "${VIEWER_ALLOW_CIDRS:?VIEWER_ALLOW_CIDRS is required for public viewer}"
+
+  # Public domains are ASCII FQDNs without a trailing dot; IDNs use A-labels.
+  if normalized_domain="$(
+    VIEWER_DOMAIN_RAW="$VIEWER_DOMAIN" python3 - <<'PY'
+import ipaddress
+import os
+import re
+import sys
+
+domain = os.environ['VIEWER_DOMAIN_RAW']
+label_pattern = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?')
+
+if (
+    not domain.isascii()
+    or len(domain) > 253
+    or domain.endswith('.')
+    or len(domain.split('.')) < 2
+    or any(
+        not label_pattern.fullmatch(label)
+        for label in domain.split('.')
+    )
+):
+    sys.exit(1)
+
+try:
+    ipaddress.ip_address(domain)
+except ValueError:
+    pass
+else:
+    sys.exit(1)
+
+print(domain.lower())
+PY
+  )"; then
+    VIEWER_DOMAIN="$normalized_domain"
+  else
+    echo 'VIEWER_DOMAIN must be an ASCII DNS hostname without a trailing dot' >&2
+    exit 2
+  fi
+
   if [[ ! "$VIEWER_ALLOW_CIDRS" =~ [^[:space:]] ]]; then
     echo 'VIEWER_ALLOW_CIDRS is required for public viewer' >&2
     exit 2
   fi
-  if [[ "$VIEWER_ALLOW_CIDRS" =~ (^|[[:space:]])(0\.0\.0\.0/0|::/0)($|[[:space:]]) ]]; then
-    echo 'public viewer does not allow unrestricted CIDRs' >&2
+
+  if normalized_allowlist="$(
+    VIEWER_ALLOW_CIDRS_RAW="$VIEWER_ALLOW_CIDRS" python3 - <<'PY'
+import ipaddress
+import os
+import sys
+
+raw_allowlist = os.environ['VIEWER_ALLOW_CIDRS_RAW']
+if (
+    not raw_allowlist.isascii()
+    or any(ord(character) < 32 or ord(character) == 127
+           for character in raw_allowlist)
+):
+    sys.exit(1)
+
+normalized = []
+for token in raw_allowlist.split(' '):
+    if not token:
+        continue
+    if '%' in token:
+        sys.exit(1)
+    try:
+        if '/' in token:
+            value = ipaddress.ip_network(token, strict=True)
+            if value.prefixlen == 0:
+                sys.exit(3)
+        else:
+            value = ipaddress.ip_address(token)
+    except ValueError:
+        sys.exit(1)
+    normalized.append(str(value))
+
+if not normalized:
+    sys.exit(1)
+
+print(' '.join(normalized))
+PY
+  )"; then
+    VIEWER_ALLOW_CIDRS="$normalized_allowlist"
+  else
+    validation_status="$?"
+    if [[ "$validation_status" -eq 3 ]]; then
+      echo 'public viewer does not allow unrestricted CIDRs' >&2
+    else
+      echo 'VIEWER_ALLOW_CIDRS must be a space-separated list of valid IP addresses or CIDRs' >&2
+    fi
     exit 2
   fi
+
+  export VIEWER_DOMAIN VIEWER_ALLOW_CIDRS
 }
 
 wait_for_mapper_exit() {

@@ -17,7 +17,11 @@ class ObservationBundleTest(unittest.TestCase):
             fake_docker = temp_path / 'docker'
             fake_docker.write_text(
                 '#!/usr/bin/env bash\n'
-                'printf \'%s\\n\' "$*" >> "$FAKE_DOCKER_LOG"\n'
+                'printf \'VIEWER_DOMAIN=%s\\n\' "${VIEWER_DOMAIN:-}" '
+                '>> "$FAKE_DOCKER_LOG"\n'
+                'printf \'VIEWER_ALLOW_CIDRS=%s\\n\' '
+                '"${VIEWER_ALLOW_CIDRS:-}" >> "$FAKE_DOCKER_LOG"\n'
+                'printf \'ARGS=%s\\n\' "$*" >> "$FAKE_DOCKER_LOG"\n'
             )
             fake_docker.chmod(0o755)
             env = os.environ.copy()
@@ -26,6 +30,8 @@ class ObservationBundleTest(unittest.TestCase):
                 'FAKE_DOCKER_LOG': str(docker_log),
                 'SIM_NETWORK_MODE': 'internal',
             })
+            env.pop('VIEWER_DOMAIN', None)
+            env.pop('VIEWER_ALLOW_CIDRS', None)
             if extra_env:
                 env.update(extra_env)
 
@@ -97,6 +103,10 @@ class ObservationBundleTest(unittest.TestCase):
             set(public['services']['web-gateway']['networks']),
             {'mentorpi', 'viewer-edge'},
         )
+        self.assertEqual(
+            public['services']['web-gateway']['environment']['VIEWER_SITE'],
+            'https://sim.example.com',
+        )
         for service in ('dds-discovery', 'gazebo-server', 'sim-adapter',
                         'gazebo-viewer'):
             self.assertNotIn(
@@ -151,7 +161,7 @@ class ObservationBundleTest(unittest.TestCase):
                     'VIEWER_DOMAIN': valid_domain,
                     'VIEWER_ALLOW_CIDRS': '203.0.113.10/32\t0.0.0.0/0',
                 },
-                'does not allow unrestricted CIDRs',
+                'must be a space-separated list of valid IP addresses or CIDRs',
             ),
         )
 
@@ -164,6 +174,84 @@ class ObservationBundleTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
                 self.assertEqual(docker_log, '')
+
+    def test_public_viewer_rejects_non_hostname_domains_before_docker(self):
+        invalid_domains = (
+            'http://sim.example.com',
+            'sim.example.com:443',
+            'sim.example.com/viewer',
+            'sim example.com',
+            'sim.example.com\nrespond',
+            'sim.example.com.',
+            '시뮬레이터.example.com',
+        )
+
+        for domain in invalid_domains:
+            with self.subTest(domain=repr(domain)):
+                result, docker_log = self.run_with_fake_docker(
+                    ['viewer-up', 'public'],
+                    {
+                        'VIEWER_DOMAIN': domain,
+                        'VIEWER_ALLOW_CIDRS': '203.0.113.10/32',
+                    },
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(
+                    'VIEWER_DOMAIN must be an ASCII DNS hostname',
+                    result.stderr,
+                )
+                self.assertEqual(docker_log, '')
+
+    def test_public_viewer_rejects_malformed_allowlist_before_docker(self):
+        invalid_allowlists = (
+            'not-an-address',
+            '203.0.113.0/24,2001:db8::/64',
+            '203.0.113.0/33',
+            '2001:db8::/129',
+            '203.0.113.7/24',
+            '203.0.113.10/32\x1b',
+            '203.0.113.10/32\nrespond',
+            'private_ranges',
+        )
+
+        for allowlist in invalid_allowlists:
+            with self.subTest(allowlist=repr(allowlist)):
+                result, docker_log = self.run_with_fake_docker(
+                    ['viewer-up', 'public'],
+                    {
+                        'VIEWER_DOMAIN': 'sim.example.com',
+                        'VIEWER_ALLOW_CIDRS': allowlist,
+                    },
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(
+                    'VIEWER_ALLOW_CIDRS must be a space-separated list of '
+                    'valid IP addresses or CIDRs',
+                    result.stderr,
+                )
+                self.assertEqual(docker_log, '')
+
+    def test_public_viewer_normalizes_valid_hostname_and_allowlist(self):
+        result, docker_log = self.run_with_fake_docker(
+            ['viewer-up', 'public'],
+            {
+                'VIEWER_DOMAIN': 'SIM.Example.COM',
+                'VIEWER_ALLOW_CIDRS': (
+                    '  203.0.113.0/24  198.51.100.7 '
+                    '2001:0db8::/64  2001:db8::1  '
+                ),
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('VIEWER_DOMAIN=sim.example.com\n', docker_log)
+        self.assertIn(
+            'VIEWER_ALLOW_CIDRS=203.0.113.0/24 198.51.100.7 '
+            '2001:db8::/64 2001:db8::1\n',
+            docker_log,
+        )
 
     def test_viewer_up_rejects_lan_mode_before_docker(self):
         for mode in ('local', 'public'):
