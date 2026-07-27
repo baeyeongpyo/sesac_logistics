@@ -9,6 +9,23 @@ BUNDLE = Path(__file__).resolve().parents[1]
 
 
 class ObservationBundleTest(unittest.TestCase):
+    def test_viewer_runs_real_gazebo_gui_read_only_and_shared(self):
+        dockerfile = (BUNDLE / 'Dockerfile').read_text()
+        script = (BUNDLE / 'viewer-entrypoint.sh').read_text()
+        compose = (BUNDLE / 'compose.viewer.yaml').read_text()
+
+        for package in ('xvfb', 'x11vnc', 'novnc', 'websockify'):
+            self.assertIn(package, dockerfile)
+        self.assertIn('Xvfb :99', script)
+        self.assertIn('gz sim --force-version 8 -g', script)
+        self.assertIn('-viewonly', script)
+        self.assertIn('-shared', script)
+        self.assertIn('-forever', script)
+        self.assertIn('websockify --web=/usr/share/novnc 6080', script)
+        self.assertIn('gazebo-viewer:', compose)
+        self.assertIn("expose: ['6080']", compose)
+        self.assertNotIn('6080:6080', compose)
+
     def test_mac_preflight_unsupported_defers_to_task_4_browser_viewer(self):
         readme = (BUNDLE / 'README.md').read_text()
         self.assertIn('exit 4', readme)

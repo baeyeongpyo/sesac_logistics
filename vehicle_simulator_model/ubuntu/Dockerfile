@@ -14,6 +14,7 @@ RUN apt-get update \
         fastdds-tools \
         libxml2-utils \
         mesa-utils \
+        novnc \
         python3-colcon-common-extensions \
         python3-rosdep \
         ros-humble-robot-state-publisher \
@@ -22,6 +23,10 @@ RUN apt-get update \
         ros-humble-slam-toolbox \
         ros-humble-tf2-ros \
         ros-humble-xacro \
+        websockify \
+        x11-utils \
+        x11vnc \
+        xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 COPY ros2_ws/src /opt/mentorpi_ws/src
@@ -35,10 +40,12 @@ RUN useradd --create-home --uid 1000 --user-group --shell /bin/bash ros \
 COPY entrypoint.sh /usr/local/bin/mentorpi-entrypoint
 COPY dds_env.sh /usr/local/bin/mentorpi-dds-env
 COPY healthcheck.sh /usr/local/bin/mentorpi-healthcheck
+COPY viewer-entrypoint.sh /usr/local/bin/mentorpi-viewer
 RUN chmod +x \
     /usr/local/bin/mentorpi-entrypoint \
     /usr/local/bin/mentorpi-dds-env \
-    /usr/local/bin/mentorpi-healthcheck
+    /usr/local/bin/mentorpi-healthcheck \
+    /usr/local/bin/mentorpi-viewer
 
 ENV DEBIAN_FRONTEND= \
     HOME=/home/ros
