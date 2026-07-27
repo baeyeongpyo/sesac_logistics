@@ -152,13 +152,14 @@ import sys
 raw_allowlist = os.environ['VIEWER_ALLOW_CIDRS_RAW']
 if (
     not raw_allowlist.isascii()
-    or any(ord(character) < 32 or ord(character) == 127
+    or any((ord(character) < 32 and character != '\t')
+           or ord(character) == 127
            for character in raw_allowlist)
 ):
     sys.exit(1)
 
 normalized = []
-for token in raw_allowlist.split(' '):
+for token in raw_allowlist.replace('\t', ' ').split(' '):
     if not token:
         continue
     if '%' in token:
@@ -186,7 +187,7 @@ PY
     if [[ "$validation_status" -eq 3 ]]; then
       echo 'public viewer does not allow unrestricted CIDRs' >&2
     else
-      echo 'VIEWER_ALLOW_CIDRS must be a space-separated list of valid IP addresses or CIDRs' >&2
+      echo 'VIEWER_ALLOW_CIDRS must be a space- or tab-separated list of valid IP addresses or CIDRs' >&2
     fi
     exit 2
   fi

@@ -161,7 +161,7 @@ class ObservationBundleTest(unittest.TestCase):
                     'VIEWER_DOMAIN': valid_domain,
                     'VIEWER_ALLOW_CIDRS': '203.0.113.10/32\t0.0.0.0/0',
                 },
-                'must be a space-separated list of valid IP addresses or CIDRs',
+                'does not allow unrestricted CIDRs',
             ),
         )
 
@@ -174,6 +174,23 @@ class ObservationBundleTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
                 self.assertEqual(docker_log, '')
+
+    def test_public_viewer_accepts_tab_separator_and_exports_spaces(self):
+        result, docker_log = self.run_with_fake_docker(
+            ['viewer-up', 'public'],
+            {
+                'VIEWER_DOMAIN': 'sim.example.com',
+                'VIEWER_ALLOW_CIDRS': (
+                    '10.0.0.0/8\t192.168.0.0/16'
+                ),
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            'VIEWER_ALLOW_CIDRS=10.0.0.0/8 192.168.0.0/16\n',
+            docker_log,
+        )
 
     def test_public_viewer_rejects_non_hostname_domains_before_docker(self):
         invalid_domains = (
@@ -227,8 +244,8 @@ class ObservationBundleTest(unittest.TestCase):
 
                 self.assertEqual(result.returncode, 2)
                 self.assertIn(
-                    'VIEWER_ALLOW_CIDRS must be a space-separated list of '
-                    'valid IP addresses or CIDRs',
+                    'VIEWER_ALLOW_CIDRS must be a space- or tab-separated '
+                    'list of valid IP addresses or CIDRs',
                     result.stderr,
                 )
                 self.assertEqual(docker_log, '')
