@@ -4,6 +4,27 @@ set -euo pipefail
 BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export MENTORPI_IMAGE="${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"
 COMPOSE=(docker compose -f "$BUNDLE_DIR/compose.yaml")
+
+configure_network_mode() {
+  case "${SIM_NETWORK_MODE:-internal}" in
+    internal)
+      ;;
+    lan)
+      if [[ -z "${GZ_SERVER_IP:-}" ]]; then
+        echo 'GZ_SERVER_IP is required when SIM_NETWORK_MODE=lan' >&2
+        exit 2
+      fi
+      COMPOSE+=( -f "$BUNDLE_DIR/compose.lan.yaml" )
+      ;;
+    *)
+      echo 'SIM_NETWORK_MODE must be internal or lan' >&2
+      exit 2
+      ;;
+  esac
+}
+
+configure_network_mode
+
 ROS_SETUP='source /usr/local/bin/mentorpi-dds-env && source /opt/ros/humble/setup.bash && source /opt/mentorpi_ws/install/setup.bash'
 
 prepare_gpu() {
