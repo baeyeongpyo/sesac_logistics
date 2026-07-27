@@ -10,6 +10,11 @@ MentorPi Gazebo Harmonic 시뮬레이션을 Docker Compose로 운영하는 headl
 Mac에서는 Docker 컨테이너 GUI 대신 네이티브 Gazebo GUI 개발 환경을 사용한다. 이 번들은
 MentorPi 서버에서 센서와 물리 시뮬레이션을 운영하기 위한 `linux/amd64` 이미지다.
 
+Mac Docker Desktop에서 `scripts/gz-gui-connect.sh`의 Gazebo Transport preflight가 `exit 4`로
+끝나면 direct Gazebo GUI transport는 **UNSUPPORTED**다. 이 결과는 내부 네트워크와 외부 포트
+비공개 계약을 바꾸어 우회하지 않는다. 이 경우에는 Task 4의 `browser viewer` 제공 후 이를
+사용하며, Task 4 구현 전에는 실행할 후속 viewer 명령이 없다.
+
 모든 명령은 `MENTORPI_IMAGE` 하나를 이미지 reference, Compose의 `IMAGE_VERSION` 로그 값으로
 공유한다. 기본값은 Task 5와 호환되는 `mentorpi-sim:harmonic`이다.
 

@@ -9,6 +9,14 @@ BUNDLE = Path(__file__).resolve().parents[1]
 
 
 class ObservationBundleTest(unittest.TestCase):
+    def test_mac_preflight_unsupported_defers_to_task_4_browser_viewer(self):
+        readme = (BUNDLE / 'README.md').read_text()
+        self.assertIn('exit 4', readme)
+        self.assertIn('UNSUPPORTED', readme)
+        self.assertIn('Task 4', readme)
+        self.assertIn('browser viewer', readme)
+        self.assertIn('제공 후', readme)
+
     def test_lan_smoke_checks_two_clients_and_both_robots(self):
         script = (BUNDLE / 'test/smoke_observation.sh').read_text()
         self.assertIn('client-a', script)
