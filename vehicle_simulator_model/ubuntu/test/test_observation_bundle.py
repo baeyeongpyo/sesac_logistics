@@ -122,6 +122,39 @@ class ObservationBundleTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertIn(str(BUNDLE / 'compose.lan.yaml'), result.stdout)
 
+    def test_run_sh_test_executes_observation_bundle_contract(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            python_log = temp_path / 'python-commands'
+            fake_python = temp_path / 'python3'
+            fake_python.write_text(
+                '#!/usr/bin/env bash\n'
+                'printf \'%s\\n\' "$@" >> "$PYTHON_LOG"\n'
+            )
+            fake_python.chmod(0o755)
+            fake_docker = temp_path / 'docker'
+            fake_docker.write_text('#!/usr/bin/env bash\nexit 0\n')
+            fake_docker.chmod(0o755)
+            env = os.environ.copy()
+            env.update({
+                'PATH': f'{temp_path}:{env["PATH"]}',
+                'PYTHON_LOG': str(python_log),
+            })
+
+            result = subprocess.run(
+                [str(BUNDLE / 'run.sh'), 'test'],
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0)
+            self.assertIn(
+                str(BUNDLE / 'test/test_observation_bundle.py'),
+                python_log.read_text(),
+            )
+
     def test_mac_client_preflight_connects_and_starts_gui(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -153,4 +186,67 @@ class ObservationBundleTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertIn(
                 '192.168.50.20|192.168.50.10|mentorpi-sim', result.stdout
+            )
+
+    def test_mac_client_rejects_another_gazebo_version(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_gz = temp_path / 'gz'
+            fake_gz.write_text(
+                '#!/usr/bin/env bash\n'
+                "printf '8.13.0\\n'\n"
+            )
+            fake_gz.chmod(0o755)
+            env = os.environ.copy()
+            env['PATH'] = f'{temp_path}:{env["PATH"]}'
+
+            result = subprocess.run(
+                [
+                    str(BUNDLE / 'scripts/gz-gui-connect.sh'),
+                    '192.168.50.10',
+                    '192.168.50.20',
+                ],
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 3)
+            self.assertIn(
+                'Gazebo Sim 8.14.0 is required on the GUI client', result.stderr
+            )
+
+    def test_mac_client_rejects_an_unreachable_gazebo_server(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_gz = temp_path / 'gz'
+            fake_gz.write_text(
+                '#!/usr/bin/env bash\n'
+                'case "${1:-} ${2:-}" in\n'
+                "  'sim --versions') printf '8.14.0\\n' ;;\n"
+                "  'topic -l') printf '/other/topic\\n' ;;\n"
+                'esac\n'
+            )
+            fake_gz.chmod(0o755)
+            env = os.environ.copy()
+            env['PATH'] = f'{temp_path}:{env["PATH"]}'
+
+            result = subprocess.run(
+                [
+                    str(BUNDLE / 'scripts/gz-gui-connect.sh'),
+                    '192.168.50.10',
+                    '192.168.50.20',
+                ],
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 4)
+            self.assertIn(
+                'Gazebo server is not reachable at 192.168.50.10 on partition '
+                'mentorpi-sim',
+                result.stderr,
             )
