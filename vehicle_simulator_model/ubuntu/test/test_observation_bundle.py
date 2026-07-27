@@ -9,6 +9,14 @@ BUNDLE = Path(__file__).resolve().parents[1]
 
 
 class ObservationBundleTest(unittest.TestCase):
+    def test_lan_smoke_checks_two_clients_and_both_robots(self):
+        script = (BUNDLE / 'test/smoke_observation.sh').read_text()
+        self.assertIn('client-a', script)
+        self.assertIn('client-b', script)
+        self.assertIn('/world/mentorpi_warehouse/stats', script)
+        self.assertIn('/robot_1/scan_raw', script)
+        self.assertIn('/robot_2/scan_raw', script)
+
     def test_lan_profile_uses_host_network_without_changing_base_compose(self):
         base = (BUNDLE / 'compose.yaml').read_text()
         lan = (BUNDLE / 'compose.lan.yaml').read_text()
