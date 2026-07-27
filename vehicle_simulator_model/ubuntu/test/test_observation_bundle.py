@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import tempfile
@@ -9,6 +10,226 @@ BUNDLE = Path(__file__).resolve().parents[1]
 
 
 class ObservationBundleTest(unittest.TestCase):
+    def run_with_fake_docker(self, args, extra_env=None):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            docker_log = temp_path / 'docker.log'
+            fake_docker = temp_path / 'docker'
+            fake_docker.write_text(
+                '#!/usr/bin/env bash\n'
+                'printf \'%s\\n\' "$*" >> "$FAKE_DOCKER_LOG"\n'
+            )
+            fake_docker.chmod(0o755)
+            env = os.environ.copy()
+            env.update({
+                'PATH': f'{temp_path}:{env["PATH"]}',
+                'FAKE_DOCKER_LOG': str(docker_log),
+                'SIM_NETWORK_MODE': 'internal',
+            })
+            if extra_env:
+                env.update(extra_env)
+
+            result = subprocess.run(
+                [str(BUNDLE / 'run.sh'), *args],
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+
+            log = docker_log.read_text() if docker_log.exists() else ''
+            return result, log
+
+    def test_gateway_is_the_only_viewer_service_with_host_ports(self):
+        viewer = (BUNDLE / 'compose.viewer.yaml').read_text()
+        public = (BUNDLE / 'compose.viewer-public.yaml').read_text()
+        caddy = (BUNDLE / 'Caddyfile.viewer').read_text()
+
+        self.assertIn('web-gateway:', viewer)
+        self.assertIn('127.0.0.1:${VIEWER_PORT:-8080}:8080', viewer)
+        self.assertIn('ports: !override', public)
+        self.assertIn('"80:80"', public)
+        self.assertIn('"443:443"', public)
+        self.assertIn('@allowed remote_ip {$VIEWER_ALLOW_CIDRS}', caddy)
+        self.assertIn('reverse_proxy gazebo-viewer:6080', caddy)
+        self.assertIn('respond 403', caddy)
+        self.assertNotIn('basic_auth', caddy)
+        for forbidden in ('10317:', '10318:', '11811:', '5900:', '6080:6080'):
+            self.assertNotIn(forbidden, viewer + public)
+
+    def test_public_compose_gives_only_gateway_https_ports_and_egress(self):
+        base_files = [
+            '-f', str(BUNDLE / 'compose.yaml'),
+            '-f', str(BUNDLE / 'compose.viewer.yaml'),
+        ]
+        local_result = subprocess.run(
+            [
+                'docker', 'compose', *base_files, '--profile', 'viewer',
+                'config', '--format', 'json',
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        public_env = os.environ.copy()
+        public_env.update({
+            'VIEWER_DOMAIN': 'sim.example.com',
+            'VIEWER_ALLOW_CIDRS': '203.0.113.10/32 203.0.113.11/32',
+        })
+        public_result = subprocess.run(
+            [
+                'docker', 'compose', *base_files,
+                '-f', str(BUNDLE / 'compose.viewer-public.yaml'),
+                '--profile', 'viewer', 'config', '--format', 'json',
+            ],
+            text=True,
+            capture_output=True,
+            env=public_env,
+            check=False,
+        )
+
+        self.assertEqual(local_result.returncode, 0, local_result.stderr)
+        self.assertEqual(public_result.returncode, 0, public_result.stderr)
+        local = json.loads(local_result.stdout)
+        public = json.loads(public_result.stdout)
+        self.assertNotIn('viewer-edge', local['networks'])
+        self.assertEqual(
+            set(public['services']['web-gateway']['networks']),
+            {'mentorpi', 'viewer-edge'},
+        )
+        for service in ('dds-discovery', 'gazebo-server', 'sim-adapter',
+                        'gazebo-viewer'):
+            self.assertNotIn(
+                'viewer-edge', public['services'][service]['networks']
+            )
+        self.assertEqual(
+            [
+                (port['published'], port['target'])
+                for port in public['services']['web-gateway']['ports']
+            ],
+            [('80', 80), ('443', 443)],
+        )
+        for service, definition in public['services'].items():
+            if service != 'web-gateway':
+                self.assertNotIn('ports', definition)
+
+    def test_public_viewer_rejects_unsafe_configuration_before_docker(self):
+        valid_domain = 'sim.example.com'
+        valid_allowlist = '203.0.113.10/32 203.0.113.11/32'
+        cases = (
+            (
+                'empty domain',
+                {'VIEWER_DOMAIN': '', 'VIEWER_ALLOW_CIDRS': valid_allowlist},
+                'VIEWER_DOMAIN is required for public viewer',
+            ),
+            (
+                'empty allowlist',
+                {'VIEWER_DOMAIN': valid_domain, 'VIEWER_ALLOW_CIDRS': ''},
+                'VIEWER_ALLOW_CIDRS is required for public viewer',
+            ),
+            (
+                'whitespace-only allowlist',
+                {'VIEWER_DOMAIN': valid_domain, 'VIEWER_ALLOW_CIDRS': ' \t '},
+                'VIEWER_ALLOW_CIDRS is required for public viewer',
+            ),
+            (
+                'all IPv4 sources',
+                {
+                    'VIEWER_DOMAIN': valid_domain,
+                    'VIEWER_ALLOW_CIDRS': '0.0.0.0/0',
+                },
+                'does not allow unrestricted CIDRs',
+            ),
+            (
+                'all IPv6 sources',
+                {'VIEWER_DOMAIN': valid_domain, 'VIEWER_ALLOW_CIDRS': '::/0'},
+                'does not allow unrestricted CIDRs',
+            ),
+            (
+                'tab-separated unrestricted source',
+                {
+                    'VIEWER_DOMAIN': valid_domain,
+                    'VIEWER_ALLOW_CIDRS': '203.0.113.10/32\t0.0.0.0/0',
+                },
+                'does not allow unrestricted CIDRs',
+            ),
+        )
+
+        for label, viewer_env, message in cases:
+            with self.subTest(label):
+                result, docker_log = self.run_with_fake_docker(
+                    ['viewer-up', 'public'], viewer_env
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertEqual(docker_log, '')
+
+    def test_viewer_up_rejects_lan_mode_before_docker(self):
+        for mode in ('local', 'public'):
+            with self.subTest(mode):
+                result, docker_log = self.run_with_fake_docker(
+                    ['viewer-up', mode],
+                    {
+                        'SIM_NETWORK_MODE': 'lan',
+                        'GZ_SERVER_IP': '192.168.50.10',
+                        'VIEWER_DOMAIN': 'sim.example.com',
+                        'VIEWER_ALLOW_CIDRS': '203.0.113.10/32',
+                    },
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(
+                    'viewer-up requires SIM_NETWORK_MODE=internal', result.stderr
+                )
+                self.assertEqual(docker_log, '')
+
+    def test_viewer_up_uses_local_gateway_unless_public_is_selected(self):
+        local_result, local_log = self.run_with_fake_docker(
+            ['viewer-up'], {'VIEWER_MODE': 'local'}
+        )
+        public_result, public_log = self.run_with_fake_docker(
+            ['viewer-up'],
+            {
+                'VIEWER_MODE': 'public',
+                'VIEWER_DOMAIN': 'sim.example.com',
+                'VIEWER_ALLOW_CIDRS': '203.0.113.10/32',
+            },
+        )
+
+        self.assertEqual(local_result.returncode, 0)
+        self.assertIn(str(BUNDLE / 'compose.viewer.yaml'), local_log)
+        self.assertNotIn(str(BUNDLE / 'compose.viewer-public.yaml'), local_log)
+        self.assertIn(
+            '--profile viewer up -d dds-discovery gazebo-server sim-adapter '
+            'gazebo-viewer web-gateway',
+            local_log,
+        )
+        self.assertEqual(public_result.returncode, 0)
+        self.assertIn(str(BUNDLE / 'compose.viewer-public.yaml'), public_log)
+        self.assertIn(
+            'up -d dds-discovery gazebo-server sim-adapter gazebo-viewer '
+            'web-gateway',
+            public_log,
+        )
+
+    def test_viewer_down_and_logs_target_only_viewer_services(self):
+        down_result, down_log = self.run_with_fake_docker(['viewer-down'])
+        logs_result, logs_log = self.run_with_fake_docker(['viewer-logs'])
+
+        self.assertEqual(down_result.returncode, 0)
+        self.assertIn(
+            '--profile viewer stop web-gateway gazebo-viewer', down_log
+        )
+        self.assertNotIn('gazebo-server', down_log)
+        self.assertNotIn('sim-adapter', down_log)
+        self.assertEqual(logs_result.returncode, 0)
+        self.assertIn(
+            '--profile viewer logs -f gazebo-viewer web-gateway', logs_log
+        )
+        self.assertNotIn('gazebo-server', logs_log)
+        self.assertNotIn('sim-adapter', logs_log)
+
     def test_viewer_runs_real_gazebo_gui_read_only_and_shared(self):
         dockerfile = (BUNDLE / 'Dockerfile').read_text()
         script = (BUNDLE / 'viewer-entrypoint.sh').read_text()

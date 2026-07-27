@@ -1,0 +1,14 @@
+services:
+  web-gateway:
+    environment:
+      VIEWER_SITE: "${VIEWER_DOMAIN:?set VIEWER_DOMAIN for automatic HTTPS}"
+      VIEWER_ALLOW_CIDRS: "${VIEWER_ALLOW_CIDRS:?set one or more team CIDRs}"
+    networks:
+      - mentorpi
+      - viewer-edge
+    ports: !override
+      - "80:80"
+      - "443:443"
+
+networks:
+  viewer-edge:

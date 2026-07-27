@@ -24,3 +24,25 @@ services:
       timeout: 5s
       retries: 12
       start_period: 15s
+
+  web-gateway:
+    image: caddy:2.10-alpine
+    profiles: [viewer]
+    restart: unless-stopped
+    networks: [mentorpi]
+    environment:
+      VIEWER_SITE: http://:8080
+      VIEWER_ALLOW_CIDRS: private_ranges
+    volumes:
+      - ./Caddyfile.viewer:/etc/caddy/Caddyfile:ro
+      - viewer-caddy-data:/data
+      - viewer-caddy-config:/config
+    ports:
+      - "127.0.0.1:${VIEWER_PORT:-8080}:8080"
+    depends_on:
+      gazebo-viewer:
+        condition: service_healthy
+
+volumes:
+  viewer-caddy-data:
+  viewer-caddy-config:

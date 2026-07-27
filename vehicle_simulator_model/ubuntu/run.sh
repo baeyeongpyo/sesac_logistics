@@ -4,6 +4,12 @@ set -euo pipefail
 BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export MENTORPI_IMAGE="${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"
 COMPOSE=(docker compose -f "$BUNDLE_DIR/compose.yaml")
+viewer_compose=(
+  docker compose
+  -f "$BUNDLE_DIR/compose.yaml"
+  -f "$BUNDLE_DIR/compose.viewer.yaml"
+  --profile viewer
+)
 
 configure_network_mode() {
   case "${SIM_NETWORK_MODE:-internal}" in
@@ -85,6 +91,19 @@ validate_mapping_reconnect_timeout() {
   fi
 }
 
+validate_public_viewer() {
+  : "${VIEWER_DOMAIN:?VIEWER_DOMAIN is required for public viewer}"
+  : "${VIEWER_ALLOW_CIDRS:?VIEWER_ALLOW_CIDRS is required for public viewer}"
+  if [[ ! "$VIEWER_ALLOW_CIDRS" =~ [^[:space:]] ]]; then
+    echo 'VIEWER_ALLOW_CIDRS is required for public viewer' >&2
+    exit 2
+  fi
+  if [[ "$VIEWER_ALLOW_CIDRS" =~ (^|[[:space:]])(0\.0\.0\.0/0|::/0)($|[[:space:]]) ]]; then
+    echo 'public viewer does not allow unrestricted CIDRs' >&2
+    exit 2
+  fi
+}
+
 wait_for_mapper_exit() {
   local mapper_id="$1"
   local timeout_seconds="$2"
@@ -162,6 +181,9 @@ Commands:
   mapping-up <id>     Start a one-shot SLAM mapping session.
   mapping-stop        Send SIGINT and wait for safe SLAM finalization.
   mapping-status <id> Verify a published mapping session's checksums.
+  viewer-up [local|public] Start read-only Gazebo browser monitoring.
+  viewer-down              Stop viewer services without stopping simulation.
+  viewer-logs              Follow viewer and gateway logs.
 EOF
 }
 
@@ -185,6 +207,45 @@ case "${1:-}" in
     ;;
   logs)
     "${COMPOSE[@]}" logs -f dds-discovery gazebo-server sim-adapter
+    ;;
+  viewer-up)
+    if [[ "$#" -gt 2 ]]; then
+      echo 'viewer-up accepts only local or public' >&2
+      exit 2
+    fi
+    if [[ "${SIM_NETWORK_MODE:-internal}" != 'internal' ]]; then
+      echo 'viewer-up requires SIM_NETWORK_MODE=internal' >&2
+      exit 2
+    fi
+    viewer_mode="${2:-${VIEWER_MODE:-local}}"
+    case "$viewer_mode" in
+      local)
+        ;;
+      public)
+        validate_public_viewer
+        viewer_compose+=( -f "$BUNDLE_DIR/compose.viewer-public.yaml" )
+        ;;
+      *)
+        echo 'viewer mode must be local or public' >&2
+        exit 2
+        ;;
+    esac
+    "${viewer_compose[@]}" up -d \
+      dds-discovery gazebo-server sim-adapter gazebo-viewer web-gateway
+    ;;
+  viewer-down)
+    if [[ "$#" -ne 1 ]]; then
+      echo 'viewer-down does not accept arguments' >&2
+      exit 2
+    fi
+    "${viewer_compose[@]}" stop web-gateway gazebo-viewer
+    ;;
+  viewer-logs)
+    if [[ "$#" -ne 1 ]]; then
+      echo 'viewer-logs does not accept arguments' >&2
+      exit 2
+    fi
+    "${viewer_compose[@]}" logs -f gazebo-viewer web-gateway
     ;;
   topics)
     "${COMPOSE[@]}" exec sim-adapter bash -lc \
