@@ -733,6 +733,11 @@ class DeployOnlyBundleTest(unittest.TestCase):
             '절차에서만 실행한다',
         ):
             self.assertIn(text, readme)
+        self.assertIn(
+            '실행 중 mapper와 viewer lifecycle의 완전 격리는 설계 목표이며 '
+            'final/release acceptance 전 release blocker다.',
+            readme,
+        )
 
         old_plan = (
             REPOSITORY_ROOT
