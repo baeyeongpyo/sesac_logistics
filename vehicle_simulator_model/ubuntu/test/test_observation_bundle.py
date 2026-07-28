@@ -168,6 +168,13 @@ class ObservationBundleTest(unittest.TestCase):
                 'printf \'VIEWER_ALLOW_CIDRS=%s\\n\' '
                 '"${VIEWER_ALLOW_CIDRS:-}" >> "$FAKE_DOCKER_LOG"\n'
                 'printf \'ARGS=%s\\n\' "$*" >> "$FAKE_DOCKER_LOG"\n'
+                'if [[ "$*" == "compose version --short" ]]; then\n'
+                '  printf \'%s\\n\' "${FAKE_COMPOSE_VERSION:-2.24.4}"\n'
+                '  exit 0\n'
+                'fi\n'
+                'if [[ "$*" == *" up -d --wait "* ]]; then\n'
+                '  exit "${FAKE_DOCKER_UP_EXIT:-0}"\n'
+                'fi\n'
             )
             fake_docker.chmod(0o755)
             env = os.environ.copy()
@@ -483,6 +490,30 @@ class ObservationBundleTest(unittest.TestCase):
             'gazebo-viewer web-gateway',
             public_log,
         )
+
+    def test_viewer_up_rejects_compose_without_required_wait_support(self):
+        result, docker_log = self.run_with_fake_docker(
+            ['viewer-up'],
+            {'FAKE_COMPOSE_VERSION': '2.24.3'},
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            'viewer-up requires Docker Compose 2.24.4 or newer',
+            result.stderr,
+        )
+        self.assertIn('ARGS=compose version --short', docker_log)
+        self.assertNotIn(' up -d --wait ', docker_log)
+
+    def test_viewer_up_propagates_compose_wait_failure(self):
+        result, docker_log = self.run_with_fake_docker(
+            ['viewer-up'],
+            {'FAKE_DOCKER_UP_EXIT': '23'},
+        )
+
+        self.assertEqual(result.returncode, 23)
+        self.assertIn('ARGS=compose version --short', docker_log)
+        self.assertIn(' up -d --wait ', docker_log)
 
     def test_viewer_down_and_logs_target_only_viewer_services(self):
         down_result, down_log = self.run_with_fake_docker(['viewer-down'])

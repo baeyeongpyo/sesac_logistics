@@ -10,7 +10,6 @@ services:
       GZ_RELAY_HOST: gazebo-server
       SERVICE_NAME: gazebo-viewer
       IMAGE_VERSION: "${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"
-      SESSION_ID: none
       ROBOT_IDS: robot_1,robot_2
       LIBGL_ALWAYS_SOFTWARE: "1"
     command: /usr/local/bin/mentorpi-viewer

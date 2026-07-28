@@ -295,7 +295,73 @@ class DeployOnlyBundleTest(unittest.TestCase):
             self.assertIn(required, mapper)
         self.assertNotIn('GZ_RELAY_HOST', mapper)
         self.assertIn('slam-data:', compose)
-        self.assertIn('name: mentorpi-slam-data', compose)
+        self.assertIn(
+            'name: "${SLAM_VOLUME_NAME:-mentorpi-slam-data}"',
+            compose,
+        )
+
+    def test_mapping_session_does_not_change_viewer_simulation_services(self):
+        base_files = ['-f', str(BUNDLE / 'compose.yaml')]
+        mapping_env = os.environ.copy()
+        mapping_env.update({
+            'SESSION_ID': 'active-mapping-session',
+            'SLAM_VOLUME_NAME': 'mentorpi-test-isolated-slam-data',
+        })
+        viewer_env = mapping_env.copy()
+        viewer_env.pop('SESSION_ID')
+
+        mapping_result = subprocess.run(
+            [
+                'docker', 'compose', *base_files, '--profile', 'mapping',
+                'config', '--format', 'json',
+            ],
+            env=mapping_env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        viewer_result = subprocess.run(
+            [
+                'docker', 'compose', *base_files,
+                '-f', str(BUNDLE / 'compose.viewer.yaml'),
+                '--profile', 'viewer', 'config', '--format', 'json',
+            ],
+            env=viewer_env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(mapping_result.returncode, 0, mapping_result.stderr)
+        self.assertEqual(viewer_result.returncode, 0, viewer_result.stderr)
+        mapping = json.loads(mapping_result.stdout)
+        viewer = json.loads(viewer_result.stdout)
+        for service in ('dds-discovery', 'gazebo-server', 'sim-adapter'):
+            self.assertEqual(
+                mapping['services'][service],
+                viewer['services'][service],
+            )
+            self.assertNotIn(
+                'SESSION_ID',
+                mapping['services'][service]['environment'],
+            )
+        self.assertNotIn(
+            'SESSION_ID',
+            mapping['services']['slam-data-init']['environment'],
+        )
+        self.assertNotIn(
+            'SESSION_ID',
+            viewer['services']['gazebo-viewer']['environment'],
+        )
+        for service in ('slam-mapper', 'slam-inspector'):
+            self.assertEqual(
+                mapping['services'][service]['environment']['SESSION_ID'],
+                'active-mapping-session',
+            )
+        self.assertEqual(
+            mapping['volumes']['slam-data']['name'],
+            'mentorpi-test-isolated-slam-data',
+        )
 
     def test_ros_services_use_stable_discovery_and_udp_without_namespace_sharing(self):
         result = subprocess.run(
@@ -704,6 +770,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
             './run.sh mapping-status',
             '.inprogress',
             'mentorpi-slam-data',
+            'SLAM_VOLUME_NAME',
             'mentorpi-slam-data:/slam-data:ro',
             '첫 mapping-up',
             '기존 세션 내용을 변경하지 않는다',
@@ -718,6 +785,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'scripts/gz-gui-connect.sh',
             './run.sh viewer-up local',
             './run.sh viewer-up public',
+            'Docker Compose 2.24.4',
             'VIEWER_DOMAIN',
             'VIEWER_ALLOW_CIDRS',
             'read-only',
@@ -727,17 +795,10 @@ class DeployOnlyBundleTest(unittest.TestCase):
             '`0.0.0.0/0`와 `::/0`은 거부된다',
             'noVNC 6080, VNC 5900, Gazebo Transport, ROS DDS는 절대로 port-forward하지 않는다',
             '직접 호출로 public viewer를 올리는 것은 지원하지 않는다',
-            '실행 중 mapper와 viewer lifecycle의 완전 격리',
-            'release acceptance 전',
-            '검증된 maintenance window',
-            '절차에서만 실행한다',
+            'mapping session 환경은 mapper와 inspector에만 전달',
+            'viewer lifecycle은 실행 중 mapper를 재생성하지 않는다',
         ):
             self.assertIn(text, readme)
-        self.assertIn(
-            '실행 중 mapper와 viewer lifecycle의 완전 격리는 설계 목표이며 '
-            'final/release acceptance 전 release blocker다.',
-            readme,
-        )
 
         old_plan = (
             REPOSITORY_ROOT

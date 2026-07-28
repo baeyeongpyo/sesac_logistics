@@ -195,6 +195,32 @@ PY
   export VIEWER_DOMAIN VIEWER_ALLOW_CIDRS
 }
 
+require_viewer_compose_version() {
+  local compose_version
+
+  if ! compose_version="$(docker compose version --short 2>/dev/null)"; then
+    echo 'viewer-up requires Docker Compose 2.24.4 or newer' >&2
+    return 2
+  fi
+
+  if ! COMPOSE_VERSION_RAW="$compose_version" python3 - <<'PY'
+import os
+import re
+import sys
+
+match = re.fullmatch(
+    r'v?([0-9]+)\.([0-9]+)\.([0-9]+)(?:[-+].*)?',
+    os.environ['COMPOSE_VERSION_RAW'].strip(),
+)
+if not match or tuple(map(int, match.groups())) < (2, 24, 4):
+    sys.exit(1)
+PY
+  then
+    echo "viewer-up requires Docker Compose 2.24.4 or newer (found ${compose_version})" >&2
+    return 2
+  fi
+}
+
 wait_for_mapper_exit() {
   local mapper_id="$1"
   local timeout_seconds="$2"
@@ -321,6 +347,7 @@ case "${1:-}" in
         exit 2
         ;;
     esac
+    require_viewer_compose_version
     "${viewer_compose[@]}" up -d --wait \
       dds-discovery gazebo-server sim-adapter gazebo-viewer web-gateway
     ;;

@@ -3,7 +3,6 @@ x-runtime-environment: &runtime-environment
   ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
   LIBGL_ALWAYS_SOFTWARE: "${LIBGL_ALWAYS_SOFTWARE:-1}"
   IMAGE_VERSION: "${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"
-  SESSION_ID: "${SESSION_ID:-none}"
   ROBOT_IDS: "${ROBOT_IDS:-robot_1,robot_2}"
 
 x-dds-client-environment: &dds-client-environment
@@ -84,6 +83,7 @@ services:
     environment:
       <<: *dds-client-environment
       SERVICE_NAME: slam-mapper
+      SESSION_ID: "${SESSION_ID:-none}"
       SLAM_DATA_ROOT: /slam-data
       IMAGE_VERSION: "${IMAGE_VERSION:-mentorpi-sim:harmonic}"
       GIT_COMMIT: "${GIT_COMMIT:-unknown}"
@@ -108,6 +108,7 @@ services:
     environment:
       <<: *runtime-environment
       SERVICE_NAME: slam-inspector
+      SESSION_ID: "${SESSION_ID:-none}"
     command: bash
     volumes:
       - type: volume
@@ -121,4 +122,4 @@ networks:
 
 volumes:
   slam-data:
-    name: mentorpi-slam-data
+    name: "${SLAM_VOLUME_NAME:-mentorpi-slam-data}"

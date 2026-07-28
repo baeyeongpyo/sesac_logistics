@@ -46,7 +46,9 @@ build context를 갖지 않아 배포 서버에서 소스를 재빌드하지 않
 
 ## 서버 운영
 
-Docker Engine 및 Docker Compose v2가 설치된 Linux 서버에서 실행한다.
+Docker Engine 및 Docker Compose 2.24.4 이상이 설치된 Linux 서버에서 실행한다.
+`viewer-up`은 이 최소 버전을 preflight하고, 미지원 버전에서는 서비스를 변경하기 전에
+nonzero로 종료한다.
 
 ```bash
 ./run.sh sim-up
@@ -196,11 +198,12 @@ lifecycle 변경이 `gazebo-server`와 `sim-adapter`를 중지시키지 않음�
 서비스의 viewer 장애 복구는 `viewer-down` 뒤 동일한 local/public 명령으로 viewer만 다시 올린다.
 반대로 `down`은 simulation stack을 중지한다.
 
-실행 중 mapper와 viewer lifecycle의 완전 격리는 설계 목표이며 final/release acceptance 전 release blocker다.
-mapper 실행 중 viewer lifecycle 변경을 운영 보장으로 간주하지 말고, 검증된 maintenance window와
-절차에서만 실행한다. 지도 생성은 독립적인 one-shot mapper이므로 `mapping-up <session-id>`,
-`mapping-stop`, `mapping-status <session-id>`를 사용하며, viewer lifecycle과 묶어서 중지하거나
-재시작하지 않는다.
+mapping session 환경은 mapper와 inspector에만 전달되며 server, adapter, discovery, viewer에는
+전달되지 않는다. 따라서 같은 Compose project와 volume 설정을 유지하면 `viewer-up`이 active
+mapping의 simulation service 구성을 변경하지 않고, viewer lifecycle은 실행 중 mapper를 재생성하지 않는다.
+지도 생성은 독립적인 one-shot mapper이므로 `mapping-up <session-id>`,
+`mapping-stop`, `mapping-status <session-id>`를 사용하며, viewer lifecycle과 묶어서 중지하지
+않는다.
 
 ### 릴리스 상태
 
@@ -208,7 +211,6 @@ mapper 실행 중 viewer lifecycle 변경을 운영 보장으로 간주하지 �
 
 - Ubuntu native LAN two-client/visual gate
 - official Caddy image의 public direct 80/443 port 검증
-- 실행 중 mapper가 viewer lifecycle과 완전히 격리되는지의 검증
 
 ## SLAM 매핑 세션 운영
 
@@ -222,8 +224,10 @@ mapper 실행 중 viewer lifecycle 변경을 운영 보장으로 간주하지 �
 ```
 
 `mapping-up`은 Discovery Server, Gazebo, adapter가 준비된 뒤 mapper를 시작하고, `SESSION_ID`
-및 이미지·world·model·TF 버전 metadata를 컨테이너에 전달한다. 정상 종료는 `mapping-stop`만
-사용한다. adapter가 재시작 중이면 이 명령은 `MAPPING_RECONNECT_TIMEOUT_SECONDS` 동안 health
+및 이미지·world·model·TF 버전 metadata를 mapper에 전달한다. `mapping-status`의 inspector도
+검사할 세션 ID를 받지만 다른 runtime service에는 session 환경을 전달하지 않는다. 정상 종료는
+`mapping-stop`만 사용한다. adapter가 재시작 중이면 이 명령은
+`MAPPING_RECONNECT_TIMEOUT_SECONDS` 동안 health
 복구를 기다린다. 복구되면 기존 mapper에 `SIGINT`를 보내 map, posegraph, rosbag, manifest,
 checksum finalization이 끝날 때까지 `MAPPING_STOP_TIMEOUT_SECONDS`만큼 기다린다. adapter가
 제한 시간 안에 복구되지 않으면 mapper나 지원 서비스를 중지하지 않고 nonzero를 반환하므로,
@@ -261,6 +265,20 @@ entrypoint가 ROS 환경을 source한 뒤 `exec`하므로 이 Bash가 container 
 ├── rosbag2/mapping/
 ├── manifest.json
 └── checksums.sha256
+```
+
+기본 운영 volume 이름은 `mentorpi-slam-data`다. 기존 운영 자료와 분리된 검증이나 migration을
+수행할 때만 `SLAM_VOLUME_NAME`을 명시하고, 한 mapping/viewer lifecycle의 모든 명령에 같은
+`COMPOSE_PROJECT_NAME`과 `SLAM_VOLUME_NAME`을 유지한다.
+
+```bash
+export COMPOSE_PROJECT_NAME=mentorpi-mapping-validation
+export SLAM_VOLUME_NAME=mentorpi-mapping-validation-slam-data
+./run.sh mapping-up validation-01
+./run.sh viewer-up local
+./run.sh viewer-down
+./run.sh mapping-stop
+./run.sh mapping-status validation-01
 ```
 
 `mapping-status`는 volume을 read-only로 연결한 inspector 컨테이너에서 이 최종 디렉터리만 나열하고,
