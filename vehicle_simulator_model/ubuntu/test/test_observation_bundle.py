@@ -638,14 +638,15 @@ class ObservationBundleTest(unittest.TestCase):
         self.assertIn('RFB banner', result.stderr)
         self.assertEqual(errors, [])
 
-    def test_viewer_websocket_rejects_coupled_client_close(self):
+    def test_viewer_websocket_rejects_coupled_close_a_then_b(self):
         port, thread, errors = self.start_fake_viewer_server('coupled-close')
         result = subprocess.run(
             [
                 'bash', '-c',
-                'source "$1"; check_viewer_websockets "$2"',
+                'source "$1"; check_viewer_websockets "$2" "$3"',
                 '_', str(BUNDLE / 'test/smoke_observation.sh'),
                 f'ws://127.0.0.1:{port}/websockify',
+                'client-a-first',
             ],
             text=True,
             capture_output=True,
@@ -655,7 +656,28 @@ class ObservationBundleTest(unittest.TestCase):
         thread.join(timeout=5)
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('survivor', result.stderr)
+        self.assertIn('survivor=client-b after=client-a', result.stderr)
+        self.assertEqual(errors, [])
+
+    def test_viewer_websocket_rejects_coupled_close_b_then_a(self):
+        port, thread, errors = self.start_fake_viewer_server('coupled-close')
+        result = subprocess.run(
+            [
+                'bash', '-c',
+                'source "$1"; check_viewer_websockets "$2" "$3"',
+                '_', str(BUNDLE / 'test/smoke_observation.sh'),
+                f'ws://127.0.0.1:{port}/websockify',
+                'client-b-first',
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+        thread.join(timeout=5)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('survivor=client-a after=client-b', result.stderr)
         self.assertEqual(errors, [])
 
     def test_lan_profile_uses_host_network_without_changing_base_compose(self):

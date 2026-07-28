@@ -45,7 +45,9 @@ smoke_lan() {
 }
 
 check_viewer_websockets() {
-  VIEWER_WEBSOCKET_URL="$1" python3 - <<'PY'
+  VIEWER_WEBSOCKET_URL="$1" \
+    VIEWER_CLOSE_ORDER="${2:-both}" \
+    python3 - <<'PY'
 import base64
 import hashlib
 import os
@@ -54,6 +56,7 @@ import struct
 from urllib.parse import urlsplit
 
 url = urlsplit(os.environ['VIEWER_WEBSOCKET_URL'])
+close_order = os.environ['VIEWER_CLOSE_ORDER']
 host = url.hostname or '127.0.0.1'
 port = url.port or 80
 path = url.path or '/'
@@ -255,15 +258,31 @@ def prove_close_order(first_label, survivor_label):
         first.connect()
         survivor.connect()
         first.close()
-        survivor.prove_survival(first_label)
+        try:
+            survivor.prove_survival(first_label)
+        except Exception as error:
+            raise RuntimeError(
+                f'survivor={survivor_label} after={first_label}: {error}'
+            ) from error
     finally:
         first.close()
         survivor.close()
 
 
+close_orders = {
+    'both': (
+        ('client-a', 'client-b'),
+        ('client-b', 'client-a'),
+    ),
+    'client-a-first': (('client-a', 'client-b'),),
+    'client-b-first': (('client-b', 'client-a'),),
+}
+if close_order not in close_orders:
+    raise SystemExit(f'unknown viewer close order: {close_order}')
+
 try:
-    prove_close_order('client-a', 'client-b')
-    prove_close_order('client-b', 'client-a')
+    for first_label, survivor_label in close_orders[close_order]:
+        prove_close_order(first_label, survivor_label)
 except Exception as error:
     raise SystemExit(f'viewer websocket survivor check failed: {error}')
 PY
