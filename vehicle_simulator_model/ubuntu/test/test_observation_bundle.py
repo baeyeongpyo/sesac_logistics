@@ -1,8 +1,14 @@
+import base64
+import hashlib
 import json
 import os
 import shutil
+import socket
+import struct
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -11,6 +17,145 @@ BUNDLE = Path(__file__).resolve().parents[1]
 
 
 class ObservationBundleTest(unittest.TestCase):
+    def start_fake_viewer_server(self, mode):
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(('127.0.0.1', 0))
+        listener.listen()
+        listener.settimeout(5)
+        errors = []
+
+        def receive_http(connection):
+            request = b''
+            while b'\r\n\r\n' not in request:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    raise RuntimeError('client closed during HTTP handshake')
+                request += chunk
+            headers = {}
+            for line in request.decode('iso-8859-1').split('\r\n')[1:]:
+                if ':' in line:
+                    name, value = line.split(':', 1)
+                    headers[name.lower()] = value.strip()
+            key = headers['sec-websocket-key']
+            accept = base64.b64encode(hashlib.sha1(
+                (key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()
+            ).digest()).decode()
+            connection.sendall((
+                'HTTP/1.1 101 Switching Protocols\r\n'
+                'Upgrade: websocket\r\n'
+                'Connection: Upgrade\r\n'
+                f'Sec-WebSocket-Accept: {accept}\r\n'
+                'Sec-WebSocket-Protocol: binary\r\n'
+                '\r\n'
+            ).encode())
+
+        def receive_exact(connection, length):
+            data = b''
+            while len(data) < length:
+                chunk = connection.recv(length - len(data))
+                if not chunk:
+                    raise EOFError('WebSocket closed')
+                data += chunk
+            return data
+
+        def receive_frame(connection):
+            first, second = receive_exact(connection, 2)
+            length = second & 0x7f
+            if length == 126:
+                length = struct.unpack('>H', receive_exact(connection, 2))[0]
+            elif length == 127:
+                length = struct.unpack('>Q', receive_exact(connection, 8))[0]
+            mask = receive_exact(connection, 4) if second & 0x80 else b''
+            payload = receive_exact(connection, length)
+            if mask:
+                payload = bytes(
+                    value ^ mask[index % 4]
+                    for index, value in enumerate(payload)
+                )
+            return first & 0x0f, payload
+
+        def send_frame(connection, payload):
+            header = b'\x82'
+            if len(payload) < 126:
+                header += bytes([len(payload)])
+            elif len(payload) < 65536:
+                header += b'\x7e' + struct.pack('>H', len(payload))
+            else:
+                header += b'\x7f' + struct.pack('>Q', len(payload))
+            connection.sendall(header + payload)
+
+        def serve_early_close():
+            connection, _ = listener.accept()
+            with connection:
+                receive_http(connection)
+
+        def serve_coupled_close():
+            connections = []
+            ready = threading.Barrier(2)
+
+            def initialize(connection):
+                try:
+                    receive_http(connection)
+                    send_frame(connection, b'RFB 003.008\n')
+                    self.assertEqual(
+                        receive_frame(connection),
+                        (2, b'RFB 003.008\n'),
+                    )
+                    send_frame(connection, b'\x01\x01')
+                    self.assertEqual(receive_frame(connection), (2, b'\x01'))
+                    send_frame(connection, b'\x00\x00\x00\x00')
+                    self.assertEqual(receive_frame(connection), (2, b'\x01'))
+                    pixel_format = struct.pack(
+                        '>BBBBHHHBBBxxx',
+                        32, 24, 0, 1, 255, 255, 255, 16, 8, 0,
+                    )
+                    name = b'coupled-close'
+                    send_frame(
+                        connection,
+                        struct.pack('>HH', 2, 2)
+                        + pixel_format
+                        + struct.pack('>I', len(name))
+                        + name,
+                    )
+                    ready.wait(timeout=5)
+                    time.sleep(0.2)
+                except Exception as error:
+                    errors.append(str(error))
+
+            workers = []
+            for _ in range(2):
+                connection, _ = listener.accept()
+                connections.append(connection)
+                worker = threading.Thread(
+                    target=initialize,
+                    args=(connection,),
+                    daemon=True,
+                )
+                worker.start()
+                workers.append(worker)
+            for worker in workers:
+                worker.join(timeout=5)
+            for connection in connections:
+                connection.close()
+
+        target = (
+            serve_early_close if mode == 'early-close'
+            else serve_coupled_close
+        )
+
+        def serve():
+            try:
+                target()
+            except (OSError, RuntimeError) as error:
+                errors.append(str(error))
+            finally:
+                listener.close()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        return listener.getsockname()[1], thread, errors
+
     def run_with_fake_docker(self, args, extra_env=None):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -443,6 +588,75 @@ class ObservationBundleTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_viewer_process_probe_rejects_its_own_command_text(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_docker = temp_path / 'docker'
+            fake_docker.write_text(
+                '#!/usr/bin/env bash\n'
+                'if [[ "$*" == *"exec -T gazebo-viewer python3 -"* ]]; then\n'
+                '  exec python3 -\n'
+                'fi\n'
+                'exit 0\n'
+            )
+            fake_docker.chmod(0o755)
+            env = os.environ.copy()
+            env['PATH'] = f'{temp_path}:{env["PATH"]}'
+            result = subprocess.run(
+                [
+                    'bash', '-c',
+                    'source "$1"; check_viewer_processes',
+                    '_', str(BUNDLE / 'test/smoke_observation.sh'),
+                ],
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('missing viewer process', result.stderr)
+
+    def test_viewer_websocket_rejects_101_without_rfb_banner(self):
+        port, thread, errors = self.start_fake_viewer_server('early-close')
+        result = subprocess.run(
+            [
+                'bash', '-c',
+                'source "$1"; check_viewer_websockets "$2"',
+                '_', str(BUNDLE / 'test/smoke_observation.sh'),
+                f'ws://127.0.0.1:{port}/websockify',
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+        thread.join(timeout=5)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('RFB banner', result.stderr)
+        self.assertEqual(errors, [])
+
+    def test_viewer_websocket_rejects_coupled_client_close(self):
+        port, thread, errors = self.start_fake_viewer_server('coupled-close')
+        result = subprocess.run(
+            [
+                'bash', '-c',
+                'source "$1"; check_viewer_websockets "$2"',
+                '_', str(BUNDLE / 'test/smoke_observation.sh'),
+                f'ws://127.0.0.1:{port}/websockify',
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+        thread.join(timeout=5)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('survivor', result.stderr)
+        self.assertEqual(errors, [])
 
     def test_lan_profile_uses_host_network_without_changing_base_compose(self):
         base = (BUNDLE / 'compose.yaml').read_text()
