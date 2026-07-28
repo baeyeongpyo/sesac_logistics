@@ -191,11 +191,16 @@ Linux firewall도 같은 노출 정책을 강제한다.
 ./run.sh down
 ```
 
-`viewer-down`은 `gazebo-viewer`와 `web-gateway`만 중지하므로 simulation과 실행 중인 mapper를
-보존한다. viewer 장애는 sim-adapter나 mapping을 중지시키지 않으며, 복구는 `viewer-down` 뒤
-동일한 local/public 명령으로 viewer만 다시 올린다. 반대로 `down`은 simulation stack을 중지한다.
-지도 생성은 독립적인 one-shot mapper이므로 `mapping-up <session-id>`, `mapping-stop`,
-`mapping-status <session-id>`를 사용하며, viewer lifecycle과 묶어서 중지하거나 재시작하지 않는다.
+`viewer-down`은 `gazebo-viewer`와 `web-gateway`만 중지한다. Task 6 runtime 검증은 이 viewer
+lifecycle 변경이 `gazebo-server`와 `sim-adapter`를 중지시키지 않음을 확인했다. 따라서 이 두
+서비스의 viewer 장애 복구는 `viewer-down` 뒤 동일한 local/public 명령으로 viewer만 다시 올린다.
+반대로 `down`은 simulation stack을 중지한다.
+
+실행 중 mapper와 viewer lifecycle의 완전 격리는 설계 목표이지만 release acceptance 전이다.
+mapper 실행 중 viewer lifecycle 변경을 운영 보장으로 간주하지 말고, 검증된 maintenance window와
+절차에서만 실행한다. 지도 생성은 독립적인 one-shot mapper이므로 `mapping-up <session-id>`,
+`mapping-stop`, `mapping-status <session-id>`를 사용하며, viewer lifecycle과 묶어서 중지하거나
+재시작하지 않는다.
 
 ### 릴리스 상태
 

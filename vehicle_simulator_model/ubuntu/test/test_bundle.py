@@ -723,6 +723,14 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'read-only',
             '동시에 접속',
             'Gazebo Transport를 공용 인터넷에 공개하지 않는다',
+            '허용 CIDR 외 요청은 HTTP 403',
+            '`0.0.0.0/0`와 `::/0`은 거부된다',
+            'noVNC 6080, VNC 5900, Gazebo Transport, ROS DDS는 절대로 port-forward하지 않는다',
+            '직접 호출로 public viewer를 올리는 것은 지원하지 않는다',
+            '실행 중 mapper와 viewer lifecycle의 완전 격리',
+            'release acceptance 전',
+            '검증된 maintenance window',
+            '절차에서만 실행한다',
         ):
             self.assertIn(text, readme)
 
