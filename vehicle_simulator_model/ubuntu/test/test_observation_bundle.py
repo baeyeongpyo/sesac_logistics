@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -352,6 +353,44 @@ class ObservationBundleTest(unittest.TestCase):
         self.assertIn("expose: ['6080']", compose)
         self.assertNotIn('6080:6080', compose)
 
+    def test_viewer_supervisor_preserves_failed_child_exit_status(self):
+        bash = shutil.which('bash')
+        version = subprocess.run(
+            [bash, '-c', 'printf "%s.%s" "$BASH_VERSINFO" '
+             '"${BASH_VERSINFO[1]}"'],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+        if tuple(map(int, version.split('.'))) < (4, 3):
+            self.skipTest('viewer runtime requires Bash 4.3+ for wait -n')
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            for name, body in {
+                'Xvfb': '#!/usr/bin/env bash\nexec /bin/sleep 60\n',
+                'xdpyinfo': '#!/usr/bin/env bash\nexit 0\n',
+                'gz': '#!/usr/bin/env bash\nexit 23\n',
+                'x11vnc': '#!/usr/bin/env bash\nexec /bin/sleep 60\n',
+                'websockify': '#!/usr/bin/env bash\nexec /bin/sleep 60\n',
+            }.items():
+                command = temp_path / name
+                command.write_text(body)
+                command.chmod(0o755)
+            env = os.environ.copy()
+            env['PATH'] = f'{temp_path}:{env["PATH"]}'
+
+            result = subprocess.run(
+                [bash, str(BUNDLE / 'viewer-entrypoint.sh')],
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+                timeout=10,
+            )
+
+            self.assertEqual(result.returncode, 23, result.stderr)
+
     def test_mac_preflight_unsupported_defers_to_task_4_browser_viewer(self):
         readme = (BUNDLE / 'README.md').read_text()
         self.assertIn('exit 4', readme)
@@ -367,6 +406,43 @@ class ObservationBundleTest(unittest.TestCase):
         self.assertIn('/world/mentorpi_warehouse/stats', script)
         self.assertIn('/robot_1/scan_raw', script)
         self.assertIn('/robot_2/scan_raw', script)
+
+    def test_viewer_smoke_checks_two_websocket_clients_and_isolation(self):
+        script = (BUNDLE / 'test/smoke_observation.sh').read_text()
+        self.assertIn('vnc.html?view_only=1', script)
+        self.assertIn('websockify', script)
+        self.assertIn('gz sim --force-version 8 -g', script)
+        self.assertIn('mentorpi-healthcheck server', script)
+        self.assertIn('mentorpi-healthcheck adapter', script)
+
+    def test_viewer_smoke_does_not_require_lan_environment(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            for name, body in {
+                'curl': (
+                    '#!/usr/bin/env bash\n'
+                    "printf '<title>noVNC</title>\\n'\n"
+                ),
+                'docker': '#!/usr/bin/env bash\nexit 0\n',
+                'python3': '#!/usr/bin/env bash\nexit 0\n',
+            }.items():
+                command = temp_path / name
+                command.write_text(body)
+                command.chmod(0o755)
+            env = os.environ.copy()
+            env['PATH'] = f'{temp_path}:{env["PATH"]}'
+            env.pop('GZ_SERVER_IP', None)
+            env.pop('GZ_CLIENT_IP', None)
+
+            result = subprocess.run(
+                [str(BUNDLE / 'test/smoke_observation.sh'), 'viewer'],
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_lan_profile_uses_host_network_without_changing_base_compose(self):
         base = (BUNDLE / 'compose.yaml').read_text()
@@ -609,3 +685,7 @@ class ObservationBundleTest(unittest.TestCase):
                 'mentorpi-sim',
                 result.stderr,
             )
+
+
+if __name__ == '__main__':
+    unittest.main()
