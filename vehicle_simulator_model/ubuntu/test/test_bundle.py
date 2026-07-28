@@ -710,6 +710,35 @@ class DeployOnlyBundleTest(unittest.TestCase):
         ):
             self.assertIn(text, readme)
 
+    def test_operator_docs_describe_shared_observation_operations(self):
+        readme = (BUNDLE / 'README.md').read_text()
+        for text in (
+            'SIM_NETWORK_MODE=lan',
+            'GZ_SERVER_IP',
+            'scripts/gz-gui-connect.sh',
+            './run.sh viewer-up local',
+            './run.sh viewer-up public',
+            'VIEWER_DOMAIN',
+            'VIEWER_ALLOW_CIDRS',
+            'read-only',
+            '동시에 접속',
+            'Gazebo Transport를 공용 인터넷에 공개하지 않는다',
+        ):
+            self.assertIn(text, readme)
+
+        old_plan = (
+            REPOSITORY_ROOT
+            / 'docs/superpowers/plans/2026-07-26-mentorpi-gazebo-web-monitor.md'
+        ).read_text()
+        self.assertTrue(
+            old_plan.startswith(
+                '# MentorPi Gazebo Web Monitor Implementation Plan\n\n'
+                '> **Superseded:** 이 계획의 웹 전용·basic-auth 전제는\n'
+                '> `docs/superpowers/plans/2026-07-28-mentorpi-gazebo-shared-observation.md`로\n'
+            ),
+            'old plan must start with the shared-observation superseded notice',
+        )
+
 
 if __name__ == '__main__':
     unittest.main()

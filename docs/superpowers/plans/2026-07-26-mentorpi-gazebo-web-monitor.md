@@ -1,5 +1,10 @@
 # MentorPi Gazebo Web Monitor Implementation Plan
 
+> **Superseded:** 이 계획의 웹 전용·basic-auth 전제는
+> `docs/superpowers/plans/2026-07-28-mentorpi-gazebo-shared-observation.md`로
+> 대체되었다. 새 계획은 LAN 네이티브 `gz sim -g`와 IP allowlist 기반
+> read-only viewer를 함께 정의한다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 외부 사용자가 Gazebo/ROS 네트워크에 직접 접속하지 않고 HTTPS/WSS 브라우저로 창고와 두 로봇을 모니터링하게 한다.
