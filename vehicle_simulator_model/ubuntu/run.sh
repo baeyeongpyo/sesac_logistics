@@ -321,7 +321,7 @@ case "${1:-}" in
         exit 2
         ;;
     esac
-    "${viewer_compose[@]}" up -d \
+    "${viewer_compose[@]}" up -d --wait \
       dds-discovery gazebo-server sim-adapter gazebo-viewer web-gateway
     ;;
   viewer-down)

@@ -29,7 +29,9 @@ services:
     image: caddy:2.10-alpine
     profiles: [viewer]
     restart: unless-stopped
-    networks: [mentorpi]
+    networks:
+      - mentorpi
+      - viewer-edge
     environment:
       VIEWER_SITE: http://:8080
       VIEWER_ALLOW_CIDRS: private_ranges
@@ -42,7 +44,17 @@ services:
     depends_on:
       gazebo-viewer:
         condition: service_healthy
+    healthcheck:
+      test:
+        [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:2019/config/]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 1s
 
 volumes:
   viewer-caddy-data:
   viewer-caddy-config:
+
+networks:
+  viewer-edge:

@@ -209,7 +209,7 @@ class ObservationBundleTest(unittest.TestCase):
         for forbidden in ('10317:', '10318:', '11811:', '5900:', '6080:6080'):
             self.assertNotIn(forbidden, viewer + public)
 
-    def test_public_compose_gives_only_gateway_https_ports_and_egress(self):
+    def test_viewer_compose_gives_only_gateway_ports_and_edge_egress(self):
         base_files = [
             '-f', str(BUNDLE / 'compose.yaml'),
             '-f', str(BUNDLE / 'compose.viewer.yaml'),
@@ -244,20 +244,40 @@ class ObservationBundleTest(unittest.TestCase):
         self.assertEqual(public_result.returncode, 0, public_result.stderr)
         local = json.loads(local_result.stdout)
         public = json.loads(public_result.stdout)
-        self.assertNotIn('viewer-edge', local['networks'])
+        for mode in (local, public):
+            self.assertIn('viewer-edge', mode['networks'])
+            self.assertFalse(
+                mode['networks']['viewer-edge'].get('internal', False)
+            )
+            self.assertEqual(
+                set(mode['services']['web-gateway']['networks']),
+                {'mentorpi', 'viewer-edge'},
+            )
+            self.assertEqual(
+                mode['services']['web-gateway']
+                .get('healthcheck', {})
+                .get('test'),
+                [
+                    'CMD', 'wget', '-q', '-O', '/dev/null',
+                    'http://127.0.0.1:2019/config/',
+                ],
+            )
+            for service in ('dds-discovery', 'gazebo-server', 'sim-adapter',
+                            'gazebo-viewer'):
+                self.assertNotIn(
+                    'viewer-edge', mode['services'][service]['networks']
+                )
         self.assertEqual(
-            set(public['services']['web-gateway']['networks']),
-            {'mentorpi', 'viewer-edge'},
+            [
+                (port.get('host_ip'), port['published'], port['target'])
+                for port in local['services']['web-gateway']['ports']
+            ],
+            [('127.0.0.1', '8080', 8080)],
         )
         self.assertEqual(
             public['services']['web-gateway']['environment']['VIEWER_SITE'],
             'https://sim.example.com',
         )
-        for service in ('dds-discovery', 'gazebo-server', 'sim-adapter',
-                        'gazebo-viewer'):
-            self.assertNotIn(
-                'viewer-edge', public['services'][service]['networks']
-            )
         self.assertEqual(
             [
                 (port['published'], port['target'])
@@ -452,15 +472,15 @@ class ObservationBundleTest(unittest.TestCase):
         self.assertIn(str(BUNDLE / 'compose.viewer.yaml'), local_log)
         self.assertNotIn(str(BUNDLE / 'compose.viewer-public.yaml'), local_log)
         self.assertIn(
-            '--profile viewer up -d dds-discovery gazebo-server sim-adapter '
-            'gazebo-viewer web-gateway',
+            '--profile viewer up -d --wait dds-discovery gazebo-server '
+            'sim-adapter gazebo-viewer web-gateway',
             local_log,
         )
         self.assertEqual(public_result.returncode, 0)
         self.assertIn(str(BUNDLE / 'compose.viewer-public.yaml'), public_log)
         self.assertIn(
-            'up -d dds-discovery gazebo-server sim-adapter gazebo-viewer '
-            'web-gateway',
+            'up -d --wait dds-discovery gazebo-server sim-adapter '
+            'gazebo-viewer web-gateway',
             public_log,
         )
 
