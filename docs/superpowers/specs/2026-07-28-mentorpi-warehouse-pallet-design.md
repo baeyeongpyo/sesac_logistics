@@ -171,6 +171,11 @@ Transport 콜백은 물리 엔티티를 직접 변경하지 않는다. 콜백은
 CLI로 생성할 수 있는 파렛트 원점은 X = -4.5~4.5 m,
 Y = -3.5~3.5 m 범위로 제한한다.
 
+좌표 옵션이 없는 CLI 생성 요청은 하단 좌측의 전용 스폰 위치
+X = -2.5 m, Y = -2.8 m, Yaw = 0.0 rad를 사용한다. 이 위치가 파렛트나
+차량으로 점유된 경우에는 겹쳐 생성하지 않고 `SPAWN_POSE_OCCUPIED`
+오류를 반환한다.
+
 ## 7. 상태 모델
 
 각 파렛트는 다음 정보를 가진다.
@@ -243,8 +248,8 @@ error|ERROR_CODE|DETAIL
 명령을 제공한다.
 
 ```bash
-./run.sh pallet-spawn pallet_07 fresh loaded 1.0 2.0 0.0
-./run.sh pallet-spawn pallet_08 normal empty 1.4 2.0 0.0
+./run.sh pallet-spawn pallet_07 fresh loaded
+./run.sh pallet-spawn pallet_08 normal empty --x 1.4 --y 2.0 --yaw 0.0
 ./run.sh pallet-state pallet_07 empty
 ./run.sh pallet-state pallet_07 loaded normal
 ./run.sh pallet-remove pallet_08
@@ -254,11 +259,16 @@ error|ERROR_CODE|DETAIL
 명령 형식은 다음과 같다.
 
 ```text
-pallet-spawn ID KIND STATE X Y YAW
+pallet-spawn ID KIND STATE [--x X --y Y] [--yaw YAW]
 pallet-state ID STATE [KIND]
 pallet-remove ID
 pallet-list
 ```
+
+위치 옵션을 생략하면 X = -2.5 m, Y = -2.8 m, Yaw = 0.0 rad를 사용한다.
+`--x`와 `--y`는 항상 함께 지정해야 한다. 좌표를 지정하고 `--yaw`만
+생략하면 Yaw = 0.0 rad를 사용한다. Transport 요청에는 `palletctl`이
+결정한 최종 X, Y, Yaw 값이 항상 포함된다.
 
 ROS 2는 이 관리 경로의 필수 의존성이 아니다. 기존 MentorPi 속도, 포크,
 센서 및 TF 브리지는 현재 ROS 2 구성을 유지한다.
@@ -271,6 +281,9 @@ ROS 2는 이 관리 경로의 필수 의존성이 아니다. 기존 MentorPi 속
 - 중복 ID 생성은 거부한다.
 - 등록되지 않은 ID의 상태 전환 및 삭제는 거부한다.
 - 월드 작업 경계를 벗어난 생성 좌표는 거부한다.
+- 기본 또는 지정 생성 위치가 기존 파렛트나 차량과 겹치면 생성을
+  거부한다.
+- `--x`와 `--y` 중 하나만 지정하면 CLI 입력 오류로 거부한다.
 - 이동 중 상태 전환 및 삭제는 거부한다.
 - 적재물 생성, 조인트 결합, 분리 또는 제거가 시간 제한 안에 끝나지
   않으면 실패로 처리한다.
@@ -309,6 +322,8 @@ ROS 2는 이 관리 경로의 필수 의존성이 아니다. 기존 MentorPi 속
 
 - 명령 파싱
 - ID, 종류, 상태 및 좌표 검증
+- 기본 위치 적용과 지정 위치 우선순위
+- `--x`/`--y` 쌍 검증과 점유 위치 거부
 - 중복 및 누락 ID 처리
 - 상태 전이와 동일 상태 재요청
 - 정지 임계값 판정
@@ -317,11 +332,13 @@ ROS 2는 이 관리 경로의 필수 의존성이 아니다. 기존 MentorPi 속
 ### 12.3 Headless 통합 테스트
 
 1. 월드 시작 후 기본 6개를 조회한다.
-2. 일곱 번째 파렛트를 생성한다.
-3. 파렛트를 `empty`로 전환한다.
-4. NORMAL 적재 상태로 전환한다.
-5. 파렛트를 삭제한다.
-6. 목록과 Gazebo 엔티티 상태가 일치하는지 검사한다.
+2. 좌표 없이 일곱 번째 파렛트를 생성하고 기본 위치를 확인한다.
+3. 점유된 기본 위치에 추가 생성을 요청해 거부되는지 확인한다.
+4. 지정 좌표로 여덟 번째 파렛트를 생성한다.
+5. 파렛트를 `empty`로 전환한다.
+6. NORMAL 적재 상태로 전환한다.
+7. 추가 파렛트를 삭제한다.
+8. 목록과 Gazebo 엔티티 상태가 일치하는지 검사한다.
 
 ### 12.4 물리 검증
 
