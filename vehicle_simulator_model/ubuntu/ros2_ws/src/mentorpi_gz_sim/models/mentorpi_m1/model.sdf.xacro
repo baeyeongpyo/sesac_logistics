@@ -96,7 +96,7 @@
     </joint>
 
     <link name="fork_left">
-      <pose relative_to="fork_carriage">0.09 0.05 0 0 0 0</pose>
+      <pose relative_to="fork_carriage">0.09 0.05 -0.007 0 0 0</pose>
       <inertial><mass>0.03</mass><inertia>
         <ixx>0.00001</ixx><ixy>0</ixy><ixz>0</ixz>
         <iyy>0.00008</iyy><iyz>0</iyz><izz>0.00008</izz>
@@ -109,7 +109,7 @@
     <joint name="fork_left_joint" type="fixed"><parent>fork_carriage</parent><child>fork_left</child></joint>
 
     <link name="fork_right">
-      <pose relative_to="fork_carriage">0.09 -0.05 0 0 0 0</pose>
+      <pose relative_to="fork_carriage">0.09 -0.05 -0.007 0 0 0</pose>
       <inertial><mass>0.03</mass><inertia>
         <ixx>0.00001</ixx><ixy>0</ixy><ixz>0</ixz>
         <iyy>0.00008</iyy><iyz>0</iyz><izz>0.00008</izz>

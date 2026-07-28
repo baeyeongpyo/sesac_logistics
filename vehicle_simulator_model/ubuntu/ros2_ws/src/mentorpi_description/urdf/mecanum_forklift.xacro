@@ -308,7 +308,7 @@
     </collision>
   </link>
   <joint name="fork_left_joint" type="fixed">
-    <origin rpy="0 0 0" xyz="0 0.05 0" />
+    <origin rpy="0 0 0" xyz="0 0.05 -0.007" />
     <parent link="fork_carriage" />
     <child link="fork_left" />
   </joint>
@@ -333,7 +333,7 @@
     </collision>
   </link>
   <joint name="fork_right_joint" type="fixed">
-    <origin rpy="0 0 0" xyz="0 -0.05 0" />
+    <origin rpy="0 0 0" xyz="0 -0.05 -0.007" />
     <parent link="fork_carriage" />
     <child link="fork_right" />
   </joint>
