@@ -2,6 +2,30 @@
 set -euo pipefail
 
 BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+load_runtime_env_file() {
+  local config_file="$BUNDLE_DIR/.env"
+  local line line_number=0 name value
+
+  [[ -f "$config_file" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    ((line_number += 1))
+    [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]] && continue
+    if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+      name="${BASH_REMATCH[1]}"
+      value="${BASH_REMATCH[2]}"
+      [[ -n "${!name+x}" ]] || export "$name=$value"
+    else
+      printf '%s:%s: expected NAME=value\n' "$config_file" "$line_number" >&2
+      return 2
+    fi
+  done < "$config_file"
+}
+
+if ! load_runtime_env_file; then
+  exit 2
+fi
+
 export MENTORPI_IMAGE="${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"
 COMPOSE=(docker compose -f "$BUNDLE_DIR/compose.yaml")
 viewer_compose=(
