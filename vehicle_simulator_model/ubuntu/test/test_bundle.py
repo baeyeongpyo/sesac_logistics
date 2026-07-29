@@ -801,8 +801,9 @@ class DeployOnlyBundleTest(unittest.TestCase):
             '--force-recreate sim-adapter',
             '현재 지원하지 않는다',
             'GZ_IP=127.0.0.1',
-            'gz sim -s -r',
-            'gz sim -g',
+            './run.sh --env dev gz-server',
+            './run.sh --env dev gz-gui',
+            'GZ_SIM_RESOURCE_PATH',
         ):
             self.assertIn(text, readme)
         self.assertNotIn(

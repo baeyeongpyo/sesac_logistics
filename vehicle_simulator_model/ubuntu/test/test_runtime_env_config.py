@@ -26,6 +26,9 @@ class RuntimeEnvConfigTest(unittest.TestCase):
             bin_dir = root / 'bin'
             docker_log = root / 'docker.log'
             shutil.copy2(BUNDLE / 'run.sh', script)
+            (root / 'ros2_ws/src/mentorpi_gz_sim/models').mkdir(parents=True)
+            (root / 'ros2_ws/src/mentorpi_gz_sim/worlds').mkdir(parents=True)
+            (root / 'ros2_ws/src/mentorpi_gz_sim/worlds/warehouse.sdf').touch()
             if dotenv is not None:
                 (root / f'.env.{profile}').write_text(dotenv)
             if bare_dotenv is not None:
@@ -41,6 +44,14 @@ class RuntimeEnvConfigTest(unittest.TestCase):
                 printf '<%s>\\n' "$@" >> "$DOCKER_LOG"
             '''))
             fake_docker.chmod(0o755)
+            fake_gz = bin_dir / 'gz'
+            fake_gz.write_text(textwrap.dedent('''\
+                #!/usr/bin/env bash
+                printf 'args=%s\n' "$*" >> "$GZ_LOG"
+                printf 'ip=%s\npartition=%s\nresource=%s\n' \\
+                  "$GZ_IP" "$GZ_PARTITION" "$GZ_SIM_RESOURCE_PATH" >> "$GZ_LOG"
+            '''))
+            fake_gz.chmod(0o755)
 
             environment = os.environ.copy()
             environment.pop('SIM_NETWORK_MODE', None)
@@ -250,6 +261,45 @@ class RuntimeEnvConfigTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 3)
         self.assertIn('./run.sh --env <profile> sim-up', result.stderr)
+
+    def test_native_gz_server_uses_selected_profile_without_shell_exports(self):
+        with TemporaryDirectory() as directory:
+            gz_log = Path(directory) / 'gz.log'
+            result, docker_log = self.run_command(
+                'dev',
+                'SIM_NETWORK_MODE=internal\n'
+                'GZ_IP=127.0.0.1\n'
+                'GZ_PARTITION=mentorpi-native\n'
+                'NATIVE_GZ_RESOURCE_PATH=ros2_ws/src/mentorpi_gz_sim/models\n',
+                {'GZ_LOG': str(gz_log)},
+                command=('gz-server',),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(docker_log, '')
+            output = gz_log.read_text()
+            self.assertIn('args=sim -s -r ', output)
+            self.assertIn('worlds/warehouse.sdf', output)
+            self.assertIn('ip=127.0.0.1', output)
+            self.assertIn('partition=mentorpi-native', output)
+            self.assertIn('ros2_ws/src/mentorpi_gz_sim/models', output)
+
+    def test_native_gz_gui_uses_selected_profile_without_shell_exports(self):
+        with TemporaryDirectory() as directory:
+            gz_log = Path(directory) / 'gz.log'
+            result, docker_log = self.run_command(
+                'dev',
+                'SIM_NETWORK_MODE=internal\n'
+                'GZ_IP=127.0.0.1\n'
+                'GZ_PARTITION=mentorpi-native\n'
+                'NATIVE_GZ_RESOURCE_PATH=ros2_ws/src/mentorpi_gz_sim/models\n',
+                {'GZ_LOG': str(gz_log)},
+                command=('gz-gui',),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(docker_log, '')
+            self.assertIn('args=sim -g', gz_log.read_text())
 
     def test_malformed_profile_fails_with_line_number_before_docker(self):
         result, docker_log = self.run_command(

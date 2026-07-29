@@ -53,7 +53,7 @@ validate_command_arity() {
   done
 
   case "${RUN_COMMAND[0]}" in
-    build|down|logs|topics|test|fork-up|viewer-down|viewer-logs|mapping-stop|help|-h|--help)
+    build|down|logs|topics|test|fork-up|viewer-down|viewer-logs|mapping-stop|gz-server|gz-gui|help|-h|--help)
       if [[ "${#RUN_COMMAND[@]}" -ne 1 ]]; then
         echo "${RUN_COMMAND[0]} does not accept arguments" >&2
         return 2
@@ -133,6 +133,22 @@ configure_network_mode() {
 }
 
 configure_network_mode
+
+prepare_native_gz() {
+  local resource_path="${GZ_SIM_RESOURCE_PATH-ros2_ws/src/mentorpi_gz_sim/models}"
+
+  if [[ "$resource_path" != /* ]]; then
+    resource_path="$BUNDLE_DIR/$resource_path"
+  fi
+  if [[ ! -d "$resource_path" ]]; then
+    echo "GZ_SIM_RESOURCE_PATH does not exist: $resource_path" >&2
+    exit 2
+  fi
+
+  export GZ_SIM_RESOURCE_PATH="$resource_path"
+  export GZ_IP="${GZ_IP-127.0.0.1}"
+  export GZ_PARTITION="${GZ_PARTITION-mentorpi-native}"
+}
 
 ROS_SETUP='source /usr/local/bin/mentorpi-dds-env && source /opt/ros/humble/setup.bash && source /opt/mentorpi_ws/install/setup.bash'
 
@@ -404,6 +420,8 @@ Commands:
   viewer-up [local|public] Start read-only Gazebo browser monitoring.
   viewer-down              Stop viewer services without stopping simulation.
   viewer-logs              Follow viewer and gateway logs.
+  gz-server                 Start the native Gazebo server from the selected profile.
+  gz-gui                    Connect the native Gazebo GUI using the selected profile.
 EOF
 }
 
@@ -468,6 +486,14 @@ case "${RUN_COMMAND[0]}" in
       exit 2
     fi
     "${viewer_compose[@]}" logs -f gazebo-viewer web-gateway
+    ;;
+  gz-server)
+    prepare_native_gz
+    exec gz sim -s -r "$BUNDLE_DIR/ros2_ws/src/mentorpi_gz_sim/worlds/warehouse.sdf"
+    ;;
+  gz-gui)
+    prepare_native_gz
+    exec gz sim -g
     ;;
   topics)
     "${COMPOSE[@]}" exec sim-adapter bash -lc \

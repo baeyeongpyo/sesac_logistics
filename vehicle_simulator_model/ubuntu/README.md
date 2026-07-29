@@ -114,27 +114,28 @@ cd vehicle_simulator_model/ubuntu
 목적은 world·로봇 외형·센서 배치 같은 시각 모델을 작성하고 확인하는 것이다. Mac을 포함한
 개발 PC에서는 Gazebo Harmonic을 네이티브로 설치하고 Docker GUI를 사용하지 않는다.
 
-macOS에서는 Gazebo server와 GUI를 한 process에서 실행할 수 없다. 프로젝트 root에서 두
-터미널을 열고 같은 `GZ_IP`와 `GZ_PARTITION`을 설정한다.
+macOS에서는 Gazebo server와 GUI를 한 process에서 실행할 수 없다. `.env.dev`에 저장된
+`GZ_IP`, `GZ_PARTITION`, `GZ_SIM_RESOURCE_PATH`를 launcher가 읽도록 두 터미널에서 각각
+명령을 실행한다.
 
 ```bash
+# 한 번만: 프로젝트 bundle 디렉터리에서 수행
+cd vehicle_simulator_model/ubuntu
+cp .env.dev.example .env.dev
+
 # Terminal 1: world를 읽는 Gazebo server
-export GZ_IP=127.0.0.1
-export GZ_PARTITION=mentorpi-native
-gz sim -s -r \
-  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_gz_sim/worlds/warehouse.sdf
+./run.sh --env dev gz-server
 
 # Terminal 2: server에 연결하는 Gazebo GUI
-export GZ_IP=127.0.0.1
-export GZ_PARTITION=mentorpi-native
-gz sim -g
+./run.sh --env dev gz-gui
 ```
 
 `-s`는 server-only, `-r`은 simulation 즉시 시작, `-g`는 GUI-only 옵션이다. 두 터미널 중
 server를 먼저 실행하고 실행 중인 상태로 유지해야 한다. GUI가 빈 화면이면 두 터미널의
 `GZ_IP`·`GZ_PARTITION` 값이 같은지와 server가 종료되지 않았는지 확인한다.
-`GZ_IP=127.0.0.1`은 같은 Mac 안의 두 process만 연결하고 잘못 선택된 network interface의
-multicast 오류를 피하기 위한 설정이다.
+`.env.dev`의 `GZ_IP=127.0.0.1`은 같은 Mac 안의 두 process만 연결하고 잘못 선택된 network
+interface의 multicast 오류를 피하기 위한 설정이다. `GZ_SIM_RESOURCE_PATH`는 새 창고
+컨베이어·랙·충전기·표식 모델을 찾기 위한 source 모델 경로다.
 
 이 실행은 world 파일만 열기 때문에 두 MentorPi robot은 자동으로 생성되지 않는다. 현재 robot
 spawn은 ROS 2 `sim-adapter` launch가 담당한다. macOS GUI는 일부 plugin이 불안정할 수 있으므로
