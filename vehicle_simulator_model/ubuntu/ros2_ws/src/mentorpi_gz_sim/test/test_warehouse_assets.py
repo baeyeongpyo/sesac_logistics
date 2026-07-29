@@ -1,5 +1,8 @@
 import unittest
 import xml.etree.ElementTree as ET
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 
@@ -7,6 +10,16 @@ PACKAGE = Path(__file__).resolve().parents[1]
 PALLET_TEMPLATE = PACKAGE / 'models/pallet/pallet.sdf.in'
 FRESH_PAYLOAD_TEMPLATE = PACKAGE / 'models/pallet/payload_fresh.sdf.in'
 NORMAL_PAYLOAD_TEMPLATE = PACKAGE / 'models/pallet/payload_normal.sdf.in'
+WORLD = PACKAGE / 'worlds/warehouse.sdf'
+MARKINGS = PACKAGE / 'models/warehouse_markings/model.sdf'
+MARKINGS_GENERATOR = PACKAGE / 'tools/generate_floor_markings.py'
+ENV_HOOK = PACKAGE / 'env-hooks/mentorpi_gz_sim.sh.in'
+STATIC_EQUIPMENT = (
+    PACKAGE / 'models/warehouse_conveyor/model.sdf',
+    PACKAGE / 'models/warehouse_robot_arm/model.sdf',
+    PACKAGE / 'models/warehouse_charger/model.sdf',
+    PACKAGE / 'models/warehouse_rack/model.sdf',
+)
 
 PALLET_SIZE = (0.135, 0.135, 0.030)
 FORK_CENTER_Z = 0.018
@@ -93,6 +106,107 @@ class WarehouseAssetTest(unittest.TestCase):
                     visual.findtext('material/diffuse') == color
                     for visual in visuals
                 ))
+
+    def test_reference_layout_and_static_equipment(self):
+        world = ET.parse(WORLD).getroot().find('world')
+        self.assertEqual(world.attrib['name'], 'mentorpi_warehouse')
+        includes = world.findall('include')
+        names = {
+            include.findtext('name')
+            for include in includes
+        }
+        self.assertTrue({
+            'left_conveyor', 'pico_conveyor',
+            'robot_arm_upper', 'robot_arm_lower',
+            'charging_station', 'fresh_rack', 'normal_rack',
+            'floor_markings',
+        } <= names)
+        self.assertTrue(all(include.attrib == {} for include in includes))
+        text = WORLD.read_text()
+        self.assertNotIn('joint-controller', text)
+        self.assertNotIn('trajectory-controller', text)
+
+    def test_world_has_six_configured_default_pallets(self):
+        world = ET.parse(WORLD).getroot().find('world')
+        plugin = world.find(
+            "plugin[@name='mentorpi_gz_sim::WarehousePalletManager']")
+        self.assertIsNotNone(plugin)
+        self.assertEqual(
+            plugin.attrib['filename'],
+            'mentorpi_warehouse_pallet_manager',
+        )
+        defaults = plugin.findall('default_pallet')
+        self.assertEqual(len(defaults), 6)
+        self.assertEqual(
+            [(p.attrib['kind'], p.attrib['state']) for p in defaults],
+            [('fresh', 'loaded')] * 3 + [('normal', 'loaded')] * 3,
+        )
+        self.assertEqual(
+            [p.attrib['pose'] for p in defaults],
+            [
+                '-1.0 0.6 0 0 0 0',
+                '-0.5 0.6 0 0 0 0',
+                '0.0 0.6 0 0 0 0',
+                '2.9 2.4 0 0 0 0',
+                '3.4 2.4 0 0 0 0',
+                '3.9 2.4 0 0 0 0',
+            ],
+        )
+
+    def test_equipment_models_are_static_with_simple_collisions(self):
+        for model_path in STATIC_EQUIPMENT:
+            with self.subTest(model=model_path.parent.name):
+                model = ET.parse(model_path).getroot().find('model')
+                self.assertEqual(model.findtext('static'), 'true')
+                collisions = model.findall('.//collision')
+                self.assertGreaterEqual(len(collisions), 1)
+                self.assertLessEqual(len(collisions), 4)
+
+        arm = ET.parse(STATIC_EQUIPMENT[1]).getroot().find('model')
+        joints = arm.findall('joint')
+        self.assertGreaterEqual(len(joints), 1)
+        self.assertTrue(all(joint.attrib['type'] == 'fixed' for joint in joints))
+
+    def test_floor_markings_are_visual_only_and_deterministic(self):
+        root = ET.parse(MARKINGS).getroot()
+        self.assertEqual(root.findtext('model/static'), 'true')
+        self.assertEqual(root.findall('.//collision'), [])
+        self.assertGreater(len(root.findall('.//visual')), 100)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            generated = Path(tmp) / 'model.sdf'
+            subprocess.run(
+                [sys.executable, str(MARKINGS_GENERATOR), str(generated)],
+                check=True,
+            )
+            self.assertEqual(generated.read_bytes(), MARKINGS.read_bytes())
+
+    def test_install_hook_uses_the_active_colcon_prefix(self):
+        result = subprocess.run(
+            [
+                'bash',
+                '-c',
+                '''
+ament_prepend_unique_value() {
+  eval "export $1=\\"$2\\""
+}
+export AMENT_CURRENT_PREFIX=/opt/ros/humble
+export COLCON_CURRENT_PREFIX=/opt/mentorpi_ws/install/mentorpi_gz_sim
+source "$1"
+printf '%s\\n%s\\n' "$GZ_SIM_SYSTEM_PLUGIN_PATH" "$GZ_SIM_RESOURCE_PATH"
+''',
+                'bash',
+                str(ENV_HOOK),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.stdout.splitlines(), [
+            '/opt/mentorpi_ws/install/mentorpi_gz_sim/lib',
+            '/opt/mentorpi_ws/install/mentorpi_gz_sim/share/'
+            'mentorpi_gz_sim/models',
+        ])
 
 
 if __name__ == '__main__':

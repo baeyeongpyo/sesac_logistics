@@ -1,0 +1,179 @@
+<?xml version="1.0"?>
+<sdf version="1.8">
+  <model name="warehouse_robot_arm">
+    <static>true</static>
+    <link name="base_link">
+      <collision name="base_collision">
+        <pose>0 0 0.11 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.22</radius>
+            <length>0.22</length>
+          </cylinder>
+        </geometry>
+      </collision>
+      <visual name="base">
+        <pose>0 0 0.11 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.22</radius>
+            <length>0.22</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.12 0.14 0.17 1</ambient>
+          <diffuse>0.20 0.23 0.27 1</diffuse>
+        </material>
+      </visual>
+      <visual name="turntable">
+        <pose>0 0 0.235 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.15</radius>
+            <length>0.08</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>0.85 0.45 0.03 1</ambient>
+          <diffuse>0.95 0.56 0.05 1</diffuse>
+        </material>
+      </visual>
+    </link>
+
+    <link name="shoulder_link">
+      <pose>0 0 0.30 0 0 0</pose>
+      <collision name="shoulder_collision">
+        <pose>0.18 0 0.12 0 1.02 0</pose>
+        <geometry>
+          <box>
+            <size>0.42 0.14 0.14</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="shoulder_joint">
+        <geometry>
+          <cylinder>
+            <radius>0.11</radius>
+            <length>0.18</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <diffuse>0.95 0.56 0.05 1</diffuse>
+        </material>
+      </visual>
+      <visual name="shoulder_body">
+        <pose>0.18 0 0.12 0 1.02 0</pose>
+        <geometry>
+          <box>
+            <size>0.42 0.14 0.14</size>
+          </box>
+        </geometry>
+        <material>
+          <diffuse>0.95 0.56 0.05 1</diffuse>
+        </material>
+      </visual>
+    </link>
+
+    <link name="forearm_link">
+      <pose>0.36 0 0.57 0 0 0</pose>
+      <collision name="forearm_collision">
+        <pose>0.10 0 0.15 0 -0.58 0</pose>
+        <geometry>
+          <box>
+            <size>0.38 0.12 0.12</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="elbow_joint">
+        <geometry>
+          <cylinder>
+            <radius>0.10</radius>
+            <length>0.16</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <diffuse>0.20 0.23 0.27 1</diffuse>
+        </material>
+      </visual>
+      <visual name="forearm_body">
+        <pose>0.10 0 0.15 0 -0.58 0</pose>
+        <geometry>
+          <box>
+            <size>0.38 0.12 0.12</size>
+          </box>
+        </geometry>
+        <material>
+          <diffuse>0.95 0.56 0.05 1</diffuse>
+        </material>
+      </visual>
+    </link>
+
+    <link name="tool_link">
+      <pose>0.52 0 0.87 0 0 0</pose>
+      <collision name="tool_collision">
+        <geometry>
+          <box>
+            <size>0.34 0.18 0.10</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="wrist">
+        <geometry>
+          <cylinder>
+            <radius>0.08</radius>
+            <length>0.16</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <diffuse>0.20 0.23 0.27 1</diffuse>
+        </material>
+      </visual>
+      <visual name="gripper_bar">
+        <pose>0.13 0 0 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.28 0.08 0.07</size>
+          </box>
+        </geometry>
+        <material>
+          <diffuse>0.15 0.17 0.20 1</diffuse>
+        </material>
+      </visual>
+      <visual name="gripper_left">
+        <pose>0.25 0.09 -0.06 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.07 0.05 0.18</size>
+          </box>
+        </geometry>
+        <material>
+          <diffuse>0.10 0.12 0.14 1</diffuse>
+        </material>
+      </visual>
+      <visual name="gripper_right">
+        <pose>0.25 -0.09 -0.06 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.07 0.05 0.18</size>
+          </box>
+        </geometry>
+        <material>
+          <diffuse>0.10 0.12 0.14 1</diffuse>
+        </material>
+      </visual>
+    </link>
+
+    <joint name="base_to_shoulder" type="fixed">
+      <parent>base_link</parent>
+      <child>shoulder_link</child>
+    </joint>
+    <joint name="shoulder_to_forearm" type="fixed">
+      <parent>shoulder_link</parent>
+      <child>forearm_link</child>
+    </joint>
+    <joint name="forearm_to_tool" type="fixed">
+      <parent>forearm_link</parent>
+      <child>tool_link</child>
+    </joint>
+  </model>
+</sdf>
