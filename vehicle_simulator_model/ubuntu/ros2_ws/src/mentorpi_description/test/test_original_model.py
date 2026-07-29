@@ -211,6 +211,37 @@ class MecanumSourceModelTest(unittest.TestCase):
         self.assertIn('<exec_depend>std_msgs</exec_depend>', gazebo_package)
         self.assertIn('<description>Gazebo Harmonic simulation</description>', gazebo_package)
 
+    def test_forklift_forks_clear_the_pallet_channels_at_the_initial_height(self):
+        xacro_root = ET.parse(FORKLIFT).getroot()
+        xacro_joints = {joint.attrib['name']: joint for joint in xacro_root.findall('joint')}
+        preview_root = ET.parse(FORKLIFT_URDF).getroot()
+        preview_joints = {joint.attrib['name']: joint for joint in preview_root.findall('joint')}
+        sdf_root = ET.parse(SDF).getroot()
+        sdf_links = {
+            link.attrib['name']: link
+            for link in sdf_root.find('model').findall('link')
+        }
+
+        for fork_name, y in (('fork_left', '0.05'), ('fork_right', '-0.05')):
+            with self.subTest(fork=fork_name):
+                joint_name = f'{fork_name}_joint'
+                self.assertEqual(
+                    xacro_joints[joint_name].find('origin').attrib,
+                    {'rpy': '0 0 0', 'xyz': f'0 {y} -0.007'},
+                )
+                self.assertEqual(
+                    preview_joints[joint_name].find('origin').attrib,
+                    {'rpy': '0 0 0', 'xyz': f'0 {y} -0.007'},
+                )
+                self.assertEqual(
+                    sdf_links[fork_name].find('pose').text,
+                    f'0.09 {y} -0.007 0 0 0',
+                )
+
+        carriage_world_z = 0.070 - 0.045
+        self.assertAlmostEqual(carriage_world_z - 0.007, 0.018, places=9)
+        self.assertAlmostEqual(0.025 - 0.007, 0.018, places=9)
+
     def test_gazebo_assets_use_harmonic_names(self):
         world = (SOURCE / 'mentorpi_gz_sim/worlds/warehouse.sdf').read_text()
         model = SDF.read_text()
