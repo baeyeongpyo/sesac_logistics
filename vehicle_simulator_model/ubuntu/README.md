@@ -15,34 +15,53 @@ Mac Docker Desktop에서 `scripts/gz-gui-connect.sh`의 Gazebo Transport preflig
 비공개 계약을 바꾸어 우회하지 않는다. Mac Docker Desktop에서 native `gz sim -g` transport를
 사용할 수 없으므로 Task 4 browser viewer 제공 후 이를 사용한다.
 
-모든 명령은 `MENTORPI_IMAGE` 하나를 이미지 reference, Compose의 `IMAGE_VERSION` 로그 값으로
-공유한다. 기본값은 Task 5와 호환되는 `mentorpi-sim:harmonic`이다.
+모든 launcher 명령은 명시적인 named profile을 요구한다. profile 값은 이미 export된 환경
+변수보다 우선하며, launcher는 legacy bare `.env`를 읽지 않는다. 개발 PC에서는
+`.env.dev.example`을 `.env.dev`로 복사한다. 모든 명령은 `MENTORPI_IMAGE` 하나를 이미지
+reference, Compose의 `IMAGE_VERSION` 로그 값으로 공유한다. 기본값은 Task 5와 호환되는
+`mentorpi-sim:harmonic`이다.
+
+```bash
+# Development PC
+cp .env.dev.example .env.dev
+./run.sh --env dev build
+./run.sh --env dev test
+./run.sh --env dev sim-up
+
+# Linux server
+cp .env.server.example .env.server
+# Edit GZ_SERVER_IP to this server's LAN or VPN IP.
+./run.sh --env server sim-up
+```
 
 ```bash
 cd vehicle_simulator_model/ubuntu
-export MENTORPI_IMAGE=mentorpi-sim:harmonic
-./run.sh build
-./run.sh test
+cp .env.dev.example .env.dev
+./run.sh --env dev build
+./run.sh --env dev test
 ```
 
 `build`는 위 reference로 `docker build --platform linux/amd64`를 실행하고 이미지 안의
 `/opt/mentorpi_ws`에 ROS 패키지를 빌드한다. Compose 파일에는 `build:`가 없으므로 `sim-up`과
 `test`는 절대로 암묵적으로 소스를 빌드하지 않으며, 방금 build한 동일한 reference를 사용한다.
 
-서버 배포에서는 CI가 만든 명시적 tag 또는 digest를 전달한다.
+추가 환경은 launcher를 수정하지 않고 profile 파일로 만든다. 예를 들어 `.env.dev1`은
+`./run.sh --env dev1 <command>`로 선택하며, `.env.*` 규칙에 따라 Git에서 무시된다. 선택한
+profile의 값은 상속된 export보다 우선한다.
+
+서버 배포에서는 `.env.server`의 `MENTORPI_IMAGE`를 CI가 만든 명시적 tag 또는 digest로
+수정한다.
 
 ```bash
-export MENTORPI_IMAGE=registry.example.com/mentorpi-sim:2026.07.26
-./run.sh sim-up
-
-export MENTORPI_IMAGE='registry.example.com/mentorpi-sim@sha256:<digest>'
-./run.sh sim-up
+cp .env.server.example .env.server
+# Edit MENTORPI_IMAGE to registry.example.com/mentorpi-sim:2026.07.26 or a digest.
+./run.sh --env server sim-up
 ```
 
 버전 tag는 레지스트리에서 다른 이미지로 이동할 수 있으므로 그 자체로 불변하지 않다. digest
 reference만 내용 불변성을 제공한다. 이 번들의 운영 불변성은 Compose가 source bind mount나
 build context를 갖지 않아 배포 서버에서 소스를 재빌드하지 않는 범위까지다. digest로 운영하는
-서버에서는 `./run.sh build`를 실행하지 말고, 검증된 digest를 pull하여 사용한다.
+서버에서는 `./run.sh --env server build`를 실행하지 말고, 검증된 digest를 pull하여 사용한다.
 
 ## 서버 운영
 
@@ -51,11 +70,11 @@ Docker Engine 및 Docker Compose 2.24.4 이상이 설치된 Linux 서버에서 �
 nonzero로 종료한다.
 
 ```bash
-./run.sh sim-up
-./run.sh logs
-./run.sh topics
-./run.sh fork-up
-./run.sh down
+./run.sh --env server sim-up
+./run.sh --env server logs
+./run.sh --env server topics
+./run.sh --env server fork-up
+./run.sh --env server down
 ```
 
 위 명령은 `MENTORPI_IMAGE`가 가리키는 동일한 이미지를 사용한다. 기본 local reference가 없는
@@ -82,10 +101,10 @@ mapper container는 그대로 유지되고 새 DDS participant를 다시 발견�
 해석한 내부 IP가 바뀔 수 있으므로, discovery service 교체는 전체 시뮬레이션 stack의 계획된
 재시작으로 수행한다.
 
-`./run.sh fork-up`은 실행 중인 `sim-adapter`가 healthy일 때만 10초 제한 안에서 fork
+`./run.sh --env server fork-up`은 실행 중인 `sim-adapter`가 healthy일 때만 10초 제한 안에서 fork
 command를 publish한다. 서비스가 없거나 unhealthy면 새 container를 만들지 않고 실패한다.
 
-실행 중인 adapter의 ROS topic을 확인할 때는 `./run.sh topics`를 사용한다. Compose
+실행 중인 adapter의 ROS topic을 확인할 때는 `./run.sh --env server topics`를 사용한다. Compose
 `exec`는 entrypoint가 source한 shell 환경을 상속하지 않으므로 이 명령과 adapter
 healthcheck는 DDS helper와 ROS setup을 각각 source한 shell에서 ROS CLI를 실행한다.
 Discovery Server v2의 일반 client는 필요한 endpoint만 전달받기 때문에 전체 graph 조회에는
@@ -104,7 +123,7 @@ docker compose exec sim-adapter bash -lc \
 서버 GPU를 사용할 때만 다음처럼 명시한다.
 
 ```bash
-./run.sh sim-up gpu
+./run.sh --env server sim-up gpu
 ```
 
 이 profile은 Gazebo 서버에 `/dev/dri`를 전달하고 `LIBGL_ALWAYS_SOFTWARE=0`으로 바꾼다.
@@ -113,7 +132,7 @@ Compose `group_add`에 전달한다. Mac과 DRI render node가 없는 Linux에�
 Docker 실행 전에 실패한다. 기본 profile은 `LIBGL_ALWAYS_SOFTWARE=1`이므로 GPU 장치가
 없어도 운영할 수 있다.
 
-native Ubuntu GPU smoke test는 release gate다. Ubuntu release 후보에서 `./run.sh sim-up gpu`
+native Ubuntu GPU smoke test는 release gate다. Ubuntu release 후보에서 `./run.sh --env server sim-up gpu`
 실행 후 양 서비스 health, 양 robot scan payload, Gazebo 렌더 로그를 확인해야 한다. 이 검증은
 Mac Docker Desktop에서 대체할 수 없다.
 
@@ -124,43 +143,39 @@ Mac Docker Desktop에서 대체할 수 없다.
 
 | 목적 | 서버 실행 | 개발 PC 접속 |
 | --- | --- | --- |
-| Headless 통합 검증 | `./run.sh sim-up` | `topics`, logs, healthcheck |
-| 같은 LAN 네이티브 GUI | `SIM_NETWORK_MODE=lan GZ_SERVER_IP=<server-lan-ip> ./run.sh sim-up` | `scripts/gz-gui-connect.sh <server-lan-ip> <client-lan-ip>` |
-| 로컬 브라우저 viewer | `./run.sh viewer-up local` | `http://127.0.0.1:8080/vnc.html?view_only=1&autoconnect=1` |
-| 외부 팀 viewer | `VIEWER_DOMAIN=... VIEWER_ALLOW_CIDRS='...' ./run.sh viewer-up public` | `https://<VIEWER_DOMAIN>/vnc.html?view_only=1&autoconnect=1` |
-| 지도 생성 | `./run.sh mapping-up <session-id>` | logs와 `mapping-status` |
+| Headless 통합 검증 | `./run.sh --env dev sim-up` | `topics`, logs, healthcheck |
+| 같은 LAN 네이티브 GUI | `.env.server`의 `GZ_SERVER_IP` 설정 후 `./run.sh --env server sim-up` | `scripts/gz-gui-connect.sh <server-lan-ip> <client-lan-ip>` |
+| 로컬 브라우저 viewer | `./run.sh --env server viewer-up local` | `http://127.0.0.1:8080/vnc.html?view_only=1&autoconnect=1` |
+| 외부 팀 viewer | `.env.server`에 viewer 값을 설정 후 `./run.sh --env server viewer-up public` | `https://<VIEWER_DOMAIN>/vnc.html?view_only=1&autoconnect=1` |
+| 지도 생성 | `./run.sh --env dev mapping-up <session-id>` | logs와 `mapping-status` |
 
 ### Linux LAN 네이티브 GUI
 
 이 모드는 신뢰된 LAN에서만 사용한다. Linux 서버 host firewall은 승인된 개발자 CIDR만
 허용해야 하며, raw Gazebo Transport를 인터넷이나 신뢰되지 않은 네트워크에 노출해서는 안 된다.
 
-#### 서버 `.env` 구성
+#### 서버 `.env.server` 구성
 
-Linux 시뮬레이션 서버에서는 `.env.example`을 복사해 LAN 또는 VPN 설정을 서버에 영속화한다.
-`.env`는 local-only 파일이므로 commit하지 않는다.
+Linux 시뮬레이션 서버에서는 `.env.server.example`을 복사해 LAN 또는 VPN 설정을 서버에
+영속화한다. bare `.env`는 legacy local-only 파일로 Git에는 무시되지만 launcher가 읽지 않는다.
 
 ```bash
 cd vehicle_simulator_model/ubuntu
-cp .env.example .env
-# Set GZ_SERVER_IP to this Linux server's LAN or VPN address.
-./run.sh sim-up
+cp .env.server.example .env.server
+# Edit GZ_SERVER_IP to this server's LAN or VPN IP.
+./run.sh --env server sim-up
 ```
 
-`.env`의 각 설정은 `NAME=value` 문법이어야 한다. 빈 줄과 `#`으로 시작하는 주석은 허용되지만,
+`.env.server`의 각 설정은 `NAME=value` 문법이어야 한다. 빈 줄과 `#`으로 시작하는 주석은 허용되지만,
 `export NAME=value` 또는 `NAME = value` 같은 형식은 허용되지 않는다. 값은 shell처럼 해석하지
-않고 그대로 읽으므로, 인용부호가 필요 없는 주소와 이미지 태그를 사용한다. 실행 시 지정한 환경
-변수는 `.env`보다 우선하므로, 일회성 설정은 기존처럼
-`SIM_NETWORK_MODE=lan GZ_SERVER_IP=<server-lan-or-vpn-ip> ./run.sh sim-up`으로 덮어쓸 수 있다.
-`.env`에 값이 없으면 `run.sh`의 기본값이 사용된다.
+않고 그대로 읽으므로, 인용부호가 필요 없는 주소와 이미지 태그를 사용한다. profile 값은 이미
+export된 환경 변수보다 우선하므로, 설정 변경은 해당 `.env.<profile>` 파일을 편집해 수행한다.
 
 서버와 GUI client가 모두 같은 LAN에 있고 각 client가 해당 LAN 주소를 명시할 때 다음처럼 실행한다.
 
 ```bash
-# Linux server
-export SIM_NETWORK_MODE=lan
-export GZ_SERVER_IP=192.168.50.10
-./run.sh sim-up
+# Linux server: .env.server에서 GZ_SERVER_IP=192.168.50.10으로 편집
+./run.sh --env server sim-up
 
 # Mac A
 ./scripts/gz-gui-connect.sh 192.168.50.10 192.168.50.20
@@ -169,11 +184,11 @@ export GZ_SERVER_IP=192.168.50.10
 ./scripts/gz-gui-connect.sh 192.168.50.10 192.168.50.21
 ```
 
-GUI client는 서버의 `.env`에 있는 주소를 재사용하지 않는다. 각 client는 `gz-gui-connect.sh`의
+GUI client는 서버의 `.env.server`에 있는 주소를 재사용하지 않는다. 각 client는 `gz-gui-connect.sh`의
 두 번째 인수로 그 client 자신의 실제 LAN 또는 VPN 주소를 전달해야 한다.
 
 두 GUI client는 같은 Gazebo world에 동시에 접속한다. 모든 GUI 창을 닫아도 simulation은
-서버에서 계속 실행되며, 중지는 서버에서 `./run.sh down`으로만 수행한다. Mac Docker Desktop의
+서버에서 계속 실행되며, 중지는 서버에서 `./run.sh --env server down`으로만 수행한다. Mac Docker Desktop의
 preflight가 `exit 4`이면 이 raw transport 경로는 UNSUPPORTED이므로 아래 local 또는 public
 browser viewer로 전환한다.
 
@@ -183,19 +198,19 @@ viewer는 시뮬레이션과 독립된 read-only 관찰 서비스다. local 모�
 접속하도록 loopback에 바인드한다.
 
 ```bash
-./run.sh viewer-up local
+./run.sh --env server viewer-up local
 # http://127.0.0.1:8080/vnc.html?view_only=1&autoconnect=1
 ```
 
 외부 팀용 public 모드는 application auth나 basic auth를 제공하지 않는다. 허용한 source CIDR와
 Linux host firewall만 접근 경계이며, 허용 CIDR 외 요청은 HTTP 403을 받는다. public 모드의 strict
-입력 검증을 거치는 유일한 지원 운영 진입점은 `./run.sh viewer-up public`이다. `docker compose`
+입력 검증을 거치는 유일한 지원 운영 진입점은 `./run.sh --env server viewer-up public`이다. `docker compose`
 직접 호출로 public viewer를 올리는 것은 지원하지 않는다.
 
 ```bash
-export VIEWER_DOMAIN=sim.example.com
-export VIEWER_ALLOW_CIDRS='203.0.113.10/32 203.0.113.11/32'
-./run.sh viewer-up public
+# Edit .env.server: VIEWER_DOMAIN=sim.example.com
+# Edit .env.server: VIEWER_ALLOW_CIDRS=203.0.113.10/32 203.0.113.11/32
+./run.sh --env server viewer-up public
 ```
 
 Router/NAT는 public 80과 443만 Linux 서버로 전달한다. Caddy는 ACME redirect/challenge에 80을
@@ -209,11 +224,11 @@ Linux firewall도 같은 노출 정책을 강제한다.
 ### 종료, 로그, 복구와 서비스 독립성
 
 ```bash
-./run.sh viewer-logs
-./run.sh viewer-down
-./run.sh logs
-./run.sh topics
-./run.sh down
+./run.sh --env server viewer-logs
+./run.sh --env server viewer-down
+./run.sh --env server logs
+./run.sh --env server topics
+./run.sh --env server down
 ```
 
 `viewer-down`은 `gazebo-viewer`와 `web-gateway`만 중지한다. Task 6 runtime 검증은 이 viewer
@@ -241,9 +256,9 @@ mapping의 simulation service 구성을 변경하지 않고, viewer lifecycle은
 사용하며, 같은 ID는 publish된 결과 또는 진행 중인 작업과 재사용할 수 없다.
 
 ```bash
-./run.sh mapping-up warehouse-20260726-01
-./run.sh mapping-stop
-./run.sh mapping-status warehouse-20260726-01
+./run.sh --env dev mapping-up warehouse-20260726-01
+./run.sh --env dev mapping-stop
+./run.sh --env dev mapping-status warehouse-20260726-01
 ```
 
 `mapping-up`은 Discovery Server, Gazebo, adapter가 준비된 뒤 mapper를 시작하고, `SESSION_ID`
@@ -294,14 +309,15 @@ entrypoint가 ROS 환경을 source한 뒤 `exec`하므로 이 Bash가 container 
 수행할 때만 `SLAM_VOLUME_NAME`을 명시하고, 한 mapping/viewer lifecycle의 모든 명령에 같은
 `COMPOSE_PROJECT_NAME`과 `SLAM_VOLUME_NAME`을 유지한다.
 
+`COMPOSE_PROJECT_NAME`과 `SLAM_VOLUME_NAME`을 별도 profile 파일에 설정한 뒤 그 이름을
+선택한다. 예를 들어 `.env.mapping-validation`을 만들면 다음처럼 실행한다.
+
 ```bash
-export COMPOSE_PROJECT_NAME=mentorpi-mapping-validation
-export SLAM_VOLUME_NAME=mentorpi-mapping-validation-slam-data
-./run.sh mapping-up validation-01
-./run.sh viewer-up local
-./run.sh viewer-down
-./run.sh mapping-stop
-./run.sh mapping-status validation-01
+./run.sh --env mapping-validation mapping-up validation-01
+./run.sh --env mapping-validation viewer-up local
+./run.sh --env mapping-validation viewer-down
+./run.sh --env mapping-validation mapping-stop
+./run.sh --env mapping-validation mapping-status validation-01
 ```
 
 `mapping-status`는 volume을 read-only로 연결한 inspector 컨테이너에서 이 최종 디렉터리만 나열하고,
