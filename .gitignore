@@ -44,4 +44,6 @@ docs/superpowers/
 .superpowers/
 .worktrees/
 .env
+.env.*
+!.env.*.example
 .venv

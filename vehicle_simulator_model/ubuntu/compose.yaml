@@ -1,9 +1,9 @@
 x-runtime-environment: &runtime-environment
   GZ_PARTITION: mentorpi-sim
-  ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
-  LIBGL_ALWAYS_SOFTWARE: "${LIBGL_ALWAYS_SOFTWARE:-1}"
-  IMAGE_VERSION: "${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"
-  ROBOT_IDS: "${ROBOT_IDS:-robot_1,robot_2}"
+  ROS_DOMAIN_ID: "${ROS_DOMAIN_ID-0}"
+  LIBGL_ALWAYS_SOFTWARE: "${LIBGL_ALWAYS_SOFTWARE-1}"
+  IMAGE_VERSION: "${MENTORPI_IMAGE-mentorpi-sim:harmonic}"
+  ROBOT_IDS: "${ROBOT_IDS-robot_1,robot_2}"
 
 x-dds-client-environment: &dds-client-environment
   <<: *runtime-environment
@@ -12,8 +12,8 @@ x-dds-client-environment: &dds-client-environment
   FASTDDS_BUILTIN_TRANSPORTS: "UDPv4"
 
 x-runtime: &runtime
-  image: "${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"
-  platform: ${TARGET_PLATFORM:-linux/amd64}
+  image: "${MENTORPI_IMAGE-mentorpi-sim:harmonic}"
+  platform: ${TARGET_PLATFORM-linux/amd64}
   environment: *runtime-environment
   restart: unless-stopped
 
@@ -83,13 +83,13 @@ services:
     environment:
       <<: *dds-client-environment
       SERVICE_NAME: slam-mapper
-      SESSION_ID: "${SESSION_ID:-none}"
+      SESSION_ID: "${SESSION_ID-none}"
       SLAM_DATA_ROOT: /slam-data
-      IMAGE_VERSION: "${IMAGE_VERSION:-mentorpi-sim:harmonic}"
-      GIT_COMMIT: "${GIT_COMMIT:-unknown}"
-      WORLD_VERSION: "${WORLD_VERSION:-unknown}"
-      MODEL_VERSION: "${MODEL_VERSION:-unknown}"
-      TF_CALIBRATION_VERSION: "${TF_CALIBRATION_VERSION:-unknown}"
+      IMAGE_VERSION: "${IMAGE_VERSION-mentorpi-sim:harmonic}"
+      GIT_COMMIT: "${GIT_COMMIT-unknown}"
+      WORLD_VERSION: "${WORLD_VERSION-unknown}"
+      MODEL_VERSION: "${MODEL_VERSION-unknown}"
+      TF_CALIBRATION_VERSION: "${TF_CALIBRATION_VERSION-unknown}"
     command: /opt/mentorpi_ws/install/mentorpi_slam/lib/mentorpi_slam/run_mapping_session.sh
     depends_on:
       dds-discovery:
@@ -108,7 +108,7 @@ services:
     environment:
       <<: *runtime-environment
       SERVICE_NAME: slam-inspector
-      SESSION_ID: "${SESSION_ID:-none}"
+      SESSION_ID: "${SESSION_ID-none}"
     command: bash
     volumes:
       - type: volume
@@ -122,4 +122,4 @@ networks:
 
 volumes:
   slam-data:
-    name: "${SLAM_VOLUME_NAME:-mentorpi-slam-data}"
+    name: "${SLAM_VOLUME_NAME-mentorpi-slam-data}"

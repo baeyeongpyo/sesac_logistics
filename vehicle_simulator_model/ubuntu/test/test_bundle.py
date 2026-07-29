@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import textwrap
 import unittest
@@ -68,7 +69,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
 
         self.assertGreaterEqual(test_command.count('config --quiet'), 2)
         self.assertIn('compose.gpu.yaml', test_command)
-        self.assertIn('RENDER_GID="${RENDER_GID:-0}"', test_command)
+        self.assertIn('RENDER_GID="${RENDER_GID-0}"', test_command)
 
     def test_sim_adapter_configures_one_way_relay_host(self):
         compose = (BUNDLE / 'compose.yaml').read_text()
@@ -287,16 +288,16 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'slam-data:/slam-data',
             'condition: service_healthy',
             '/opt/mentorpi_ws/install/mentorpi_slam/lib/mentorpi_slam/run_mapping_session.sh',
-            'GIT_COMMIT: "${GIT_COMMIT:-unknown}"',
-            'WORLD_VERSION: "${WORLD_VERSION:-unknown}"',
-            'MODEL_VERSION: "${MODEL_VERSION:-unknown}"',
-            'TF_CALIBRATION_VERSION: "${TF_CALIBRATION_VERSION:-unknown}"',
+            'GIT_COMMIT: "${GIT_COMMIT-unknown}"',
+            'WORLD_VERSION: "${WORLD_VERSION-unknown}"',
+            'MODEL_VERSION: "${MODEL_VERSION-unknown}"',
+            'TF_CALIBRATION_VERSION: "${TF_CALIBRATION_VERSION-unknown}"',
         ):
             self.assertIn(required, mapper)
         self.assertNotIn('GZ_RELAY_HOST', mapper)
         self.assertIn('slam-data:', compose)
         self.assertIn(
-            'name: "${SLAM_VOLUME_NAME:-mentorpi-slam-data}"',
+            'name: "${SLAM_VOLUME_NAME-mentorpi-slam-data}"',
             compose,
         )
 
@@ -475,13 +476,13 @@ class DeployOnlyBundleTest(unittest.TestCase):
 
         for required in (
             'validate_session_id',
-            '[[ "$#" -ne 2 ]]',
-            'export SESSION_ID="$2"',
-            'export IMAGE_VERSION="${IMAGE_VERSION:-mentorpi-sim:harmonic}"',
-            'export GIT_COMMIT="${GIT_COMMIT:-$(git -C "$BUNDLE_DIR" rev-parse HEAD)}"',
-            'export WORLD_VERSION="${WORLD_VERSION:-warehouse-v1}"',
-            'export MODEL_VERSION="${MODEL_VERSION:-mentorpi-m1-v1}"',
-            'export TF_CALIBRATION_VERSION="${TF_CALIBRATION_VERSION:-ground-truth-v1}"',
+            '[[ "${#RUN_COMMAND[@]}" -ne 2 ]]',
+            'export SESSION_ID="${RUN_COMMAND[1]}"',
+            'export IMAGE_VERSION="${IMAGE_VERSION-mentorpi-sim:harmonic}"',
+            'export GIT_COMMIT="${GIT_COMMIT-$(git -C "$BUNDLE_DIR" rev-parse HEAD)}"',
+            'export WORLD_VERSION="${WORLD_VERSION-warehouse-v1}"',
+            'export MODEL_VERSION="${MODEL_VERSION-mentorpi-m1-v1}"',
+            'export TF_CALIBRATION_VERSION="${TF_CALIBRATION_VERSION-ground-truth-v1}"',
             '--profile mapping up -d',
             'gazebo-server sim-adapter slam-mapper',
         ):
@@ -499,7 +500,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
         self.assertIn('State.ExitCode', script)
 
         for required in (
-            'validate_session_id "$2"',
+            'validate_session_id "${RUN_COMMAND[1]}"',
             '--profile mapping run --rm --no-deps slam-inspector',
             'session_dir="/slam-data/${SESSION_ID}"',
             'checksums.sha256',
@@ -560,16 +561,28 @@ class DeployOnlyBundleTest(unittest.TestCase):
         self.assertEqual(operations, [])
 
     def test_mapping_commands_reject_dot_session_ids_before_docker(self):
-        for command in ('mapping-up', 'mapping-status'):
-            for session_id in ('.', '..'):
-                with self.subTest(command=command, session_id=session_id):
-                    result = subprocess.run(
-                        ['bash', str(BUNDLE / 'run.sh'), command, session_id],
-                        text=True,
-                        capture_output=True,
-                    )
-                    self.assertEqual(result.returncode, 2, result.stderr)
-                    self.assertIn('session ID may contain', result.stderr)
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            launcher = self.copy_test_launcher(root)
+            for command in ('mapping-up', 'mapping-status'):
+                for session_id in ('.', '..'):
+                    with self.subTest(command=command, session_id=session_id):
+                        result = subprocess.run(
+                            [
+                                'bash', str(launcher), '--env', 'test', command,
+                                session_id,
+                            ],
+                            text=True,
+                            capture_output=True,
+                        )
+                        self.assertEqual(result.returncode, 2, result.stderr)
+                        self.assertIn('session ID may contain', result.stderr)
+
+    def copy_test_launcher(self, root):
+        launcher = root / 'run.sh'
+        shutil.copy2(BUNDLE / 'run.sh', launcher)
+        (root / '.env.test').write_text('SIM_NETWORK_MODE=internal\n')
+        return launcher
 
     def run_mapping_stop_with_fake_docker(
         self,
@@ -582,6 +595,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
     ):
         with TemporaryDirectory() as directory:
             root = Path(directory)
+            launcher = self.copy_test_launcher(root)
             bin_dir = root / 'bin'
             bin_dir.mkdir()
             state_path = root / 'mapper-state'
@@ -655,7 +669,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
                 'MAPPING_RECONNECT_TIMEOUT_SECONDS': timeout,
             })
             result = subprocess.run(
-                ['bash', str(BUNDLE / 'run.sh'), 'mapping-stop'],
+                ['bash', str(launcher), '--env', 'test', 'mapping-stop'],
                 text=True,
                 capture_output=True,
                 env=environment,
@@ -672,6 +686,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'healthcheck.sh',
             'run.sh',
             'README.md',
+            '.env.server-viewer.example',
             'ros2_ws/src/mentorpi_description/package.xml',
             'ros2_ws/src/mentorpi_gz_sim/package.xml',
         ):
@@ -702,9 +717,9 @@ class DeployOnlyBundleTest(unittest.TestCase):
         for forbidden_port in ('10317:', '10318:', '9002:'):
             self.assertNotIn(forbidden_port, compose)
         self.assertNotIn('build:', compose)
-        self.assertIn('image: "${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"', compose)
+        self.assertIn('image: "${MENTORPI_IMAGE-mentorpi-sim:harmonic}"', compose)
         self.assertIn(
-            'IMAGE_VERSION: "${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"',
+            'IMAGE_VERSION: "${MENTORPI_IMAGE-mentorpi-sim:harmonic}"',
             compose,
         )
 
@@ -753,21 +768,22 @@ class DeployOnlyBundleTest(unittest.TestCase):
             self.assertNotIn(removed, readme)
         for text in (
             'linux/amd64',
-            './run.sh build',
-            './run.sh sim-up',
-            './run.sh logs',
-            './run.sh down',
-            './run.sh fork-up',
-            './run.sh topics',
+            './run.sh --env dev build',
+            './run.sh --env dev sim-up',
+            './run.sh --env server logs',
+            './run.sh --env server down',
+            './run.sh --env server fork-up',
+            './run.sh --env server topics',
             'MENTORPI_IMAGE',
-            'sha256:',
+            '버전 tag는 레지스트리에서 다른 이미지로 이동할 수 있으므로 그 자체로 불변하지 않다',
+            '검증된 digest를 pull하여 사용',
             '브라우저',
             '오프스크린',
             'native Ubuntu',
             'release gate',
-            './run.sh mapping-up',
-            './run.sh mapping-stop',
-            './run.sh mapping-status',
+            './run.sh --env dev mapping-up',
+            './run.sh --env dev mapping-stop',
+            './run.sh --env dev mapping-status',
             '.inprogress',
             'mentorpi-slam-data',
             'SLAM_VOLUME_NAME',
@@ -780,11 +796,13 @@ class DeployOnlyBundleTest(unittest.TestCase):
     def test_operator_docs_describe_shared_observation_operations(self):
         readme = (BUNDLE / 'README.md').read_text()
         for text in (
-            'SIM_NETWORK_MODE=lan',
+            '.env.server',
+            '.env.server-viewer',
             'GZ_SERVER_IP',
             'scripts/gz-gui-connect.sh',
-            './run.sh viewer-up local',
-            './run.sh viewer-up public',
+            './run.sh --env server-viewer viewer-up local',
+            './run.sh --env server-viewer viewer-up public',
+            '자체 internal stack',
             'Docker Compose 2.24.4',
             'VIEWER_DOMAIN',
             'VIEWER_ALLOW_CIDRS',
@@ -812,6 +830,43 @@ class DeployOnlyBundleTest(unittest.TestCase):
             ),
             'old plan must start with the shared-observation superseded notice',
         )
+
+    def test_operator_docs_distinguish_profile_network_modes_and_image_pull(self):
+        readme = (BUNDLE / 'README.md').read_text()
+
+        for text in (
+            '`--env server`는 LAN 모드',
+            'host networking',
+            '`--env dev`와 `--env server-viewer`만 Docker 내부 모드',
+            '`.env.server`의 `MENTORPI_IMAGE`',
+            '그 정확한 reference를 `docker pull`',
+        ):
+            self.assertIn(text, readme)
+        self.assertNotIn('registry tag/digest를 export', readme)
+
+    def test_server_operator_docs_describe_lan_host_networking(self):
+        readme = (BUNDLE / 'README.md').read_text()
+        server_section = readme.split('## 서버 운영\n', 1)[1].split(
+            '## 공유 관찰 운영', 1
+        )[0]
+
+        for text in (
+            '`--env server`',
+            'LAN',
+            'host networking',
+            'DDS_DISCOVERY_HOST=127.0.0.1',
+            'loopback',
+            'GZ_SERVER_IP',
+            'firewall',
+        ):
+            self.assertIn(text, server_section)
+        for stale_text in (
+            '내부 `mentorpi` 네트워크',
+            '내부 bridge network',
+            'Docker DNS의 `dds-discovery`',
+            '외부 Gazebo Transport 포트와 ROS DDS 포트는 공개하지 않는다',
+        ):
+            self.assertNotIn(stale_text, server_section)
 
 
 if __name__ == '__main__':
