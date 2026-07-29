@@ -790,8 +790,25 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'mentorpi-slam-data:/slam-data:ro',
             '첫 mapping-up',
             '기존 세션 내용을 변경하지 않는다',
+            '개발 PC: 네이티브 Gazebo GUI',
+            '개발 PC: Docker 통합 테스트',
+            '서버 PC: 시뮬레이션만 실행',
+            '서버 PC: SLAM 지도 생성',
+            '서비스별 실행 범위',
+            'sim-adapter만',
+            'slam-mapper',
+            'docker compose --profile mapping logs -f slam-mapper',
+            '--force-recreate sim-adapter',
+            '현재 지원하지 않는다',
+            'GZ_IP=127.0.0.1',
+            'gz sim -s -r',
+            'gz sim -g',
         ):
             self.assertIn(text, readme)
+        self.assertNotIn(
+            'gz sim ros2_ws/src/mentorpi_gz_sim/worlds/warehouse.sdf',
+            readme.splitlines(),
+        )
 
     def test_operator_docs_describe_shared_observation_operations(self):
         readme = (BUNDLE / 'README.md').read_text()

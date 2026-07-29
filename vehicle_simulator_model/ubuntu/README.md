@@ -69,6 +69,267 @@ reference만 내용 불변성을 제공한다. 이 번들의 운영 불변성은
 build context를 갖지 않아 배포 서버에서 소스를 재빌드하지 않는 범위까지다. digest로 운영하는
 서버에서는 `./run.sh --env server build`를 실행하지 말고, 검증된 digest를 pull하여 사용한다.
 
+## 실행 구조와 케이스 선택
+
+### 서비스별 실행 범위
+
+| 서비스 | 실행 위치 | 역할 | 단독 실행 여부 |
+| --- | --- | --- | --- |
+| `dds-discovery` | Docker 내부 | `sim-adapter`와 `slam-mapper` 사이의 ROS 2 discovery | 일반 운영에서는 `run.sh`가 함께 실행 |
+| `gazebo-server` | Docker 내부 | 물리·센서 시뮬레이션과 오프스크린 렌더링 | 가능하지만 ROS sensor topic은 생성하지 않음 |
+| `sim-adapter` | Docker 내부 | robot spawn, Gazebo–ROS bridge, odom 변환, TF 발행 | Gazebo와 Discovery Server가 먼저 준비돼야 함 |
+| `slam-mapper` | Docker 내부 | scan·odom·TF를 사용한 지도 생성과 rosbag 기록 | 단독 실행 금지, `mapping-up`으로만 시작 |
+| `slam-inspector` | Docker 내부 | 저장된 지도 세션과 checksum을 read-only로 검증 | `mapping-status`가 필요할 때만 one-shot 실행 |
+| Gazebo GUI·URDF viewer | 개발 PC | world·모델 작성 및 시각 확인 | Docker 서비스와 분리된 개발 도구 |
+
+`sim-adapter만` 실행해도 센서 데이터의 원본인 Gazebo가 없으면 정상 상태가 될 수 없다.
+따라서 일반 시뮬레이션은 `sim-up`, 지도 생성은 `mapping-up`을 진입점으로 사용한다.
+`slam-mapper`는 실행 중인 adapter와 container ID를 공유하지 않으며 독립적으로 통신하지만,
+유효한 입력 데이터가 있어야 지도 세션을 publish할 수 있다.
+
+모든 Docker 명령은 다음 디렉터리에서 실행한다.
+
+```bash
+cd vehicle_simulator_model/ubuntu
+```
+
+서비스 기준 빠른 명령은 다음과 같다.
+
+| 목적 | 명령 | 비고 |
+| --- | --- | --- |
+| Gazebo server만 진단 | `docker compose up -d gazebo-server` | world만 실행되며 robot spawn·ROS topic은 없음 |
+| Gazebo + sim adapter | `./run.sh --env dev sim-up` | Discovery Server까지 포함하는 권장 진입점 |
+| sim adapter 재시작 | `docker compose restart sim-adapter` | Gazebo와 mapper는 유지 |
+| SLAM mapper 시작 | `./run.sh --env dev mapping-up <session-id>` | 필요한 시뮬레이션 서비스도 함께 시작 |
+| mapper 로그 | `docker compose --profile mapping logs -f slam-mapper` | `Ctrl+C`는 log follow만 종료 |
+| mapper 안전 종료 | `./run.sh --env dev mapping-stop` | 지도 저장과 atomic publish 수행 |
+| 지도 검증 | `./run.sh --env dev mapping-status <session-id>` | named volume을 read-only로 검사 |
+
+`docker compose up -d sim-adapter`도 Compose dependency에 의해 Gazebo와 Discovery Server를
+함께 시작한다. 다만 운영 절차와 GPU profile 처리를 일관되게 유지하려면 `./run.sh --env dev sim-up`을
+사용한다. mapper는 `docker compose up`으로 직접 시작하지 않는다.
+
+### 케이스 1 — 개발 PC: 네이티브 Gazebo GUI
+
+목적은 world·로봇 외형·센서 배치 같은 시각 모델을 작성하고 확인하는 것이다. Mac을 포함한
+개발 PC에서는 Gazebo Harmonic을 네이티브로 설치하고 Docker GUI를 사용하지 않는다.
+
+macOS에서는 Gazebo server와 GUI를 한 process에서 실행할 수 없다. 프로젝트 root에서 두
+터미널을 열고 같은 `GZ_IP`와 `GZ_PARTITION`을 설정한다.
+
+```bash
+# Terminal 1: world를 읽는 Gazebo server
+export GZ_IP=127.0.0.1
+export GZ_PARTITION=mentorpi-native
+gz sim -s -r \
+  vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_gz_sim/worlds/warehouse.sdf
+
+# Terminal 2: server에 연결하는 Gazebo GUI
+export GZ_IP=127.0.0.1
+export GZ_PARTITION=mentorpi-native
+gz sim -g
+```
+
+`-s`는 server-only, `-r`은 simulation 즉시 시작, `-g`는 GUI-only 옵션이다. 두 터미널 중
+server를 먼저 실행하고 실행 중인 상태로 유지해야 한다. GUI가 빈 화면이면 두 터미널의
+`GZ_IP`·`GZ_PARTITION` 값이 같은지와 server가 종료되지 않았는지 확인한다.
+`GZ_IP=127.0.0.1`은 같은 Mac 안의 두 process만 연결하고 잘못 선택된 network interface의
+multicast 오류를 피하기 위한 설정이다.
+
+이 실행은 world 파일만 열기 때문에 두 MentorPi robot은 자동으로 생성되지 않는다. 현재 robot
+spawn은 ROS 2 `sim-adapter` launch가 담당한다. macOS GUI는 일부 plugin이 불안정할 수 있으므로
+world·camera 시각 확인 범위로 사용한다. 자세한 제약은
+[Gazebo Harmonic macOS 실행 안내](https://gazebosim.org/docs/harmonic/getstarted/#macos)를
+참고한다. 로봇 URDF만 확인할 때는 프로젝트에 설치된 `urdf-viz-large-mesh`를 사용한다.
+
+```bash
+urdf-viz-large-mesh \
+  ros2_ws/src/mentorpi_description/urdf/mecanum_forklift.urdf \
+  --axis-scale 0.01 \
+  --web-server-port 7778 \
+  --package-path mentorpi_description="$PWD/ros2_ws/src/mentorpi_description"
+```
+
+ROS 2 Humble과 workspace를 네이티브로 실행할 수 있는 Ubuntu 개발 PC에서는 전체 시뮬레이션을
+headless server와 GUI client로 나눌 수 있다.
+
+```bash
+# Terminal 1: ROS 2 + Gazebo server + adapter
+export GZ_IP=127.0.0.1
+export GZ_PARTITION=mentorpi-sim
+source /opt/ros/humble/setup.bash
+cd ros2_ws
+colcon build
+source install/setup.bash
+ros2 launch mentorpi_gz_sim two_robot_sim.launch.py
+
+# Terminal 2: 같은 PC의 Gazebo GUI
+export GZ_IP=127.0.0.1
+export GZ_PARTITION=mentorpi-sim
+gz sim -g
+```
+
+Mac 개발 PC에서는 ROS 2 Humble 전체 실행을 전제로 하지 않는다. Mac에서는 world와 URDF를
+시각적으로 수정하고, ROS bridge·SLAM 통합 검증은 아래 Docker 통합 테스트에서 수행한다.
+
+### 케이스 2 — 개발 PC: Docker 통합 테스트
+
+서버 환경을 아직 준비하지 않았거나 변경사항을 서버로 전달하기 전에 검증할 때 사용한다.
+Mac Docker Desktop에서도 실행할 수 있지만 `linux/amd64` emulation과 소프트웨어 렌더링을
+사용하므로 서버보다 느릴 수 있다. 컨테이너의 Gazebo GUI 화면은 제공하지 않는다.
+
+```bash
+cp .env.dev.example .env.dev
+./run.sh --env dev build
+./run.sh --env dev test
+./run.sh --env dev sim-up
+docker compose ps
+./run.sh --env dev topics
+./run.sh --env dev fork-up
+./run.sh --env dev down
+```
+
+`sim-up`은 `dds-discovery`, `gazebo-server`, `sim-adapter`를 함께 시작한다. `topics`에서
+`/clock`, `/tf`, `/robot_1/scan_raw`, `/robot_1/odom`, `/robot_2/scan_raw`,
+`/robot_2/odom` 등이 확인되면 ROS adapter가 실제 payload를 받고 있는 상태다.
+
+개발 PC Docker에서도 지도 생성까지 검증하려면 서버와 동일한 SLAM 절차를 사용한다.
+
+```bash
+SESSION_ID=dev-map-20260727-01
+./run.sh --env dev mapping-up "$SESSION_ID"
+docker compose --profile mapping logs -f slam-mapper
+# 주행 또는 시뮬레이션 데이터 수집 후 Ctrl+C로 log follow만 종료
+./run.sh --env dev mapping-stop
+./run.sh --env dev mapping-status "$SESSION_ID"
+```
+
+### 케이스 3 — 서버 PC: 시뮬레이션만 실행
+
+서버에서는 검증된 이미지 tag 또는 digest를 pull한 뒤 headless로 실행한다. 서버에서 source를
+bind mount하거나 다시 빌드하지 않는다.
+
+```bash
+cd vehicle_simulator_model/ubuntu
+cp .env.server.example .env.server
+# .env.server의 MENTORPI_IMAGE를 registry.example.com/mentorpi-sim@sha256:<digest>로 편집
+docker pull registry.example.com/mentorpi-sim@sha256:<digest>
+
+./run.sh --env server sim-up
+docker compose ps
+./run.sh --env server topics
+./run.sh --env server logs
+```
+
+`./run.sh --env server logs`는 `dds-discovery`, `gazebo-server`, `sim-adapter` 로그를 follow한다. 로그 확인을
+끝낼 때 누르는 `Ctrl+C`는 log follow만 종료하며 background 서비스는 계속 실행된다.
+
+운영을 종료할 때는 다음 명령을 사용한다.
+
+```bash
+./run.sh --env server down
+```
+
+서버가 native Ubuntu이고 `/dev/dri/renderD*`를 사용할 수 있을 때만 GPU profile을 선택한다.
+
+```bash
+./run.sh --env server sim-up gpu
+```
+
+### 케이스 4 — 서버 PC: SLAM 지도 생성
+
+지도 생성은 일반 `sim-up` 대신 고유한 session ID와 함께 `mapping-up`으로 시작한다.
+`mapping-up`이 Discovery Server, Gazebo, adapter, mapper의 의존 순서를 처리하므로 먼저
+`sim-up`을 실행할 필요가 없다.
+
+```bash
+cd vehicle_simulator_model/ubuntu
+# .env.server의 MENTORPI_IMAGE를 검증된 tag 또는 digest로 편집
+
+SESSION_ID=warehouse-20260727-01
+./run.sh --env server mapping-up "$SESSION_ID"
+docker compose --profile mapping ps
+docker compose --profile mapping logs -f slam-mapper
+```
+
+필요한 데이터 수집이 끝나면 `down`이 아니라 반드시 `mapping-stop`으로 종료하고 결과를
+검증한다.
+
+```bash
+./run.sh --env server mapping-stop
+./run.sh --env server mapping-status "$SESSION_ID"
+```
+
+`mapping-stop` 성공 후 지도, posegraph, rosbag, manifest, checksum은
+`mentorpi-slam-data` named volume의 `/slam-data/<session-id>/`에 저장된다. 실패한 세션은
+`.inprogress/<session-id>`로 남으며 같은 ID로 재시작하지 않는다.
+
+### 케이스 5 — 개발 PC에서 서버 PC 운영
+
+개발 PC에서 서버에 SSH로 접속해 같은 서버 명령을 실행할 수 있다. SSH는 명령 실행과 로그
+확인을 위한 경로이며 Gazebo GUI 전달 경로가 아니다.
+
+```bash
+ssh <server-user>@<server-host>
+cd <deploy-path>/vehicle_simulator_model/ubuntu
+# .env.server의 MENTORPI_IMAGE를 검증된 tag 또는 digest로 편집하고 해당 reference를 docker pull
+./run.sh --env server sim-up
+./run.sh --env server topics
+./run.sh --env server logs
+```
+
+개발 PC에서 만든 이미지를 서버에 전달하는 권장 흐름은 다음과 같다.
+
+```bash
+# 개발 PC 또는 CI: .env.release를 만들고 MENTORPI_IMAGE를 registry.example.com/mentorpi-sim:<release-tag>로 편집
+cp .env.dev.example .env.release
+./run.sh --env release build
+./run.sh --env release test
+docker push registry.example.com/mentorpi-sim:<release-tag>
+
+# 서버 PC
+# .env.server의 MENTORPI_IMAGE를 같은 release-tag로 편집
+docker pull registry.example.com/mentorpi-sim:<release-tag>
+./run.sh --env server sim-up
+```
+
+현재 Compose는 `mentorpi` network를 `internal: true`로 만들고 Gazebo Transport, ROS DDS,
+웹 포트를 host에 publish하지 않는다. 따라서 개발 PC의 `gz sim -g`를 서버 Docker의
+Gazebo에 직접 연결하거나 브라우저에서 Gazebo 화면을 보는 기능은 현재 지원하지 않는다.
+원격 웹 모니터링이 필요하면 read-only 영상·상태 bridge와 인증·접근 제어를 별도 서비스로
+추가해야 한다.
+
+### adapter 재시작과 mapper 복구
+
+일반 adapter process 재시작은 다음처럼 수행한다.
+
+```bash
+docker compose restart sim-adapter
+docker compose ps
+./run.sh --env server topics
+```
+
+container 자체를 교체하는 배포·장애 조건을 재현하려면 다음 명령을 사용한다.
+
+```bash
+docker compose up -d --no-deps --force-recreate sim-adapter
+docker compose ps
+./run.sh --env server topics
+```
+
+active mapping 중에도 mapper container는 유지되고 새 adapter participant를 다시 발견한다.
+지도 저장 전에는 adapter가 `healthy`로 복구됐는지 확인하고 `mapping-stop`을 실행한다.
+복구에 30초 이상 필요하면 대기 시간을 명시적으로 늘릴 수 있다.
+
+```bash
+MAPPING_RECONNECT_TIMEOUT_SECONDS=60 ./run.sh --env server mapping-stop
+```
+
+`dds-discovery`를 단독으로 강제 재생성하면 내부 IP가 바뀔 수 있다. Discovery Server를
+교체해야 할 때는 active mapping을 먼저 안전하게 종료한 후 전체 stack을 `down`/`sim-up`
+순서로 계획 재시작한다. `slam-mapper`가 비정상 종료된 세션은 같은 session ID로 재시작하지
+않고 `.inprogress` 자료를 보존한 채 새 ID로 시작한다.
+
 ## 서버 운영
 
 Docker Engine 및 Docker Compose 2.24.4 이상이 설치된 Linux 서버에서 실행한다.
@@ -354,6 +615,8 @@ docker run --rm -v mentorpi-slam-data:/slam-data -v "$PWD":/backup \
 
 ## 렌더링 경계
 
-브라우저 렌더링은 사용자의 클라이언트에서 수행한다. 서버는 카메라·라이다 등 시뮬레이션
-센서에 필요한 오프스크린 렌더링만 수행한다. 따라서 서버 Compose 구성에는 X11, Xauthority,
-DISPLAY 또는 원격 GUI 전달 설정이 없다.
+서버는 카메라·라이다 등 시뮬레이션 센서에 필요한 오프스크린 렌더링만 수행한다. 현재
+Docker bundle에는 브라우저 Gazebo viewer, rosbridge, Foxglove bridge가 포함되어 있지 않다.
+따라서 서버 Compose 구성에는 X11, Xauthority, DISPLAY, 원격 GUI 전달 또는 외부 공개 웹
+포트가 없다. 개발 PC의 네이티브 GUI와 서버 headless 운영은 서로 분리되며, 브라우저
+모니터링은 별도 기능으로 구현해야 한다.
