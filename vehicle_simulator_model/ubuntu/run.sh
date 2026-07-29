@@ -301,7 +301,7 @@ PY
 require_viewer_compose_version() {
   local compose_version
 
-  if ! compose_version="$(docker compose version --short 2>/dev/null)"; then
+  if ! compose_version="$(docker compose --env-file "$PROFILE_FILE" version --short 2>/dev/null)"; then
     echo 'viewer-up requires Docker Compose 2.24.4 or newer' >&2
     return 2
   fi

@@ -177,7 +177,7 @@ class ObservationBundleTest(unittest.TestCase):
                 'printf \'VIEWER_ALLOW_CIDRS=%s\\n\' '
                 '"${VIEWER_ALLOW_CIDRS:-}" >> "$FAKE_DOCKER_LOG"\n'
                 'printf \'ARGS=%s\\n\' "$*" >> "$FAKE_DOCKER_LOG"\n'
-                'if [[ "$*" == "compose version --short" ]]; then\n'
+                'if [[ "${@: -2}" == "version --short" ]]; then\n'
                 '  printf \'%s\\n\' "${FAKE_COMPOSE_VERSION:-2.24.4}"\n'
                 '  exit 0\n'
                 'fi\n'
@@ -517,8 +517,20 @@ class ObservationBundleTest(unittest.TestCase):
             'viewer-up requires Docker Compose 2.24.4 or newer',
             result.stderr,
         )
-        self.assertIn('ARGS=compose version --short', docker_log)
+        self.assertRegex(
+            docker_log,
+            r'ARGS=compose --env-file .*/\.env\.test version --short',
+        )
         self.assertNotIn(' up -d --wait ', docker_log)
+
+    def test_viewer_compose_version_probe_uses_selected_profile(self):
+        bundle, result, docker_log = self.run_with_fake_docker(['viewer-up'])
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            f'ARGS=compose --env-file {bundle / ".env.test"} version --short',
+            docker_log,
+        )
 
     def test_viewer_up_propagates_compose_wait_failure(self):
         _, result, docker_log = self.run_with_fake_docker(
@@ -527,7 +539,10 @@ class ObservationBundleTest(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 23)
-        self.assertIn('ARGS=compose version --short', docker_log)
+        self.assertRegex(
+            docker_log,
+            r'ARGS=compose --env-file .*/\.env\.test version --short',
+        )
         self.assertIn(' up -d --wait ', docker_log)
 
     def test_viewer_down_and_logs_target_only_viewer_services(self):

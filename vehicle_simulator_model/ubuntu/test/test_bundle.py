@@ -831,6 +831,43 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'old plan must start with the shared-observation superseded notice',
         )
 
+    def test_operator_docs_distinguish_profile_network_modes_and_image_pull(self):
+        readme = (BUNDLE / 'README.md').read_text()
+
+        for text in (
+            '`--env server`는 LAN 모드',
+            'host networking',
+            '`--env dev`와 `--env server-viewer`만 Docker 내부 모드',
+            '`.env.server`의 `MENTORPI_IMAGE`',
+            '그 정확한 reference를 `docker pull`',
+        ):
+            self.assertIn(text, readme)
+        self.assertNotIn('registry tag/digest를 export', readme)
+
+    def test_server_operator_docs_describe_lan_host_networking(self):
+        readme = (BUNDLE / 'README.md').read_text()
+        server_section = readme.split('## 서버 운영\n', 1)[1].split(
+            '## 공유 관찰 운영', 1
+        )[0]
+
+        for text in (
+            '`--env server`',
+            'LAN',
+            'host networking',
+            'DDS_DISCOVERY_HOST=127.0.0.1',
+            'loopback',
+            'GZ_SERVER_IP',
+            'firewall',
+        ):
+            self.assertIn(text, server_section)
+        for stale_text in (
+            '내부 `mentorpi` 네트워크',
+            '내부 bridge network',
+            'Docker DNS의 `dds-discovery`',
+            '외부 Gazebo Transport 포트와 ROS DDS 포트는 공개하지 않는다',
+        ):
+            self.assertNotIn(stale_text, server_section)
+
 
 if __name__ == '__main__':
     unittest.main()

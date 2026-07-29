@@ -54,11 +54,13 @@ cp .env.dev.example .env.dev
 profile의 값은 상속된 export보다 우선한다.
 
 서버 배포에서는 `.env.server`의 `MENTORPI_IMAGE`를 CI가 만든 명시적 tag 또는 digest로
-수정한다.
+수정하고, 그 정확한 reference를 `docker pull`로 pull한다. 선택한 profile이 상속된 shell
+환경보다 우선하므로 `MENTORPI_IMAGE`를 export해서 배포 이미지를 바꾸지 않는다.
 
 ```bash
 cp .env.server.example .env.server
 # Edit MENTORPI_IMAGE to registry.example.com/mentorpi-sim:2026.07.26 or a digest.
+docker pull registry.example.com/mentorpi-sim:2026.07.26
 ./run.sh --env server sim-up
 ```
 
@@ -82,28 +84,26 @@ nonzero로 종료한다.
 ```
 
 위 명령은 `MENTORPI_IMAGE`가 가리키는 동일한 이미지를 사용한다. 기본 local reference가 없는
-서버에서는 먼저 해당 reference를 pull하거나, registry tag/digest를 export한다.
+서버에서는 `.env.server`에 설정한 정확한 tag 또는 digest를 먼저 `docker pull`한다.
 
-`sim-up`은 내부 `mentorpi` 네트워크에서 `dds-discovery`, `gazebo-server`, `sim-adapter`를
-시작한다. 외부 Gazebo Transport 포트와 ROS DDS 포트는 공개하지 않는다. Gazebo 서버
+`--env server` profile의 `./run.sh --env server sim-up`은 LAN profile이다. `dds-discovery`, `gazebo-server`,
+`sim-adapter`와 mapping support 서비스는 affected simulation services로서 host networking을
+사용하며, `GZ_SERVER_IP`는 Docker host의 LAN 또는 VPN 주소여야 한다. Gazebo 서버
 healthcheck가 통과한 뒤 adapter가 시작하며, Gazebo 서비스는
 `GZ_PARTITION=mentorpi-sim`을 공유한다.
 서버 health는 진행 중인 stats payload 2개를, adapter health는 양 robot의 scan·odom
 payload, robot별 odom-to-base TF, 연속 증가하는 `/clock`을 확인한다. topic 이름만 존재하는
 상태는 healthy가 아니다.
 
-ROS 2 discovery는 전용 `dds-discovery` 서비스가 담당한다. `sim-adapter`와 `slam-mapper`는
-각자 독립된 network·IPC namespace를 유지하면서 같은 내부 bridge network에 연결된다. 두
-서비스의 공통 DDS helper는 Docker DNS의 `dds-discovery`를 숫자 IPv4 locator로 해석해
-`ROS_DISCOVERY_SERVER=<IPv4>:11811`을 export하며, Fast DDS payload transport는
-`FASTDDS_BUILTIN_TRANSPORTS=UDPv4`로 고정한다. shared memory나
-`network_mode: service:sim-adapter`에 의존하지 않으므로 adapter container가 재시작·재생성되어도
-mapper container는 그대로 유지되고 새 DDS participant를 다시 발견한다.
+ROS 2 discovery는 전용 `dds-discovery` 서비스가 담당한다. host-network containers인
+`sim-adapter`와 `slam-mapper`는 `DDS_DISCOVERY_HOST=127.0.0.1`로 연결하므로 discovery
+control traffic은 host loopback으로만 흐르며, Fast DDS payload transport는
+`FASTDDS_BUILTIN_TRANSPORTS=UDPv4`로 고정한다. `dds-discovery`는
+`restart: unless-stopped`로 운영한다.
 
-`dds-discovery`는 외부 포트를 공개하지 않는 내부 제어 서비스이며 `restart: unless-stopped`로
-운영한다. adapter 재시작과 달리 discovery server 자체를 강제로 재생성하면 기존 client가
-해석한 내부 IP가 바뀔 수 있으므로, discovery service 교체는 전체 시뮬레이션 stack의 계획된
-재시작으로 수행한다.
+`GZ_SERVER_IP`로 구성한 LAN Gazebo Transport 노출은 host firewall에서 신뢰된 개발자 CIDR로
+제한한다. 이 LAN/GZ transport를 공용 인터넷에 공개하지 않으며, firewall 정책을 바꾸지 않고
+Docker 내부 네트워크라는 전제로 노출을 판단해서는 안 된다.
 
 `./run.sh --env server fork-up`은 실행 중인 `sim-adapter`가 healthy일 때만 10초 제한 안에서 fork
 command를 publish한다. 서비스가 없거나 unhealthy면 새 container를 만들지 않고 실패한다.
@@ -142,8 +142,12 @@ Mac Docker Desktop에서 대체할 수 없다.
 
 ## 공유 관찰 운영
 
-기본 `internal` 모드는 Docker 내부에서 시뮬레이션과 ROS adapter를 운영한다. 다음 표는 지원하는
-운영 조합과 각각의 개발 PC 접속 방법이다.
+`--env server`는 LAN 모드이며, affected simulation services에 host networking을 적용한다.
+`--env dev`와 `--env server-viewer`만 Docker 내부 모드로 시뮬레이션과 ROS adapter를
+운영한다. 이 두 profile에서 simulation services는 internal `mentorpi` bridge network를 사용하고,
+DDS client는 Docker DNS의 `dds-discovery`를 locator로 해석한다. browser viewer의
+`web-gateway`는 별도의 viewer edge exposure 정책을 유지한다. 다음 표는 지원하는 운영 조합과
+각각의 개발 PC 접속 방법이다.
 
 | 목적 | 서버 실행 | 개발 PC 접속 |
 | --- | --- | --- |

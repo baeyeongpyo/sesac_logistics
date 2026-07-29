@@ -34,7 +34,7 @@ class RuntimeEnvConfigTest(unittest.TestCase):
             fake_docker = bin_dir / 'docker'
             fake_docker.write_text(textwrap.dedent('''\
                 #!/usr/bin/env bash
-                if [[ "$*" == 'compose version --short' ]]; then
+                if [[ "${@: -2}" == 'version --short' ]]; then
                   printf '2.24.4\\n'
                   exit 0
                 fi
