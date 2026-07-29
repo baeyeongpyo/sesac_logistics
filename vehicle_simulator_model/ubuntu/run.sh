@@ -42,13 +42,70 @@ load_profile_file() {
   done < "$config_file"
 }
 
+validate_command_arity() {
+  local argument
+
+  for argument in "${RUN_COMMAND[@]}"; do
+    if [[ "$argument" == '--env' ]]; then
+      echo 'Usage: ./run.sh --env <profile> <command>' >&2
+      return 2
+    fi
+  done
+
+  case "${RUN_COMMAND[0]}" in
+    build|down|logs|topics|test|fork-up|viewer-down|viewer-logs|mapping-stop|help|-h|--help)
+      if [[ "${#RUN_COMMAND[@]}" -ne 1 ]]; then
+        echo "${RUN_COMMAND[0]} does not accept arguments" >&2
+        return 2
+      fi
+      ;;
+    sim-up)
+      if [[ "${#RUN_COMMAND[@]}" -gt 2 ]]; then
+        echo 'sim-up accepts only the optional gpu profile' >&2
+        return 2
+      fi
+      if [[ "${#RUN_COMMAND[@]}" -eq 2 \
+        && "${RUN_COMMAND[1]}" != 'gpu' ]]; then
+        echo 'sim-up accepts only the optional gpu profile' >&2
+        return 2
+      fi
+      ;;
+    viewer-up)
+      if [[ "${#RUN_COMMAND[@]}" -gt 2 ]]; then
+        echo 'viewer-up accepts only local or public' >&2
+        return 2
+      fi
+      if [[ "${#RUN_COMMAND[@]}" -eq 2 ]]; then
+        case "${RUN_COMMAND[1]}" in
+          local|public)
+            ;;
+          *)
+            echo 'viewer mode must be local or public' >&2
+            return 2
+            ;;
+        esac
+      fi
+      ;;
+    mapping-up|mapping-status)
+      if [[ "${#RUN_COMMAND[@]}" -ne 2 ]]; then
+        echo "${RUN_COMMAND[0]} requires exactly one session ID" >&2
+        return 2
+      fi
+      ;;
+  esac
+}
+
 parse_profile_selector "$@"
 
 if ! load_profile_file; then
   exit 2
 fi
 
-export MENTORPI_IMAGE="${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"
+if ! validate_command_arity; then
+  exit 2
+fi
+
+export MENTORPI_IMAGE="${MENTORPI_IMAGE-mentorpi-sim:harmonic}"
 COMPOSE=(docker compose --env-file "$PROFILE_FILE" -f "$BUNDLE_DIR/compose.yaml")
 viewer_compose=(
   docker compose --env-file "$PROFILE_FILE"
@@ -58,7 +115,7 @@ viewer_compose=(
 )
 
 configure_network_mode() {
-  case "${SIM_NETWORK_MODE:-internal}" in
+  case "${SIM_NETWORK_MODE-internal}" in
     internal)
       ;;
     lan)
@@ -352,16 +409,13 @@ EOF
 
 case "${RUN_COMMAND[0]}" in
   build)
-    docker build --platform "${TARGET_PLATFORM:-linux/amd64}" \
+    docker build --platform "${TARGET_PLATFORM-linux/amd64}" \
       --tag "$MENTORPI_IMAGE" "$BUNDLE_DIR"
     ;;
   sim-up)
-    if [[ "${RUN_COMMAND[1]:-}" == 'gpu' ]]; then
+    if [[ "${#RUN_COMMAND[@]}" -eq 2 ]]; then
       prepare_gpu
       COMPOSE+=( -f "$BUNDLE_DIR/compose.gpu.yaml" )
-    elif [[ -n "${RUN_COMMAND[1]:-}" ]]; then
-      echo 'sim-up accepts only the optional gpu profile' >&2
-      exit 2
     fi
     "${COMPOSE[@]}" up -d dds-discovery gazebo-server sim-adapter
     ;;
@@ -376,11 +430,15 @@ case "${RUN_COMMAND[0]}" in
       echo 'viewer-up accepts only local or public' >&2
       exit 2
     fi
-    if [[ "${SIM_NETWORK_MODE:-internal}" != 'internal' ]]; then
+    if [[ "${SIM_NETWORK_MODE-internal}" != 'internal' ]]; then
       echo 'viewer-up requires SIM_NETWORK_MODE=internal' >&2
       exit 2
     fi
-    viewer_mode="${RUN_COMMAND[1]:-${VIEWER_MODE:-local}}"
+    if [[ "${#RUN_COMMAND[@]}" -eq 2 ]]; then
+      viewer_mode="${RUN_COMMAND[1]}"
+    else
+      viewer_mode="${VIEWER_MODE-local}"
+    fi
     case "$viewer_mode" in
       local)
         ;;
@@ -434,7 +492,7 @@ case "${RUN_COMMAND[0]}" in
 
     printf 'mentorpi test stage=compose-config\n'
     "${COMPOSE[@]}" config --quiet
-    RENDER_GID="${RENDER_GID:-0}" \
+    RENDER_GID="${RENDER_GID-0}" \
       "${COMPOSE[@]}" -f "$BUNDLE_DIR/compose.gpu.yaml" config --quiet
 
     printf 'mentorpi test stage=runtime-ctest\n'
@@ -455,7 +513,7 @@ case "${RUN_COMMAND[0]}" in
   fork-up)
     adapter_id="$("${COMPOSE[@]}" ps -q sim-adapter)"
     if [[ -z "$adapter_id" ]]; then
-      echo 'sim-adapter is not running; start it with ./run.sh sim-up.' >&2
+      echo 'sim-adapter is not running; start it with ./run.sh --env <profile> sim-up.' >&2
       exit 3
     fi
     adapter_health="$(
@@ -475,11 +533,11 @@ case "${RUN_COMMAND[0]}" in
     fi
     validate_session_id "${RUN_COMMAND[1]}"
     export SESSION_ID="${RUN_COMMAND[1]}"
-    export IMAGE_VERSION="${IMAGE_VERSION:-mentorpi-sim:harmonic}"
-    export GIT_COMMIT="${GIT_COMMIT:-$(git -C "$BUNDLE_DIR" rev-parse HEAD)}"
-    export WORLD_VERSION="${WORLD_VERSION:-warehouse-v1}"
-    export MODEL_VERSION="${MODEL_VERSION:-mentorpi-m1-v1}"
-    export TF_CALIBRATION_VERSION="${TF_CALIBRATION_VERSION:-ground-truth-v1}"
+    export IMAGE_VERSION="${IMAGE_VERSION-mentorpi-sim:harmonic}"
+    export GIT_COMMIT="${GIT_COMMIT-$(git -C "$BUNDLE_DIR" rev-parse HEAD)}"
+    export WORLD_VERSION="${WORLD_VERSION-warehouse-v1}"
+    export MODEL_VERSION="${MODEL_VERSION-mentorpi-m1-v1}"
+    export TF_CALIBRATION_VERSION="${TF_CALIBRATION_VERSION-ground-truth-v1}"
     "${COMPOSE[@]}" --profile mapping up -d \
       dds-discovery gazebo-server sim-adapter slam-mapper
     ;;
@@ -488,8 +546,8 @@ case "${RUN_COMMAND[0]}" in
       echo 'mapping-stop does not accept arguments' >&2
       exit 2
     fi
-    MAPPING_STOP_TIMEOUT_SECONDS="${MAPPING_STOP_TIMEOUT_SECONDS:-90}"
-    MAPPING_RECONNECT_TIMEOUT_SECONDS="${MAPPING_RECONNECT_TIMEOUT_SECONDS:-30}"
+    MAPPING_STOP_TIMEOUT_SECONDS="${MAPPING_STOP_TIMEOUT_SECONDS-90}"
+    MAPPING_RECONNECT_TIMEOUT_SECONDS="${MAPPING_RECONNECT_TIMEOUT_SECONDS-30}"
     validate_mapping_stop_timeout
     validate_mapping_reconnect_timeout
     mapper_id="$("${COMPOSE[@]}" ps -q --all slam-mapper)"

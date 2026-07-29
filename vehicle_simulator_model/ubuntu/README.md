@@ -32,6 +32,10 @@ cp .env.dev.example .env.dev
 cp .env.server.example .env.server
 # Edit GZ_SERVER_IP to this server's LAN or VPN IP.
 ./run.sh --env server sim-up
+
+# Dedicated browser viewer stack
+cp .env.server-viewer.example .env.server-viewer
+./run.sh --env server-viewer viewer-up local
 ```
 
 ```bash
@@ -145,8 +149,8 @@ Mac Docker Desktop에서 대체할 수 없다.
 | --- | --- | --- |
 | Headless 통합 검증 | `./run.sh --env dev sim-up` | `topics`, logs, healthcheck |
 | 같은 LAN 네이티브 GUI | `.env.server`의 `GZ_SERVER_IP` 설정 후 `./run.sh --env server sim-up` | `scripts/gz-gui-connect.sh <server-lan-ip> <client-lan-ip>` |
-| 로컬 브라우저 viewer | `./run.sh --env server viewer-up local` | `http://127.0.0.1:8080/vnc.html?view_only=1&autoconnect=1` |
-| 외부 팀 viewer | `.env.server`에 viewer 값을 설정 후 `./run.sh --env server viewer-up public` | `https://<VIEWER_DOMAIN>/vnc.html?view_only=1&autoconnect=1` |
+| 로컬 브라우저 viewer | `./run.sh --env server-viewer viewer-up local` | `http://127.0.0.1:8080/vnc.html?view_only=1&autoconnect=1` |
+| 외부 팀 viewer | `.env.server-viewer`에 viewer 값을 설정 후 `./run.sh --env server-viewer viewer-up public` | `https://<VIEWER_DOMAIN>/vnc.html?view_only=1&autoconnect=1` |
 | 지도 생성 | `./run.sh --env dev mapping-up <session-id>` | logs와 `mapping-status` |
 
 ### Linux LAN 네이티브 GUI
@@ -194,23 +198,28 @@ browser viewer로 전환한다.
 
 ### Read-only browser viewer
 
-viewer는 시뮬레이션과 독립된 read-only 관찰 서비스다. local 모드는 서버 자신의 브라우저에서만
-접속하도록 loopback에 바인드한다.
+browser viewer는 `.env.server-viewer.example`을 복사한 전용 profile로 운영한다. 이 profile의
+`COMPOSE_PROJECT_NAME=mentorpi-server-viewer`와 `SIM_NETWORK_MODE=internal` 설정은 browser viewer가
+실행 중인 LAN stack에 붙지 않고 discovery, simulation, adapter, viewer를 포함한 자체 internal stack을
+시작하도록 분리한다. LAN 네이티브 GUI는 계속 `.env.server`와 `--env server`를 사용한다.
+local viewer는 서버 자신의 브라우저에서만 접속하도록 loopback에 바인드한다.
 
 ```bash
-./run.sh --env server viewer-up local
+cp .env.server-viewer.example .env.server-viewer
+./run.sh --env server-viewer viewer-up local
 # http://127.0.0.1:8080/vnc.html?view_only=1&autoconnect=1
 ```
 
 외부 팀용 public 모드는 application auth나 basic auth를 제공하지 않는다. 허용한 source CIDR와
 Linux host firewall만 접근 경계이며, 허용 CIDR 외 요청은 HTTP 403을 받는다. public 모드의 strict
-입력 검증을 거치는 유일한 지원 운영 진입점은 `./run.sh --env server viewer-up public`이다. `docker compose`
-직접 호출로 public viewer를 올리는 것은 지원하지 않는다.
+입력 검증을 거치는 유일한 지원 운영 진입점은
+`./run.sh --env server-viewer viewer-up public`이다.
+`docker compose` 직접 호출로 public viewer를 올리는 것은 지원하지 않는다.
 
 ```bash
-# Edit .env.server: VIEWER_DOMAIN=sim.example.com
-# Edit .env.server: VIEWER_ALLOW_CIDRS=203.0.113.10/32 203.0.113.11/32
-./run.sh --env server viewer-up public
+# Edit .env.server-viewer: VIEWER_DOMAIN=sim.example.com
+# Edit .env.server-viewer: VIEWER_ALLOW_CIDRS=203.0.113.10/32 203.0.113.11/32
+./run.sh --env server-viewer viewer-up public
 ```
 
 Router/NAT는 public 80과 443만 Linux 서버로 전달한다. Caddy는 ACME redirect/challenge에 80을
@@ -224,17 +233,18 @@ Linux firewall도 같은 노출 정책을 강제한다.
 ### 종료, 로그, 복구와 서비스 독립성
 
 ```bash
-./run.sh --env server viewer-logs
-./run.sh --env server viewer-down
-./run.sh --env server logs
-./run.sh --env server topics
-./run.sh --env server down
+./run.sh --env server-viewer viewer-logs
+./run.sh --env server-viewer viewer-down
+./run.sh --env server-viewer logs
+./run.sh --env server-viewer topics
+./run.sh --env server-viewer down
 ```
 
 `viewer-down`은 `gazebo-viewer`와 `web-gateway`만 중지한다. Task 6 runtime 검증은 이 viewer
 lifecycle 변경이 `gazebo-server`와 `sim-adapter`를 중지시키지 않음을 확인했다. 따라서 이 두
 서비스의 viewer 장애 복구는 `viewer-down` 뒤 동일한 local/public 명령으로 viewer만 다시 올린다.
-반대로 `down`은 simulation stack을 중지한다.
+반대로 `--env server-viewer down`은 전용 browser simulation stack을 중지하며, LAN stack의
+`--env server down`과 서로 다른 Compose project를 대상으로 한다.
 
 mapping session 환경은 mapper와 inspector에만 전달되며 server, adapter, discovery, viewer에는
 전달되지 않는다. 따라서 같은 Compose project와 volume 설정을 유지하면 `viewer-up`이 active

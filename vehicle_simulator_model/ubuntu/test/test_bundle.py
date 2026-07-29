@@ -69,7 +69,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
 
         self.assertGreaterEqual(test_command.count('config --quiet'), 2)
         self.assertIn('compose.gpu.yaml', test_command)
-        self.assertIn('RENDER_GID="${RENDER_GID:-0}"', test_command)
+        self.assertIn('RENDER_GID="${RENDER_GID-0}"', test_command)
 
     def test_sim_adapter_configures_one_way_relay_host(self):
         compose = (BUNDLE / 'compose.yaml').read_text()
@@ -288,16 +288,16 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'slam-data:/slam-data',
             'condition: service_healthy',
             '/opt/mentorpi_ws/install/mentorpi_slam/lib/mentorpi_slam/run_mapping_session.sh',
-            'GIT_COMMIT: "${GIT_COMMIT:-unknown}"',
-            'WORLD_VERSION: "${WORLD_VERSION:-unknown}"',
-            'MODEL_VERSION: "${MODEL_VERSION:-unknown}"',
-            'TF_CALIBRATION_VERSION: "${TF_CALIBRATION_VERSION:-unknown}"',
+            'GIT_COMMIT: "${GIT_COMMIT-unknown}"',
+            'WORLD_VERSION: "${WORLD_VERSION-unknown}"',
+            'MODEL_VERSION: "${MODEL_VERSION-unknown}"',
+            'TF_CALIBRATION_VERSION: "${TF_CALIBRATION_VERSION-unknown}"',
         ):
             self.assertIn(required, mapper)
         self.assertNotIn('GZ_RELAY_HOST', mapper)
         self.assertIn('slam-data:', compose)
         self.assertIn(
-            'name: "${SLAM_VOLUME_NAME:-mentorpi-slam-data}"',
+            'name: "${SLAM_VOLUME_NAME-mentorpi-slam-data}"',
             compose,
         )
 
@@ -478,11 +478,11 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'validate_session_id',
             '[[ "${#RUN_COMMAND[@]}" -ne 2 ]]',
             'export SESSION_ID="${RUN_COMMAND[1]}"',
-            'export IMAGE_VERSION="${IMAGE_VERSION:-mentorpi-sim:harmonic}"',
-            'export GIT_COMMIT="${GIT_COMMIT:-$(git -C "$BUNDLE_DIR" rev-parse HEAD)}"',
-            'export WORLD_VERSION="${WORLD_VERSION:-warehouse-v1}"',
-            'export MODEL_VERSION="${MODEL_VERSION:-mentorpi-m1-v1}"',
-            'export TF_CALIBRATION_VERSION="${TF_CALIBRATION_VERSION:-ground-truth-v1}"',
+            'export IMAGE_VERSION="${IMAGE_VERSION-mentorpi-sim:harmonic}"',
+            'export GIT_COMMIT="${GIT_COMMIT-$(git -C "$BUNDLE_DIR" rev-parse HEAD)}"',
+            'export WORLD_VERSION="${WORLD_VERSION-warehouse-v1}"',
+            'export MODEL_VERSION="${MODEL_VERSION-mentorpi-m1-v1}"',
+            'export TF_CALIBRATION_VERSION="${TF_CALIBRATION_VERSION-ground-truth-v1}"',
             '--profile mapping up -d',
             'gazebo-server sim-adapter slam-mapper',
         ):
@@ -686,6 +686,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'healthcheck.sh',
             'run.sh',
             'README.md',
+            '.env.server-viewer.example',
             'ros2_ws/src/mentorpi_description/package.xml',
             'ros2_ws/src/mentorpi_gz_sim/package.xml',
         ):
@@ -716,9 +717,9 @@ class DeployOnlyBundleTest(unittest.TestCase):
         for forbidden_port in ('10317:', '10318:', '9002:'):
             self.assertNotIn(forbidden_port, compose)
         self.assertNotIn('build:', compose)
-        self.assertIn('image: "${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"', compose)
+        self.assertIn('image: "${MENTORPI_IMAGE-mentorpi-sim:harmonic}"', compose)
         self.assertIn(
-            'IMAGE_VERSION: "${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"',
+            'IMAGE_VERSION: "${MENTORPI_IMAGE-mentorpi-sim:harmonic}"',
             compose,
         )
 
@@ -796,10 +797,12 @@ class DeployOnlyBundleTest(unittest.TestCase):
         readme = (BUNDLE / 'README.md').read_text()
         for text in (
             '.env.server',
+            '.env.server-viewer',
             'GZ_SERVER_IP',
             'scripts/gz-gui-connect.sh',
-            './run.sh --env server viewer-up local',
-            './run.sh --env server viewer-up public',
+            './run.sh --env server-viewer viewer-up local',
+            './run.sh --env server-viewer viewer-up public',
+            '자체 internal stack',
             'Docker Compose 2.24.4',
             'VIEWER_DOMAIN',
             'VIEWER_ALLOW_CIDRS',

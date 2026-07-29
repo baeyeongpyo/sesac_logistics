@@ -216,7 +216,7 @@ class ObservationBundleTest(unittest.TestCase):
         caddy = (BUNDLE / 'Caddyfile.viewer').read_text()
 
         self.assertIn('web-gateway:', viewer)
-        self.assertIn('127.0.0.1:${VIEWER_PORT:-8080}:8080', viewer)
+        self.assertIn('127.0.0.1:${VIEWER_PORT-8080}:8080', viewer)
         self.assertIn('ports: !override', public)
         self.assertIn('"80:80"', public)
         self.assertIn('"443:443"', public)
