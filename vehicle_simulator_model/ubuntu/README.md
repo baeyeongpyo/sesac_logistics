@@ -134,6 +134,26 @@ Mac Docker Desktop에서 대체할 수 없다.
 
 이 모드는 신뢰된 LAN에서만 사용한다. Linux 서버 host firewall은 승인된 개발자 CIDR만
 허용해야 하며, raw Gazebo Transport를 인터넷이나 신뢰되지 않은 네트워크에 노출해서는 안 된다.
+
+#### 서버 `.env` 구성
+
+Linux 시뮬레이션 서버에서는 `.env.example`을 복사해 LAN 또는 VPN 설정을 서버에 영속화한다.
+`.env`는 local-only 파일이므로 commit하지 않는다.
+
+```bash
+cd vehicle_simulator_model/ubuntu
+cp .env.example .env
+# Set GZ_SERVER_IP to this Linux server's LAN or VPN address.
+./run.sh sim-up
+```
+
+`.env`의 각 설정은 `NAME=value` 문법이어야 한다. 빈 줄과 `#`으로 시작하는 주석은 허용되지만,
+`export NAME=value` 또는 `NAME = value` 같은 형식은 허용되지 않는다. 값은 shell처럼 해석하지
+않고 그대로 읽으므로, 인용부호가 필요 없는 주소와 이미지 태그를 사용한다. 실행 시 지정한 환경
+변수는 `.env`보다 우선하므로, 일회성 설정은 기존처럼
+`SIM_NETWORK_MODE=lan GZ_SERVER_IP=<server-lan-or-vpn-ip> ./run.sh sim-up`으로 덮어쓸 수 있다.
+`.env`에 값이 없으면 `run.sh`의 기본값이 사용된다.
+
 서버와 GUI client가 모두 같은 LAN에 있고 각 client가 해당 LAN 주소를 명시할 때 다음처럼 실행한다.
 
 ```bash
@@ -148,6 +168,9 @@ export GZ_SERVER_IP=192.168.50.10
 # Mac B
 ./scripts/gz-gui-connect.sh 192.168.50.10 192.168.50.21
 ```
+
+GUI client는 서버의 `.env`에 있는 주소를 재사용하지 않는다. 각 client는 `gz-gui-connect.sh`의
+두 번째 인수로 그 client 자신의 실제 LAN 또는 VPN 주소를 전달해야 한다.
 
 두 GUI client는 같은 Gazebo world에 동시에 접속한다. 모든 GUI 창을 닫아도 simulation은
 서버에서 계속 실행되며, 중지는 서버에서 `./run.sh down`으로만 수행한다. Mac Docker Desktop의
