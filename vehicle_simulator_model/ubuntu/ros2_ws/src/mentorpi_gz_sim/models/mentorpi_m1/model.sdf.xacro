@@ -128,7 +128,7 @@
         <iyy>0.00001</iyy><iyz>0</iyz><izz>0.00001</izz>
       </inertia></inertial>
       <visual name="lidar_visual"><geometry><mesh>
-        <uri>file://$(find mentorpi_description)/meshes/mecanum/lidar_Link.STL</uri>
+        <uri>model://mentorpi_description/meshes/mecanum/lidar_Link.STL</uri>
       </mesh></geometry></visual>
       <sensor name="lidar" type="gpu_lidar">
         <always_on>true</always_on><update_rate>12</update_rate><visualize>false</visualize>
@@ -147,7 +147,7 @@
         <iyy>0.00002</iyy><iyz>0</iyz><izz>0.00002</izz>
       </inertia></inertial>
       <visual name="depth_camera_visual"><geometry><mesh>
-        <uri>file://$(find mentorpi_description)/meshes/mecanum/cam_Link.STL</uri>
+        <uri>model://mentorpi_description/meshes/mecanum/cam_Link.STL</uri>
       </mesh></geometry></visual>
       <sensor name="depth_camera" type="depth_camera">
         <always_on>true</always_on><update_rate>10</update_rate><visualize>false</visualize>

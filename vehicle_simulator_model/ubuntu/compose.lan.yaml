@@ -1,0 +1,32 @@
+services:
+  dds-discovery:
+    network_mode: host
+    networks: !reset []
+
+  gazebo-server:
+    network_mode: host
+    networks: !reset []
+    environment:
+      GZ_IP: "${GZ_SERVER_IP:?set GZ_SERVER_IP to a Docker-host IP}"
+
+  sim-adapter:
+    network_mode: host
+    networks: !reset []
+    environment:
+      GZ_IP: "${GZ_SERVER_IP:?set GZ_SERVER_IP to a Docker-host IP}"
+      GZ_RELAY_HOST: ""
+      DDS_DISCOVERY_HOST: 127.0.0.1
+
+  slam-data-init:
+    network_mode: host
+    networks: !reset []
+
+  slam-mapper:
+    network_mode: host
+    networks: !reset []
+    environment:
+      DDS_DISCOVERY_HOST: 127.0.0.1
+
+  slam-inspector:
+    network_mode: host
+    networks: !reset []

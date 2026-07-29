@@ -1,0 +1,59 @@
+services:
+  gazebo-viewer:
+    image: "${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"
+    platform: ${TARGET_PLATFORM:-linux/amd64}
+    profiles: [viewer]
+    restart: unless-stopped
+    networks: [mentorpi]
+    environment:
+      GZ_PARTITION: mentorpi-sim
+      GZ_RELAY_HOST: gazebo-server
+      SERVICE_NAME: gazebo-viewer
+      IMAGE_VERSION: "${MENTORPI_IMAGE:-mentorpi-sim:harmonic}"
+      ROBOT_IDS: robot_1,robot_2
+      LIBGL_ALWAYS_SOFTWARE: "1"
+    command: /usr/local/bin/mentorpi-viewer
+    depends_on:
+      sim-adapter:
+        condition: service_healthy
+    expose: ['6080']
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:6080/vnc.html']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  web-gateway:
+    image: caddy:2.10-alpine
+    profiles: [viewer]
+    restart: unless-stopped
+    networks:
+      - mentorpi
+      - viewer-edge
+    environment:
+      VIEWER_SITE: http://:8080
+      VIEWER_ALLOW_CIDRS: private_ranges
+    volumes:
+      - ./Caddyfile.viewer:/etc/caddy/Caddyfile:ro
+      - viewer-caddy-data:/data
+      - viewer-caddy-config:/config
+    ports:
+      - "127.0.0.1:${VIEWER_PORT:-8080}:8080"
+    depends_on:
+      gazebo-viewer:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:2019/config/]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 1s
+
+volumes:
+  viewer-caddy-data:
+  viewer-caddy-config:
+
+networks:
+  viewer-edge:

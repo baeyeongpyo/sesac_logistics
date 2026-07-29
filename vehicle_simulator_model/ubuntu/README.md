@@ -10,6 +10,11 @@ MentorPi Gazebo Harmonic 시뮬레이션을 Docker Compose로 운영하는 headl
 Mac에서는 Docker 컨테이너 GUI 대신 네이티브 Gazebo GUI 개발 환경을 사용한다. 이 번들은
 MentorPi 서버에서 센서와 물리 시뮬레이션을 운영하기 위한 `linux/amd64` 이미지다.
 
+Mac Docker Desktop에서 `scripts/gz-gui-connect.sh`의 Gazebo Transport preflight가 `exit 4`로
+끝나면 direct Gazebo GUI transport는 **UNSUPPORTED**다. 이 결과는 내부 네트워크와 외부 포트
+비공개 계약을 바꾸어 우회하지 않는다. Mac Docker Desktop에서 native `gz sim -g` transport를
+사용할 수 없으므로 Task 4 browser viewer 제공 후 이를 사용한다.
+
 모든 명령은 `MENTORPI_IMAGE` 하나를 이미지 reference, Compose의 `IMAGE_VERSION` 로그 값으로
 공유한다. 기본값은 Task 5와 호환되는 `mentorpi-sim:harmonic`이다.
 
@@ -41,7 +46,9 @@ build context를 갖지 않아 배포 서버에서 소스를 재빌드하지 않
 
 ## 서버 운영
 
-Docker Engine 및 Docker Compose v2가 설치된 Linux 서버에서 실행한다.
+Docker Engine 및 Docker Compose 2.24.4 이상이 설치된 Linux 서버에서 실행한다.
+`viewer-up`은 이 최소 버전을 preflight하고, 미지원 버전에서는 서비스를 변경하기 전에
+nonzero로 종료한다.
 
 ```bash
 ./run.sh sim-up
@@ -110,6 +117,101 @@ native Ubuntu GPU smoke test는 release gate다. Ubuntu release 후보에서 `./
 실행 후 양 서비스 health, 양 robot scan payload, Gazebo 렌더 로그를 확인해야 한다. 이 검증은
 Mac Docker Desktop에서 대체할 수 없다.
 
+## 공유 관찰 운영
+
+기본 `internal` 모드는 Docker 내부에서 시뮬레이션과 ROS adapter를 운영한다. 다음 표는 지원하는
+운영 조합과 각각의 개발 PC 접속 방법이다.
+
+| 목적 | 서버 실행 | 개발 PC 접속 |
+| --- | --- | --- |
+| Headless 통합 검증 | `./run.sh sim-up` | `topics`, logs, healthcheck |
+| 같은 LAN 네이티브 GUI | `SIM_NETWORK_MODE=lan GZ_SERVER_IP=<server-lan-ip> ./run.sh sim-up` | `scripts/gz-gui-connect.sh <server-lan-ip> <client-lan-ip>` |
+| 로컬 브라우저 viewer | `./run.sh viewer-up local` | `http://127.0.0.1:8080/vnc.html?view_only=1&autoconnect=1` |
+| 외부 팀 viewer | `VIEWER_DOMAIN=... VIEWER_ALLOW_CIDRS='...' ./run.sh viewer-up public` | `https://<VIEWER_DOMAIN>/vnc.html?view_only=1&autoconnect=1` |
+| 지도 생성 | `./run.sh mapping-up <session-id>` | logs와 `mapping-status` |
+
+### Linux LAN 네이티브 GUI
+
+이 모드는 신뢰된 LAN에서만 사용한다. Linux 서버 host firewall은 승인된 개발자 CIDR만
+허용해야 하며, raw Gazebo Transport를 인터넷이나 신뢰되지 않은 네트워크에 노출해서는 안 된다.
+서버와 GUI client가 모두 같은 LAN에 있고 각 client가 해당 LAN 주소를 명시할 때 다음처럼 실행한다.
+
+```bash
+# Linux server
+export SIM_NETWORK_MODE=lan
+export GZ_SERVER_IP=192.168.50.10
+./run.sh sim-up
+
+# Mac A
+./scripts/gz-gui-connect.sh 192.168.50.10 192.168.50.20
+
+# Mac B
+./scripts/gz-gui-connect.sh 192.168.50.10 192.168.50.21
+```
+
+두 GUI client는 같은 Gazebo world에 동시에 접속한다. 모든 GUI 창을 닫아도 simulation은
+서버에서 계속 실행되며, 중지는 서버에서 `./run.sh down`으로만 수행한다. Mac Docker Desktop의
+preflight가 `exit 4`이면 이 raw transport 경로는 UNSUPPORTED이므로 아래 local 또는 public
+browser viewer로 전환한다.
+
+### Read-only browser viewer
+
+viewer는 시뮬레이션과 독립된 read-only 관찰 서비스다. local 모드는 서버 자신의 브라우저에서만
+접속하도록 loopback에 바인드한다.
+
+```bash
+./run.sh viewer-up local
+# http://127.0.0.1:8080/vnc.html?view_only=1&autoconnect=1
+```
+
+외부 팀용 public 모드는 application auth나 basic auth를 제공하지 않는다. 허용한 source CIDR와
+Linux host firewall만 접근 경계이며, 허용 CIDR 외 요청은 HTTP 403을 받는다. public 모드의 strict
+입력 검증을 거치는 유일한 지원 운영 진입점은 `./run.sh viewer-up public`이다. `docker compose`
+직접 호출로 public viewer를 올리는 것은 지원하지 않는다.
+
+```bash
+export VIEWER_DOMAIN=sim.example.com
+export VIEWER_ALLOW_CIDRS='203.0.113.10/32 203.0.113.11/32'
+./run.sh viewer-up public
+```
+
+Router/NAT는 public 80과 443만 Linux 서버로 전달한다. Caddy는 ACME redirect/challenge에 80을
+사용하고 viewer는 443에서 제공한다. 동적으로 바뀌는 팀 IP는 allowlist를 갱신하거나, 별도의
+인증된 access method를 선택해야 한다. `0.0.0.0/0`와 `::/0`은 거부된다.
+
+noVNC 6080, VNC 5900, Gazebo Transport, ROS DDS는 절대로 port-forward하지 않는다. 특히
+Gazebo Transport를 공용 인터넷에 공개하지 않는다. router의 공개 포트는 80/443으로 제한하고
+Linux firewall도 같은 노출 정책을 강제한다.
+
+### 종료, 로그, 복구와 서비스 독립성
+
+```bash
+./run.sh viewer-logs
+./run.sh viewer-down
+./run.sh logs
+./run.sh topics
+./run.sh down
+```
+
+`viewer-down`은 `gazebo-viewer`와 `web-gateway`만 중지한다. Task 6 runtime 검증은 이 viewer
+lifecycle 변경이 `gazebo-server`와 `sim-adapter`를 중지시키지 않음을 확인했다. 따라서 이 두
+서비스의 viewer 장애 복구는 `viewer-down` 뒤 동일한 local/public 명령으로 viewer만 다시 올린다.
+반대로 `down`은 simulation stack을 중지한다.
+
+mapping session 환경은 mapper와 inspector에만 전달되며 server, adapter, discovery, viewer에는
+전달되지 않는다. 따라서 같은 Compose project와 volume 설정을 유지하면 `viewer-up`이 active
+mapping의 simulation service 구성을 변경하지 않고, viewer lifecycle은 실행 중 mapper를 재생성하지 않는다.
+지도 생성은 독립적인 one-shot mapper이므로 `mapping-up <session-id>`,
+`mapping-stop`, `mapping-status <session-id>`를 사용하며, viewer lifecycle과 묶어서 중지하지
+않는다.
+
+### 릴리스 상태
+
+다음 항목은 아직 최종 acceptance 전이며 release blocker다.
+
+- Ubuntu native LAN two-client/visual gate
+- official Caddy image의 public direct 80/443 port 검증
+
 ## SLAM 매핑 세션 운영
 
 매핑은 일회성 `slam-mapper` 서비스로 실행한다. 세션 ID는 영문 대소문자, 숫자, `.`, `_`, `-`만
@@ -122,8 +224,10 @@ Mac Docker Desktop에서 대체할 수 없다.
 ```
 
 `mapping-up`은 Discovery Server, Gazebo, adapter가 준비된 뒤 mapper를 시작하고, `SESSION_ID`
-및 이미지·world·model·TF 버전 metadata를 컨테이너에 전달한다. 정상 종료는 `mapping-stop`만
-사용한다. adapter가 재시작 중이면 이 명령은 `MAPPING_RECONNECT_TIMEOUT_SECONDS` 동안 health
+및 이미지·world·model·TF 버전 metadata를 mapper에 전달한다. `mapping-status`의 inspector도
+검사할 세션 ID를 받지만 다른 runtime service에는 session 환경을 전달하지 않는다. 정상 종료는
+`mapping-stop`만 사용한다. adapter가 재시작 중이면 이 명령은
+`MAPPING_RECONNECT_TIMEOUT_SECONDS` 동안 health
 복구를 기다린다. 복구되면 기존 mapper에 `SIGINT`를 보내 map, posegraph, rosbag, manifest,
 checksum finalization이 끝날 때까지 `MAPPING_STOP_TIMEOUT_SECONDS`만큼 기다린다. adapter가
 제한 시간 안에 복구되지 않으면 mapper나 지원 서비스를 중지하지 않고 nonzero를 반환하므로,
@@ -161,6 +265,20 @@ entrypoint가 ROS 환경을 source한 뒤 `exec`하므로 이 Bash가 container 
 ├── rosbag2/mapping/
 ├── manifest.json
 └── checksums.sha256
+```
+
+기본 운영 volume 이름은 `mentorpi-slam-data`다. 기존 운영 자료와 분리된 검증이나 migration을
+수행할 때만 `SLAM_VOLUME_NAME`을 명시하고, 한 mapping/viewer lifecycle의 모든 명령에 같은
+`COMPOSE_PROJECT_NAME`과 `SLAM_VOLUME_NAME`을 유지한다.
+
+```bash
+export COMPOSE_PROJECT_NAME=mentorpi-mapping-validation
+export SLAM_VOLUME_NAME=mentorpi-mapping-validation-slam-data
+./run.sh mapping-up validation-01
+./run.sh viewer-up local
+./run.sh viewer-down
+./run.sh mapping-stop
+./run.sh mapping-status validation-01
 ```
 
 `mapping-status`는 volume을 read-only로 연결한 inspector 컨테이너에서 이 최종 디렉터리만 나열하고,

@@ -47,4 +47,20 @@ if [[ -n "${GZ_RELAY_HOST:-}" ]]; then
     "$GZ_RELAY_HOST" "$GZ_RELAY"
 fi
 
+resource_paths=(
+  /opt/mentorpi_ws/install/mentorpi_description/share
+  /opt/mentorpi_ws/install/mentorpi_gz_sim/share
+)
+if [[ -d /ws/install/mentorpi_description/share ]]; then
+  resource_paths+=(/ws/install/mentorpi_description/share)
+fi
+if [[ -d /ws/install/mentorpi_gz_sim/share ]]; then
+  resource_paths+=(/ws/install/mentorpi_gz_sim/share)
+fi
+resource_path_value="$(IFS=:; printf '%s' "${resource_paths[*]}")"
+if [[ -n "${GZ_SIM_RESOURCE_PATH:-}" ]]; then
+  resource_path_value="${resource_path_value}:${GZ_SIM_RESOURCE_PATH}"
+fi
+export GZ_SIM_RESOURCE_PATH="$resource_path_value"
+
 exec "$@"
