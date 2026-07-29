@@ -92,6 +92,16 @@ class RuntimeEnvConfigTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn('compose.lan.yaml', docker_log)
 
+    def test_profile_does_not_parse_malformed_bare_dotenv(self):
+        result, docker_log = self.run_command(
+            'dev1',
+            'SIM_NETWORK_MODE=lan\nGZ_SERVER_IP=192.168.50.10\n',
+            bare_dotenv='export SIM_NETWORK_MODE=internal\n',
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('compose.lan.yaml', docker_log)
+        self.assertNotEqual(docker_log, '')
+
     def test_missing_profile_fails_before_docker(self):
         result, docker_log = self.run_command('dev3')
         self.assertEqual(result.returncode, 2)
