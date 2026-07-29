@@ -11,7 +11,14 @@ BUNDLE = Path(__file__).resolve().parents[1]
 
 
 class RuntimeEnvConfigTest(unittest.TestCase):
-    def run_command(self, dotenv=None, environment_overrides=None):
+    def run_command(
+        self,
+        profile=None,
+        dotenv=None,
+        environment_overrides=None,
+        selector_args=None,
+        command=('sim-up',),
+    ):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             script = root / 'run.sh'
@@ -19,7 +26,7 @@ class RuntimeEnvConfigTest(unittest.TestCase):
             docker_log = root / 'docker.log'
             shutil.copy2(BUNDLE / 'run.sh', script)
             if dotenv is not None:
-                (root / '.env').write_text(dotenv)
+                (root / f'.env.{profile}').write_text(dotenv)
             bin_dir.mkdir()
             fake_docker = bin_dir / 'docker'
             fake_docker.write_text(textwrap.dedent('''\
@@ -38,8 +45,15 @@ class RuntimeEnvConfigTest(unittest.TestCase):
             if environment_overrides:
                 environment.update(environment_overrides)
 
+            arguments = [str(script)]
+            if selector_args is not None:
+                arguments.extend(selector_args)
+            elif profile is not None:
+                arguments.extend(('--env', profile))
+            arguments.extend(command)
+
             result = subprocess.run(
-                [str(script), 'sim-up'],
+                arguments,
                 cwd=root,
                 text=True,
                 capture_output=True,
@@ -47,31 +61,65 @@ class RuntimeEnvConfigTest(unittest.TestCase):
             )
             return result, docker_log.read_text() if docker_log.exists() else ''
 
-    def test_dotenv_selects_lan_profile(self):
+    def test_arbitrary_profile_selects_lan_compose_and_env_file(self):
         result, docker_log = self.run_command(
-            'SIM_NETWORK_MODE=lan\nGZ_SERVER_IP=192.168.50.10\n'
+            'dev1', 'SIM_NETWORK_MODE=lan\nGZ_SERVER_IP=192.168.50.10\n'
         )
         self.assertEqual(result.returncode, 0)
+        self.assertIn('.env.dev1', docker_log)
         self.assertIn('compose.lan.yaml', docker_log)
 
-    def test_missing_dotenv_uses_internal_network_default(self):
-        result, docker_log = self.run_command()
-        self.assertEqual(result.returncode, 0)
-        self.assertIn('compose -f', docker_log)
-        self.assertNotIn('compose.lan.yaml', docker_log)
-
-    def test_exported_environment_overrides_dotenv(self):
+    def test_profile_overrides_inherited_environment(self):
         result, docker_log = self.run_command(
+            'dev2',
             'SIM_NETWORK_MODE=lan\nGZ_SERVER_IP=192.168.50.10\n',
             {'SIM_NETWORK_MODE': 'internal'},
         )
         self.assertEqual(result.returncode, 0)
-        self.assertNotIn('compose.lan.yaml', docker_log)
+        self.assertIn('compose.lan.yaml', docker_log)
 
-    def test_invalid_dotenv_fails_before_docker(self):
-        result, docker_log = self.run_command('export SIM_NETWORK_MODE=lan\n')
+    def test_missing_profile_fails_before_docker(self):
+        result, docker_log = self.run_command('dev3')
         self.assertEqual(result.returncode, 2)
-        self.assertIn('.env:1: expected NAME=value', result.stderr)
+        self.assertIn('.env.dev3', result.stderr)
+        self.assertEqual(docker_log, '')
+
+    def test_invalid_profile_name_fails_before_docker(self):
+        result, docker_log = self.run_command('../server')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('profile name', result.stderr)
+        self.assertEqual(docker_log, '')
+
+    def test_missing_selector_value_fails_before_docker(self):
+        result, docker_log = self.run_command(selector_args=('--env',), command=())
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('--env', result.stderr)
+        self.assertNotIn('Unknown command', result.stderr)
+        self.assertEqual(docker_log, '')
+
+    def test_duplicate_selector_fails_before_docker(self):
+        result, docker_log = self.run_command(
+            'dev1',
+            'SIM_NETWORK_MODE=internal\n',
+            selector_args=('--env', 'dev1', '--env', 'dev2'),
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('--env', result.stderr)
+        self.assertNotIn('Unknown command', result.stderr)
+        self.assertEqual(docker_log, '')
+
+    def test_malformed_profile_fails_with_line_number_before_docker(self):
+        result, docker_log = self.run_command(
+            'dev4', '# profile settings\nexport SIM_NETWORK_MODE=lan\n'
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('.env.dev4:2: expected NAME=value', result.stderr)
+        self.assertEqual(docker_log, '')
+
+    def test_bare_command_fails_before_docker(self):
+        result, docker_log = self.run_command()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('--env', result.stderr)
         self.assertEqual(docker_log, '')
 
 
