@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import textwrap
 import unittest
@@ -475,8 +476,8 @@ class DeployOnlyBundleTest(unittest.TestCase):
 
         for required in (
             'validate_session_id',
-            '[[ "$#" -ne 2 ]]',
-            'export SESSION_ID="$2"',
+            '[[ "${#RUN_COMMAND[@]}" -ne 2 ]]',
+            'export SESSION_ID="${RUN_COMMAND[1]}"',
             'export IMAGE_VERSION="${IMAGE_VERSION:-mentorpi-sim:harmonic}"',
             'export GIT_COMMIT="${GIT_COMMIT:-$(git -C "$BUNDLE_DIR" rev-parse HEAD)}"',
             'export WORLD_VERSION="${WORLD_VERSION:-warehouse-v1}"',
@@ -499,7 +500,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
         self.assertIn('State.ExitCode', script)
 
         for required in (
-            'validate_session_id "$2"',
+            'validate_session_id "${RUN_COMMAND[1]}"',
             '--profile mapping run --rm --no-deps slam-inspector',
             'session_dir="/slam-data/${SESSION_ID}"',
             'checksums.sha256',
@@ -560,16 +561,28 @@ class DeployOnlyBundleTest(unittest.TestCase):
         self.assertEqual(operations, [])
 
     def test_mapping_commands_reject_dot_session_ids_before_docker(self):
-        for command in ('mapping-up', 'mapping-status'):
-            for session_id in ('.', '..'):
-                with self.subTest(command=command, session_id=session_id):
-                    result = subprocess.run(
-                        ['bash', str(BUNDLE / 'run.sh'), command, session_id],
-                        text=True,
-                        capture_output=True,
-                    )
-                    self.assertEqual(result.returncode, 2, result.stderr)
-                    self.assertIn('session ID may contain', result.stderr)
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            launcher = self.copy_test_launcher(root)
+            for command in ('mapping-up', 'mapping-status'):
+                for session_id in ('.', '..'):
+                    with self.subTest(command=command, session_id=session_id):
+                        result = subprocess.run(
+                            [
+                                'bash', str(launcher), '--env', 'test', command,
+                                session_id,
+                            ],
+                            text=True,
+                            capture_output=True,
+                        )
+                        self.assertEqual(result.returncode, 2, result.stderr)
+                        self.assertIn('session ID may contain', result.stderr)
+
+    def copy_test_launcher(self, root):
+        launcher = root / 'run.sh'
+        shutil.copy2(BUNDLE / 'run.sh', launcher)
+        (root / '.env.test').write_text('SIM_NETWORK_MODE=internal\n')
+        return launcher
 
     def run_mapping_stop_with_fake_docker(
         self,
@@ -582,6 +595,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
     ):
         with TemporaryDirectory() as directory:
             root = Path(directory)
+            launcher = self.copy_test_launcher(root)
             bin_dir = root / 'bin'
             bin_dir.mkdir()
             state_path = root / 'mapper-state'
@@ -655,7 +669,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
                 'MAPPING_RECONNECT_TIMEOUT_SECONDS': timeout,
             })
             result = subprocess.run(
-                ['bash', str(BUNDLE / 'run.sh'), 'mapping-stop'],
+                ['bash', str(launcher), '--env', 'test', 'mapping-stop'],
                 text=True,
                 capture_output=True,
                 env=environment,
@@ -753,21 +767,22 @@ class DeployOnlyBundleTest(unittest.TestCase):
             self.assertNotIn(removed, readme)
         for text in (
             'linux/amd64',
-            './run.sh build',
-            './run.sh sim-up',
-            './run.sh logs',
-            './run.sh down',
-            './run.sh fork-up',
-            './run.sh topics',
+            './run.sh --env dev build',
+            './run.sh --env dev sim-up',
+            './run.sh --env server logs',
+            './run.sh --env server down',
+            './run.sh --env server fork-up',
+            './run.sh --env server topics',
             'MENTORPI_IMAGE',
-            'sha256:',
+            '버전 tag는 레지스트리에서 다른 이미지로 이동할 수 있으므로 그 자체로 불변하지 않다',
+            '검증된 digest를 pull하여 사용',
             '브라우저',
             '오프스크린',
             'native Ubuntu',
             'release gate',
-            './run.sh mapping-up',
-            './run.sh mapping-stop',
-            './run.sh mapping-status',
+            './run.sh --env dev mapping-up',
+            './run.sh --env dev mapping-stop',
+            './run.sh --env dev mapping-status',
             '.inprogress',
             'mentorpi-slam-data',
             'SLAM_VOLUME_NAME',
@@ -780,11 +795,11 @@ class DeployOnlyBundleTest(unittest.TestCase):
     def test_operator_docs_describe_shared_observation_operations(self):
         readme = (BUNDLE / 'README.md').read_text()
         for text in (
-            'SIM_NETWORK_MODE=lan',
+            '.env.server',
             'GZ_SERVER_IP',
             'scripts/gz-gui-connect.sh',
-            './run.sh viewer-up local',
-            './run.sh viewer-up public',
+            './run.sh --env server viewer-up local',
+            './run.sh --env server viewer-up public',
             'Docker Compose 2.24.4',
             'VIEWER_DOMAIN',
             'VIEWER_ALLOW_CIDRS',
