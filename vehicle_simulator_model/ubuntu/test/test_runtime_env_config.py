@@ -11,14 +11,15 @@ BUNDLE = Path(__file__).resolve().parents[1]
 
 
 class RuntimeEnvConfigTest(unittest.TestCase):
-    def run_command(self, dotenv, environment_overrides=None):
+    def run_command(self, dotenv=None, environment_overrides=None):
         with TemporaryDirectory() as directory:
             root = Path(directory)
             script = root / 'run.sh'
             bin_dir = root / 'bin'
             docker_log = root / 'docker.log'
             shutil.copy2(BUNDLE / 'run.sh', script)
-            (root / '.env').write_text(dotenv)
+            if dotenv is not None:
+                (root / '.env').write_text(dotenv)
             bin_dir.mkdir()
             fake_docker = bin_dir / 'docker'
             fake_docker.write_text(textwrap.dedent('''\
@@ -52,6 +53,12 @@ class RuntimeEnvConfigTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0)
         self.assertIn('compose.lan.yaml', docker_log)
+
+    def test_missing_dotenv_uses_internal_network_default(self):
+        result, docker_log = self.run_command()
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('compose -f', docker_log)
+        self.assertNotIn('compose.lan.yaml', docker_log)
 
     def test_exported_environment_overrides_dotenv(self):
         result, docker_log = self.run_command(
