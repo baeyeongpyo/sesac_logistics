@@ -2,6 +2,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -12,8 +13,11 @@ from types import SimpleNamespace
 
 
 WORLD = Path(__file__).resolve().parent / 'worlds' / 'pallet_manager_test.sdf'
+PALLET_TEMPLATES = Path(__file__).resolve().parents[1] / 'models' / 'pallet'
 COMMAND_SERVICE = '/warehouse/pallet/command'
 BROKEN_COMMAND_SERVICE = '/warehouse/pallet/broken_command'
+ATTACH_TIMEOUT_COMMAND_SERVICE = '/warehouse/pallet/attach_timeout_command'
+CANCEL_COMMAND_SERVICE = '/warehouse/pallet/cancel_command'
 POSE_TOPIC = '/world/pallet_manager_test/pose/info'
 
 
@@ -21,6 +25,20 @@ class PalletManagerIntegrationTest(unittest.TestCase):
     def setUp(self):
         self.env = os.environ.copy()
         self.env['GZ_PARTITION'] = f'mentorpi-pallet-manager-{os.getpid()}'
+        self.resources = tempfile.TemporaryDirectory()
+        self.addCleanup(self.resources.cleanup)
+        timeout_templates = Path(self.resources.name) / 'pallet_attach_timeout'
+        shutil.copytree(PALLET_TEMPLATES, timeout_templates)
+        pallet_template = timeout_templates / 'pallet.sdf.in'
+        pallet_template.write_text(
+            pallet_template.read_text(encoding='utf-8').replace(
+                '<child_link>payload_link</child_link>',
+                '<child_link>missing_payload_link</child_link>'),
+            encoding='utf-8')
+        existing_resource_path = self.env.get('GZ_SIM_RESOURCE_PATH', '')
+        self.env['GZ_SIM_RESOURCE_PATH'] = os.pathsep.join(
+            value for value in (self.resources.name, existing_resource_path)
+            if value)
         self.stdout = tempfile.TemporaryFile(mode='w+', encoding='utf-8')
         self.stderr = tempfile.TemporaryFile(mode='w+', encoding='utf-8')
         self.server = subprocess.Popen(
@@ -33,7 +51,14 @@ class PalletManagerIntegrationTest(unittest.TestCase):
         )
         self._cleaned_up = False
         self.addCleanup(self._cleanup_server)
-        self.wait_for_services({COMMAND_SERVICE, BROKEN_COMMAND_SERVICE}, timeout=10)
+        self.wait_for_services(
+            {
+                COMMAND_SERVICE,
+                BROKEN_COMMAND_SERVICE,
+                ATTACH_TIMEOUT_COMMAND_SERVICE,
+                CANCEL_COMMAND_SERVICE,
+            },
+            timeout=10)
 
     def tearDown(self):
         self._cleanup_server()
@@ -124,6 +149,34 @@ class PalletManagerIntegrationTest(unittest.TestCase):
                 f'{result.stdout}{result.stderr}\n{self.server_output()}')
         return json.loads(match.group(1))
 
+    def request_boolean(self, service, request_type, request):
+        result = subprocess.run(
+            [
+                'gz', 'service',
+                '--service', service,
+                '--reqtype', request_type,
+                '--reptype', 'gz.msgs.Boolean',
+                '--timeout', '6000',
+                '--req', request,
+            ],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+        if result.returncode != 0 or 'data: true' not in (
+            result.stdout + result.stderr):
+            self.fail(
+                f'Boolean service failed ({service!r}):\n'
+                f'{result.stdout}{result.stderr}\n{self.server_output()}')
+
+    def remove_model_externally(self, name):
+        self.request_boolean(
+            '/world/pallet_manager_test/remove',
+            'gz.msgs.Entity',
+            f'name: {json.dumps(name)} type: MODEL')
+
     def pose_snapshot(self):
         result = subprocess.run(
             [
@@ -213,6 +266,47 @@ class PalletManagerIntegrationTest(unittest.TestCase):
         self.assertIsNone(self.try_model_pose('pallet_07'))
         self.assertIsNone(self.try_model_pose('pallet_07_payload'))
         self.assertNotIn('pallet_07:', self.command('list'))
+
+    def test_timed_out_command_is_cancelled(self):
+        self.assertEqual(
+            self.command(
+                'spawn|pallet_timeout|fresh|loaded|-4.0|-3.0|0',
+                service=CANCEL_COMMAND_SERVICE),
+            'error|COMMAND_TIMEOUT|pallet_timeout')
+
+        self.assertEqual(
+            self.command('list', service=CANCEL_COMMAND_SERVICE),
+            'ok|list|')
+        self.assertIsNone(self.try_model_pose('pallet_timeout', timeout=1))
+        self.assertIsNone(
+            self.try_model_pose('pallet_timeout_payload', timeout=1))
+
+    def test_attach_timeout_rolls_back_created_entities(self):
+        self.assertEqual(
+            self.command(
+                'spawn|pallet_attach_timeout|fresh|loaded|-4.0|-3.0|0',
+                service=ATTACH_TIMEOUT_COMMAND_SERVICE),
+            'error|OPERATION_TIMEOUT|pallet_attach_timeout')
+
+        self.assertEqual(
+            self.command('list', service=ATTACH_TIMEOUT_COMMAND_SERVICE),
+            'ok|list|')
+        self.assertIsNone(
+            self.try_model_pose('pallet_attach_timeout', timeout=1))
+        self.assertIsNone(
+            self.try_model_pose('pallet_attach_timeout_payload', timeout=1))
+
+    def test_missing_velocity_components_fail_closed(self):
+        self.assertTrue(
+            self.command(
+                'spawn|pallet_velocity|fresh|empty|-4.0|-3.0|0').startswith(
+                    'ok|spawn|'))
+        self.remove_model_externally('pallet_velocity')
+        self.assertIsNone(self.try_model_pose('pallet_velocity', timeout=1))
+
+        self.assertEqual(
+            self.command('state|pallet_velocity|loaded|fresh'),
+            'error|PALLET_VELOCITY_UNAVAILABLE|pallet_velocity')
 
 
 if __name__ == '__main__':

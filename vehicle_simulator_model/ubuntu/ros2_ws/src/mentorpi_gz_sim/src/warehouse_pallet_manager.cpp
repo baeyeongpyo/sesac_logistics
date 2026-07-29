@@ -1,6 +1,7 @@
 #include "mentorpi_gz_sim/warehouse_pallet_manager.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <deque>
@@ -38,7 +39,7 @@ namespace mentorpi_gz_sim
 namespace
 {
 constexpr std::chrono::seconds kCommandWait{5};
-constexpr std::chrono::milliseconds kOperationTimeout{4500};
+constexpr std::chrono::milliseconds kDefaultOperationTimeout{4500};
 
 enum class ActiveStage
 {
@@ -56,10 +57,18 @@ enum class AfterPayloadRemoval
   RemovePallet
 };
 
+enum class PendingState
+{
+  Waiting,
+  Completed,
+  Cancelled
+};
+
 struct PendingCommand
 {
   Command command;
   bool internal{false};
+  std::atomic<PendingState> state{PendingState::Waiting};
   std::promise<std::string> result;
 };
 
@@ -69,6 +78,9 @@ struct ActiveCommand
   ActiveStage stage{ActiveStage::Start};
   AfterPayloadRemoval afterPayloadRemoval{AfterPayloadRemoval::StateEmpty};
   std::optional<PalletKind> targetKind;
+  std::optional<PalletRecord> originalRecord;
+  bool payloadRemovalRequested{false};
+  bool palletRemovalRequested{false};
   std::chrono::steady_clock::time_point started{std::chrono::steady_clock::now()};
 };
 
@@ -213,16 +225,24 @@ class WarehousePalletManagerPrivate
   std::shared_ptr<PendingCommand> Pop()
   {
     std::lock_guard<std::mutex> lock(queueMutex);
-    if (queue.empty()) {
-      return nullptr;
+    while (!queue.empty()) {
+      auto pending = queue.front();
+      queue.pop_front();
+      if (pending->state.load() != PendingState::Cancelled) {
+        return pending;
+      }
     }
-    auto pending = queue.front();
-    queue.pop_front();
-    return pending;
+    return nullptr;
   }
 
   void Finish(std::string response)
   {
+    auto expected = PendingState::Waiting;
+    if (!active->pending->state.compare_exchange_strong(
+        expected, PendingState::Completed))
+    {
+      return;
+    }
     if (active->pending->internal) {
       if (response.rfind("error|", 0) == 0) {
         gzerr << "Default pallet command failed: " << response << std::endl;
@@ -262,6 +282,47 @@ class WarehousePalletManagerPrivate
     return found;
   }
 
+  void RequestRemoveJoint(
+    const PalletRecord & record,
+    gz::sim::EntityComponentManager & ecm)
+  {
+    std::vector<gz::sim::Entity> joints;
+    ecm.Each<gz::sim::components::DetachableJoint>(
+      [&joints, &record](
+        const gz::sim::Entity & entity,
+        const gz::sim::components::DetachableJoint * joint)
+      {
+        const auto & info = joint->Data();
+        if (info.parentLink == record.palletLink &&
+          info.childLink == record.payloadLink)
+        {
+          joints.push_back(entity);
+        }
+        return true;
+      });
+    for (const auto joint : joints) {
+      creator->RequestRemoveEntity(joint, true);
+    }
+  }
+
+  void RequestRemoveEntity(
+    gz::sim::Entity entity,
+    gz::sim::EntityComponentManager & ecm)
+  {
+    if (entity != gz::sim::kNullEntity && ecm.HasEntity(entity)) {
+      creator->RequestRemoveEntity(entity, true);
+    }
+  }
+
+  void RequestRemoveRecord(
+    const PalletRecord & record,
+    gz::sim::EntityComponentManager & ecm)
+  {
+    RequestRemoveJoint(record, ecm);
+    RequestRemoveEntity(record.payloadEntity, ecm);
+    RequestRemoveEntity(record.palletEntity, ecm);
+  }
+
   bool PublishEmpty(const std::string & topic)
   {
     auto publisher = node.Advertise<gz::msgs::Empty>(topic);
@@ -276,17 +337,26 @@ class WarehousePalletManagerPrivate
     const std::string & id,
     gz::sim::EntityComponentManager & ecm)
   {
-    gz::math::Vector3d linear = gz::math::Vector3d::Zero;
-    gz::math::Vector3d angular = gz::math::Vector3d::Zero;
     const auto * record = registry.Find(id);
-    if (record != nullptr && record->palletLink != gz::sim::kNullEntity &&
-      ecm.HasEntity(record->palletLink))
-    {
-      const gz::sim::Link link(record->palletLink);
-      linear = link.WorldLinearVelocity(ecm).value_or(gz::math::Vector3d::Zero);
-      angular = link.WorldAngularVelocity(ecm).value_or(gz::math::Vector3d::Zero);
+    if (record == nullptr) {
+      return registry.ValidateMutable(
+        id, gz::math::Vector3d::Zero, gz::math::Vector3d::Zero);
     }
-    return registry.ValidateMutable(id, linear, angular);
+    if (record->palletLink == gz::sim::kNullEntity ||
+      !ecm.HasEntity(record->palletLink))
+    {
+      return CommandError{
+        "PALLET_VELOCITY_UNAVAILABLE", "pallet velocity is unavailable"};
+    }
+
+    const gz::sim::Link link(record->palletLink);
+    const auto linear = link.WorldLinearVelocity(ecm);
+    const auto angular = link.WorldAngularVelocity(ecm);
+    if (!linear || !angular) {
+      return CommandError{
+        "PALLET_VELOCITY_UNAVAILABLE", "pallet velocity is unavailable"};
+    }
+    return registry.ValidateMutable(id, *linear, *angular);
   }
 
   void RefreshOccupiedPoses(gz::sim::EntityComponentManager & ecm)
@@ -353,6 +423,66 @@ class WarehousePalletManagerPrivate
     ids.erase(std::remove(ids.begin(), ids.end(), id), ids.end());
   }
 
+  bool CanRestoreOriginal(
+    gz::sim::EntityComponentManager & ecm) const
+  {
+    if (!active->originalRecord || active->payloadRemovalRequested ||
+      active->palletRemovalRequested)
+    {
+      return false;
+    }
+
+    const auto & original = *active->originalRecord;
+    if (original.palletEntity == gz::sim::kNullEntity ||
+      !ecm.HasEntity(original.palletEntity))
+    {
+      return false;
+    }
+    if (original.state == StableState::Empty) {
+      return true;
+    }
+    return original.payloadEntity != gz::sim::kNullEntity &&
+      ecm.HasEntity(original.payloadEntity) && HasJoint(original, ecm);
+  }
+
+  void Rollback(gz::sim::EntityComponentManager & ecm)
+  {
+    const auto & command = active->pending->command;
+    auto * current = registry.Find(command.id);
+
+    if ((command.type == CommandType::State ||
+      command.type == CommandType::Remove) && CanRestoreOriginal(ecm))
+    {
+      const auto original = *active->originalRecord;
+      if (current != nullptr &&
+        current->payloadEntity != original.payloadEntity)
+      {
+        RequestRemoveJoint(*current, ecm);
+        RequestRemoveEntity(current->payloadEntity, ecm);
+      }
+      auto restored = original;
+      restored.transition = TransitionState::None;
+      registry.Insert(std::move(restored));
+      return;
+    }
+
+    if (current != nullptr) {
+      RequestRemoveRecord(*current, ecm);
+    }
+    if (active->originalRecord) {
+      RequestRemoveRecord(*active->originalRecord, ecm);
+    }
+    EraseRecord(command.id);
+  }
+
+  void Fail(
+    gz::sim::EntityComponentManager & ecm,
+    const std::string & code)
+  {
+    Rollback(ecm);
+    FinishError(code);
+  }
+
   void StartSpawn(gz::sim::EntityComponentManager & ecm)
   {
     const auto & command = active->pending->command;
@@ -396,19 +526,12 @@ class WarehousePalletManagerPrivate
       inserted->transition = TransitionState::Loading;
       active->targetKind = command.kind;
       if (!CreatePayload(*inserted, *command.kind, ecm)) {
-        creator->RequestRemoveEntity(inserted->palletEntity, true);
-        EraseRecord(command.id);
-        FinishError("ENTITY_CREATION_FAILED");
+        Fail(ecm, "ENTITY_CREATION_FAILED");
         return;
       }
       active->stage = ActiveStage::WaitForJoint;
     } catch (const std::runtime_error &) {
-      if (const auto * inserted = registry.Find(command.id)) {
-        creator->RequestRemoveEntity(inserted->payloadEntity, true);
-        creator->RequestRemoveEntity(inserted->palletEntity, true);
-        EraseRecord(command.id);
-      }
-      FinishError("MODEL_TEMPLATE_INVALID");
+      Fail(ecm, "MODEL_TEMPLATE_INVALID");
     }
   }
 
@@ -421,6 +544,7 @@ class WarehousePalletManagerPrivate
     }
 
     auto * record = registry.Find(command.id);
+    active->originalRecord = *record;
     if (*command.state == RequestedState::Empty) {
       if (record->state == StableState::Empty) {
         FinishOk();
@@ -429,7 +553,7 @@ class WarehousePalletManagerPrivate
       record->transition = TransitionState::Unloading;
       active->afterPayloadRemoval = AfterPayloadRemoval::StateEmpty;
       if (!PublishEmpty("/warehouse/pallet/" + command.id + "/detach")) {
-        FinishError("TRANSPORT_PUBLISH_FAILED");
+        Fail(ecm, "TRANSPORT_PUBLISH_FAILED");
         return;
       }
       active->stage = ActiveStage::WaitForJointRemoval;
@@ -441,12 +565,12 @@ class WarehousePalletManagerPrivate
       record->transition = TransitionState::Loading;
       try {
         if (!CreatePayload(*record, *command.kind, ecm)) {
-          FinishError("ENTITY_CREATION_FAILED");
+          Fail(ecm, "ENTITY_CREATION_FAILED");
           return;
         }
         active->stage = ActiveStage::WaitForJoint;
       } catch (const std::runtime_error &) {
-        FinishError("MODEL_TEMPLATE_INVALID");
+        Fail(ecm, "MODEL_TEMPLATE_INVALID");
       }
       return;
     }
@@ -459,7 +583,7 @@ class WarehousePalletManagerPrivate
     record->transition = TransitionState::Replacing;
     active->afterPayloadRemoval = AfterPayloadRemoval::StartReplacement;
     if (!PublishEmpty("/warehouse/pallet/" + command.id + "/detach")) {
-      FinishError("TRANSPORT_PUBLISH_FAILED");
+      Fail(ecm, "TRANSPORT_PUBLISH_FAILED");
       return;
     }
     active->stage = ActiveStage::WaitForJointRemoval;
@@ -474,11 +598,12 @@ class WarehousePalletManagerPrivate
     }
 
     auto * record = registry.Find(command.id);
+    active->originalRecord = *record;
     if (record->state == StableState::Loaded) {
       record->transition = TransitionState::Unloading;
       active->afterPayloadRemoval = AfterPayloadRemoval::RemovePallet;
       if (!PublishEmpty("/warehouse/pallet/" + command.id + "/detach")) {
-        FinishError("TRANSPORT_PUBLISH_FAILED");
+        Fail(ecm, "TRANSPORT_PUBLISH_FAILED");
         return;
       }
       active->stage = ActiveStage::WaitForJointRemoval;
@@ -486,6 +611,7 @@ class WarehousePalletManagerPrivate
     }
 
     creator->RequestRemoveEntity(record->palletEntity, true);
+    active->palletRemovalRequested = true;
     active->stage = ActiveStage::WaitForPalletRemoval;
   }
 
@@ -550,6 +676,7 @@ class WarehousePalletManagerPrivate
       ecm.HasEntity(record->payloadEntity))
     {
       creator->RequestRemoveEntity(record->payloadEntity, true);
+      active->payloadRemovalRequested = true;
     }
     active->stage = ActiveStage::WaitForPayloadRemoval;
   }
@@ -558,7 +685,7 @@ class WarehousePalletManagerPrivate
   {
     auto * record = registry.Find(active->pending->command.id);
     if (record == nullptr) {
-      FinishError("NOT_FOUND");
+      Fail(ecm, "NOT_FOUND");
       return;
     }
     if (record->payloadEntity != gz::sim::kNullEntity &&
@@ -578,6 +705,7 @@ class WarehousePalletManagerPrivate
     }
     if (active->afterPayloadRemoval == AfterPayloadRemoval::RemovePallet) {
       creator->RequestRemoveEntity(record->palletEntity, true);
+      active->palletRemovalRequested = true;
       active->stage = ActiveStage::WaitForPalletRemoval;
       return;
     }
@@ -585,12 +713,12 @@ class WarehousePalletManagerPrivate
     record->transition = TransitionState::Loading;
     try {
       if (!CreatePayload(*record, *active->targetKind, ecm)) {
-        FinishError("ENTITY_CREATION_FAILED");
+        Fail(ecm, "ENTITY_CREATION_FAILED");
         return;
       }
       active->stage = ActiveStage::WaitForJoint;
     } catch (const std::runtime_error &) {
-      FinishError("MODEL_TEMPLATE_INVALID");
+      Fail(ecm, "MODEL_TEMPLATE_INVALID");
     }
   }
 
@@ -617,10 +745,16 @@ class WarehousePalletManagerPrivate
       }
     }
 
+    if (active->pending->state.load() == PendingState::Cancelled) {
+      Rollback(ecm);
+      active.reset();
+      return;
+    }
+
     if (std::chrono::steady_clock::now() - active->started >
-      kOperationTimeout)
+      operationTimeout)
     {
-      FinishError("OPERATION_TIMEOUT");
+      Fail(ecm, "OPERATION_TIMEOUT");
       return;
     }
 
@@ -650,6 +784,7 @@ class WarehousePalletManagerPrivate
   std::unique_ptr<gz::sim::SdfEntityCreator> creator;
   std::unique_ptr<PalletModelFactory> factory;
   PalletRegistry registry;
+  std::chrono::milliseconds operationTimeout{kDefaultOperationTimeout};
   std::string commandService{"/warehouse/pallet/command"};
   std::mutex queueMutex;
   std::deque<std::shared_ptr<PendingCommand>> queue;
@@ -676,6 +811,12 @@ void WarehousePalletManager::Configure(
 
   data_->commandService = sdf->Get<std::string>(
     "command_service", data_->commandService).first;
+  data_->operationTimeout = std::chrono::milliseconds{
+    std::max(
+      1,
+      sdf->Get<int>(
+        "operation_timeout_ms",
+        static_cast<int>(kDefaultOperationTimeout.count())).first)};
   const auto configuredTemplateDir = sdf->Get<std::string>(
     "template_dir", "pallet").first;
   data_->factory = std::make_unique<PalletModelFactory>(
@@ -741,9 +882,16 @@ bool WarehousePalletManager::OnCommand(
   auto pending = std::make_shared<PendingCommand>();
   pending->command = *parsed.command;
   auto future = pending->result.get_future();
-  data_->Queue(std::move(pending));
+  data_->Queue(pending);
 
   if (future.wait_for(kCommandWait) != std::future_status::ready) {
+    auto expected = PendingState::Waiting;
+    if (!pending->state.compare_exchange_strong(
+        expected, PendingState::Cancelled))
+    {
+      response.set_data(future.get());
+      return true;
+    }
     response.set_data(FormatError(
       "COMMAND_TIMEOUT",
       parsed.command->id.empty() ? CommandName(parsed.command->type) :

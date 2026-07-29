@@ -65,5 +65,20 @@
       <template_dir>missing-pallet-templates</template_dir>
       <spawn_bounds>-4.5 4.5 -3.5 3.5</spawn_bounds>
     </plugin>
+
+    <plugin filename="mentorpi_warehouse_pallet_manager"
+            name="mentorpi_gz_sim::WarehousePalletManager">
+      <command_service>/warehouse/pallet/attach_timeout_command</command_service>
+      <template_dir>pallet_attach_timeout</template_dir>
+      <spawn_bounds>-4.5 4.5 -3.5 3.5</spawn_bounds>
+    </plugin>
+
+    <plugin filename="mentorpi_warehouse_pallet_manager"
+            name="mentorpi_gz_sim::WarehousePalletManager">
+      <command_service>/warehouse/pallet/cancel_command</command_service>
+      <template_dir>pallet_attach_timeout</template_dir>
+      <operation_timeout_ms>6000</operation_timeout_ms>
+      <spawn_bounds>-4.5 4.5 -3.5 3.5</spawn_bounds>
+    </plugin>
   </world>
 </sdf>
