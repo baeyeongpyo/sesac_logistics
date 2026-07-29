@@ -16,6 +16,7 @@ class RuntimeEnvConfigTest(unittest.TestCase):
         profile=None,
         dotenv=None,
         environment_overrides=None,
+        bare_dotenv=None,
         selector_args=None,
         command=('sim-up',),
     ):
@@ -27,11 +28,13 @@ class RuntimeEnvConfigTest(unittest.TestCase):
             shutil.copy2(BUNDLE / 'run.sh', script)
             if dotenv is not None:
                 (root / f'.env.{profile}').write_text(dotenv)
+            if bare_dotenv is not None:
+                (root / '.env').write_text(bare_dotenv)
             bin_dir.mkdir()
             fake_docker = bin_dir / 'docker'
             fake_docker.write_text(textwrap.dedent('''\
                 #!/usr/bin/env bash
-                printf '%s\\n' "$*" >> "$DOCKER_LOG"
+                printf '<%s>\\n' "$@" >> "$DOCKER_LOG"
             '''))
             fake_docker.chmod(0o755)
 
@@ -66,7 +69,9 @@ class RuntimeEnvConfigTest(unittest.TestCase):
             'dev1', 'SIM_NETWORK_MODE=lan\nGZ_SERVER_IP=192.168.50.10\n'
         )
         self.assertEqual(result.returncode, 0)
-        self.assertIn('.env.dev1', docker_log)
+        self.assertRegex(
+            docker_log, r'<--env-file>\n<[^>\n]*/\.env\.dev1>\n'
+        )
         self.assertIn('compose.lan.yaml', docker_log)
 
     def test_profile_overrides_inherited_environment(self):
@@ -78,17 +83,28 @@ class RuntimeEnvConfigTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn('compose.lan.yaml', docker_log)
 
+    def test_profile_ignores_conflicting_bare_dotenv(self):
+        result, docker_log = self.run_command(
+            'dev5',
+            'SIM_NETWORK_MODE=lan\nGZ_SERVER_IP=192.168.50.10\n',
+            bare_dotenv='SIM_NETWORK_MODE=internal\n',
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('compose.lan.yaml', docker_log)
+
     def test_missing_profile_fails_before_docker(self):
         result, docker_log = self.run_command('dev3')
         self.assertEqual(result.returncode, 2)
         self.assertIn('.env.dev3', result.stderr)
         self.assertEqual(docker_log, '')
 
-    def test_invalid_profile_name_fails_before_docker(self):
-        result, docker_log = self.run_command('../server')
-        self.assertEqual(result.returncode, 2)
-        self.assertIn('profile name', result.stderr)
-        self.assertEqual(docker_log, '')
+    def test_invalid_profile_names_fail_before_docker(self):
+        for profile in ('-dev', 'dev.name', 'dev space', '../server'):
+            with self.subTest(profile=profile):
+                result, docker_log = self.run_command(profile)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn('profile name', result.stderr)
+                self.assertEqual(docker_log, '')
 
     def test_missing_selector_value_fails_before_docker(self):
         result, docker_log = self.run_command(selector_args=('--env',), command=())
@@ -120,6 +136,16 @@ class RuntimeEnvConfigTest(unittest.TestCase):
         result, docker_log = self.run_command()
         self.assertEqual(result.returncode, 2)
         self.assertIn('--env', result.stderr)
+        self.assertEqual(docker_log, '')
+
+    def test_selector_after_command_fails_before_docker(self):
+        result, docker_log = self.run_command(
+            'dev1',
+            'SIM_NETWORK_MODE=internal\n',
+            selector_args=('sim-up', '--env', 'dev1'),
+            command=(),
+        )
+        self.assertEqual(result.returncode, 2)
         self.assertEqual(docker_log, '')
 
 
