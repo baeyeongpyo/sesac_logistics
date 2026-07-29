@@ -378,6 +378,7 @@ case "${1:-}" in
   test)
     printf 'mentorpi test stage=host-static\n'
     python3 "$BUNDLE_DIR/test/test_bundle.py" -v
+    python3 "$BUNDLE_DIR/test/test_runtime_env_config.py" -v
     python3 "$BUNDLE_DIR/test/test_observation_bundle.py" -v
     python3 \
       "$BUNDLE_DIR/ros2_ws/src/mentorpi_description/test/test_original_model.py" -v
