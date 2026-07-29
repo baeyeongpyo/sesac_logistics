@@ -156,9 +156,18 @@ class ObservationBundleTest(unittest.TestCase):
         thread.start()
         return listener.getsockname()[1], thread, errors
 
-    def run_with_fake_docker(self, args, extra_env=None):
+    def run_with_fake_docker(self, args, profile_lines=None, extra_env=None):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
+            bundle = temp_path / 'bundle'
+            bundle.mkdir()
+            shutil.copy2(BUNDLE / 'run.sh', bundle / 'run.sh')
+            profile = 'SIM_NETWORK_MODE=internal\n'
+            if profile_lines:
+                profile += ''.join(
+                    f'{name}={value}\n' for name, value in profile_lines.items()
+                )
+            (bundle / '.env.test').write_text(profile)
             docker_log = temp_path / 'docker.log'
             fake_docker = temp_path / 'docker'
             fake_docker.write_text(
@@ -181,15 +190,17 @@ class ObservationBundleTest(unittest.TestCase):
             env.update({
                 'PATH': f'{temp_path}:{env["PATH"]}',
                 'FAKE_DOCKER_LOG': str(docker_log),
-                'SIM_NETWORK_MODE': 'internal',
             })
+            env.pop('SIM_NETWORK_MODE', None)
+            env.pop('GZ_SERVER_IP', None)
+            env.pop('VIEWER_MODE', None)
             env.pop('VIEWER_DOMAIN', None)
             env.pop('VIEWER_ALLOW_CIDRS', None)
             if extra_env:
                 env.update(extra_env)
 
             result = subprocess.run(
-                [str(BUNDLE / 'run.sh'), *args],
+                [str(bundle / 'run.sh'), '--env', 'test', *args],
                 text=True,
                 capture_output=True,
                 env=env,
@@ -197,7 +208,7 @@ class ObservationBundleTest(unittest.TestCase):
             )
 
             log = docker_log.read_text() if docker_log.exists() else ''
-            return result, log
+            return bundle, result, log
 
     def test_gateway_is_the_only_viewer_service_with_host_ports(self):
         viewer = (BUNDLE / 'compose.viewer.yaml').read_text()
@@ -340,7 +351,7 @@ class ObservationBundleTest(unittest.TestCase):
 
         for label, viewer_env, message in cases:
             with self.subTest(label):
-                result, docker_log = self.run_with_fake_docker(
+                _, result, docker_log = self.run_with_fake_docker(
                     ['viewer-up', 'public'], viewer_env
                 )
 
@@ -349,7 +360,7 @@ class ObservationBundleTest(unittest.TestCase):
                 self.assertEqual(docker_log, '')
 
     def test_public_viewer_accepts_tab_separator_and_exports_spaces(self):
-        result, docker_log = self.run_with_fake_docker(
+        _, result, docker_log = self.run_with_fake_docker(
             ['viewer-up', 'public'],
             {
                 'VIEWER_DOMAIN': 'sim.example.com',
@@ -371,14 +382,14 @@ class ObservationBundleTest(unittest.TestCase):
             'sim.example.com:443',
             'sim.example.com/viewer',
             'sim example.com',
-            'sim.example.com\nrespond',
+            'sim.example.com\\nrespond',
             'sim.example.com.',
             '시뮬레이터.example.com',
         )
 
         for domain in invalid_domains:
             with self.subTest(domain=repr(domain)):
-                result, docker_log = self.run_with_fake_docker(
+                _, result, docker_log = self.run_with_fake_docker(
                     ['viewer-up', 'public'],
                     {
                         'VIEWER_DOMAIN': domain,
@@ -401,13 +412,13 @@ class ObservationBundleTest(unittest.TestCase):
             '2001:db8::/129',
             '203.0.113.7/24',
             '203.0.113.10/32\x1b',
-            '203.0.113.10/32\nrespond',
+            '203.0.113.10/32\\nrespond',
             'private_ranges',
         )
 
         for allowlist in invalid_allowlists:
             with self.subTest(allowlist=repr(allowlist)):
-                result, docker_log = self.run_with_fake_docker(
+                _, result, docker_log = self.run_with_fake_docker(
                     ['viewer-up', 'public'],
                     {
                         'VIEWER_DOMAIN': 'sim.example.com',
@@ -424,7 +435,7 @@ class ObservationBundleTest(unittest.TestCase):
                 self.assertEqual(docker_log, '')
 
     def test_public_viewer_normalizes_valid_hostname_and_allowlist(self):
-        result, docker_log = self.run_with_fake_docker(
+        _, result, docker_log = self.run_with_fake_docker(
             ['viewer-up', 'public'],
             {
                 'VIEWER_DOMAIN': 'SIM.Example.COM',
@@ -446,7 +457,7 @@ class ObservationBundleTest(unittest.TestCase):
     def test_viewer_up_rejects_lan_mode_before_docker(self):
         for mode in ('local', 'public'):
             with self.subTest(mode):
-                result, docker_log = self.run_with_fake_docker(
+                _, result, docker_log = self.run_with_fake_docker(
                     ['viewer-up', mode],
                     {
                         'SIM_NETWORK_MODE': 'lan',
@@ -463,10 +474,10 @@ class ObservationBundleTest(unittest.TestCase):
                 self.assertEqual(docker_log, '')
 
     def test_viewer_up_uses_local_gateway_unless_public_is_selected(self):
-        local_result, local_log = self.run_with_fake_docker(
+        local_bundle, local_result, local_log = self.run_with_fake_docker(
             ['viewer-up'], {'VIEWER_MODE': 'local'}
         )
-        public_result, public_log = self.run_with_fake_docker(
+        public_bundle, public_result, public_log = self.run_with_fake_docker(
             ['viewer-up'],
             {
                 'VIEWER_MODE': 'public',
@@ -476,15 +487,19 @@ class ObservationBundleTest(unittest.TestCase):
         )
 
         self.assertEqual(local_result.returncode, 0)
-        self.assertIn(str(BUNDLE / 'compose.viewer.yaml'), local_log)
-        self.assertNotIn(str(BUNDLE / 'compose.viewer-public.yaml'), local_log)
+        self.assertIn(str(local_bundle / 'compose.viewer.yaml'), local_log)
+        self.assertNotIn(
+            str(local_bundle / 'compose.viewer-public.yaml'), local_log
+        )
         self.assertIn(
             '--profile viewer up -d --wait dds-discovery gazebo-server '
             'sim-adapter gazebo-viewer web-gateway',
             local_log,
         )
         self.assertEqual(public_result.returncode, 0)
-        self.assertIn(str(BUNDLE / 'compose.viewer-public.yaml'), public_log)
+        self.assertIn(
+            str(public_bundle / 'compose.viewer-public.yaml'), public_log
+        )
         self.assertIn(
             'up -d --wait dds-discovery gazebo-server sim-adapter '
             'gazebo-viewer web-gateway',
@@ -492,9 +507,9 @@ class ObservationBundleTest(unittest.TestCase):
         )
 
     def test_viewer_up_rejects_compose_without_required_wait_support(self):
-        result, docker_log = self.run_with_fake_docker(
+        _, result, docker_log = self.run_with_fake_docker(
             ['viewer-up'],
-            {'FAKE_COMPOSE_VERSION': '2.24.3'},
+            extra_env={'FAKE_COMPOSE_VERSION': '2.24.3'},
         )
 
         self.assertEqual(result.returncode, 2)
@@ -506,9 +521,9 @@ class ObservationBundleTest(unittest.TestCase):
         self.assertNotIn(' up -d --wait ', docker_log)
 
     def test_viewer_up_propagates_compose_wait_failure(self):
-        result, docker_log = self.run_with_fake_docker(
+        _, result, docker_log = self.run_with_fake_docker(
             ['viewer-up'],
-            {'FAKE_DOCKER_UP_EXIT': '23'},
+            extra_env={'FAKE_DOCKER_UP_EXIT': '23'},
         )
 
         self.assertEqual(result.returncode, 23)
@@ -516,8 +531,8 @@ class ObservationBundleTest(unittest.TestCase):
         self.assertIn(' up -d --wait ', docker_log)
 
     def test_viewer_down_and_logs_target_only_viewer_services(self):
-        down_result, down_log = self.run_with_fake_docker(['viewer-down'])
-        logs_result, logs_log = self.run_with_fake_docker(['viewer-logs'])
+        _, down_result, down_log = self.run_with_fake_docker(['viewer-down'])
+        _, logs_result, logs_log = self.run_with_fake_docker(['viewer-logs'])
 
         self.assertEqual(down_result.returncode, 0)
         self.assertIn(
@@ -757,6 +772,10 @@ class ObservationBundleTest(unittest.TestCase):
     def test_lan_mode_requires_server_ip_before_calling_docker(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
+            bundle = temp_path / 'bundle'
+            bundle.mkdir()
+            shutil.copy2(BUNDLE / 'run.sh', bundle / 'run.sh')
+            (bundle / '.env.test').write_text('SIM_NETWORK_MODE=lan\n')
             marker = temp_path / 'docker-called'
             fake_docker = temp_path / 'docker'
             fake_docker.write_text(
@@ -766,14 +785,14 @@ class ObservationBundleTest(unittest.TestCase):
             fake_docker.chmod(0o755)
             env = os.environ.copy()
             env.update({
-                'SIM_NETWORK_MODE': 'lan',
                 'PATH': f'{temp_path}:{env["PATH"]}',
                 'DOCKER_MARKER': str(marker),
             })
+            env.pop('SIM_NETWORK_MODE', None)
             env.pop('GZ_SERVER_IP', None)
 
             result = subprocess.run(
-                [str(BUNDLE / 'run.sh'), 'down'],
+                [str(bundle / 'run.sh'), '--env', 'test', 'down'],
                 text=True,
                 capture_output=True,
                 env=env,
@@ -789,6 +808,12 @@ class ObservationBundleTest(unittest.TestCase):
     def test_unknown_network_mode_is_rejected_before_calling_docker(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
+            bundle = temp_path / 'bundle'
+            bundle.mkdir()
+            shutil.copy2(BUNDLE / 'run.sh', bundle / 'run.sh')
+            (bundle / '.env.test').write_text(
+                'SIM_NETWORK_MODE=unsupported\n'
+            )
             marker = temp_path / 'docker-called'
             fake_docker = temp_path / 'docker'
             fake_docker.write_text(
@@ -798,13 +823,13 @@ class ObservationBundleTest(unittest.TestCase):
             fake_docker.chmod(0o755)
             env = os.environ.copy()
             env.update({
-                'SIM_NETWORK_MODE': 'unsupported',
                 'PATH': f'{temp_path}:{env["PATH"]}',
                 'DOCKER_MARKER': str(marker),
             })
+            env.pop('SIM_NETWORK_MODE', None)
 
             result = subprocess.run(
-                [str(BUNDLE / 'run.sh'), 'down'],
+                [str(bundle / 'run.sh'), '--env', 'test', 'down'],
                 text=True,
                 capture_output=True,
                 env=env,
@@ -820,6 +845,12 @@ class ObservationBundleTest(unittest.TestCase):
     def test_lan_mode_adds_the_lan_profile_to_docker_compose(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
+            bundle = temp_path / 'bundle'
+            bundle.mkdir()
+            shutil.copy2(BUNDLE / 'run.sh', bundle / 'run.sh')
+            (bundle / '.env.test').write_text(
+                'SIM_NETWORK_MODE=lan\nGZ_SERVER_IP=192.168.50.10\n'
+            )
             fake_docker = temp_path / 'docker'
             fake_docker.write_text(
                 '#!/usr/bin/env bash\n'
@@ -828,13 +859,13 @@ class ObservationBundleTest(unittest.TestCase):
             fake_docker.chmod(0o755)
             env = os.environ.copy()
             env.update({
-                'SIM_NETWORK_MODE': 'lan',
-                'GZ_SERVER_IP': '192.168.50.10',
                 'PATH': f'{temp_path}:{env["PATH"]}',
             })
+            env.pop('SIM_NETWORK_MODE', None)
+            env.pop('GZ_SERVER_IP', None)
 
             result = subprocess.run(
-                [str(BUNDLE / 'run.sh'), 'down'],
+                [str(bundle / 'run.sh'), '--env', 'test', 'down'],
                 text=True,
                 capture_output=True,
                 env=env,
@@ -842,11 +873,15 @@ class ObservationBundleTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0)
-            self.assertIn(str(BUNDLE / 'compose.lan.yaml'), result.stdout)
+            self.assertIn(str(bundle / 'compose.lan.yaml'), result.stdout)
 
     def test_run_sh_test_executes_observation_bundle_contract(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
+            bundle = temp_path / 'bundle'
+            bundle.mkdir()
+            shutil.copy2(BUNDLE / 'run.sh', bundle / 'run.sh')
+            (bundle / '.env.test').write_text('SIM_NETWORK_MODE=internal\n')
             python_log = temp_path / 'python-commands'
             fake_python = temp_path / 'python3'
             fake_python.write_text(
@@ -864,7 +899,7 @@ class ObservationBundleTest(unittest.TestCase):
             })
 
             result = subprocess.run(
-                [str(BUNDLE / 'run.sh'), 'test'],
+                [str(bundle / 'run.sh'), '--env', 'test', 'test'],
                 text=True,
                 capture_output=True,
                 env=env,
@@ -872,9 +907,9 @@ class ObservationBundleTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0)
-            self.assertIn(
-                str(BUNDLE / 'test/test_observation_bundle.py'),
+            self.assertRegex(
                 python_log.read_text(),
+                r'test/test_observation_bundle\.py\n',
             )
 
     def test_mac_client_preflight_connects_and_starts_gui(self):
