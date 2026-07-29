@@ -56,6 +56,19 @@ TEST(PalletCommand, ParsesStateRemoveAndList)
   EXPECT_TRUE(list.command->id.empty());
 }
 
+TEST(PalletCommand, AllowsOmittedKindOnlyForEmptyState)
+{
+  const auto empty = ParseCommand("state|pallet_1|empty|");
+  ASSERT_TRUE(empty.command.has_value());
+  EXPECT_EQ(empty.command->type, CommandType::State);
+  EXPECT_EQ(empty.command->state, RequestedState::Empty);
+  EXPECT_FALSE(empty.command->kind.has_value());
+
+  const auto loaded = ParseCommand("state|pallet_1|loaded|");
+  ASSERT_TRUE(loaded.error.has_value());
+  EXPECT_EQ(loaded.error->code, "INVALID_KIND");
+}
+
 TEST(PalletCommand, RejectsMalformedCommands)
 {
   const auto invalid_field_count = ParseCommand("list|extra");

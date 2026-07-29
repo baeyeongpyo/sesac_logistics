@@ -126,8 +126,12 @@ ParseResult ParseStateCommand(const std::vector<std::string_view> & fields)
   if (!state) {
     return Error("INVALID_STATE", "state must be empty or loaded");
   }
-  const auto kind = ParseKind(fields[3]);
-  if (!kind) {
+  const auto kind = fields[3].empty() ?
+    std::optional<PalletKind>{} : ParseKind(fields[3]);
+  if (*state == RequestedState::Loaded && !kind) {
+    return Error("INVALID_KIND", "kind must be fresh or normal");
+  }
+  if (*state == RequestedState::Empty && !fields[3].empty() && !kind) {
     return Error("INVALID_KIND", "kind must be fresh or normal");
   }
 

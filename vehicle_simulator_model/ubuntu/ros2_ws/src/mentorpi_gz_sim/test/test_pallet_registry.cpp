@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <filesystem>
+#include <stdexcept>
 #include <string>
 
 #include <sdf/Link.hh>
@@ -36,6 +38,28 @@ TEST(PalletRegistry, UsesConfiguredStopThresholds)
   EXPECT_FALSE(PalletRegistry::IsStopped({0, 0, 0}, {0, 0, 0.0501}));
 }
 
+TEST(PalletRegistry, ReportsMutableValidationErrors)
+{
+  PalletRegistry registry({-4.5, 4.5, -3.5, 3.5}, 0.20);
+  EXPECT_EQ(
+    registry.ValidateMutable("missing", {0, 0, 0}, {0, 0, 0})->code,
+    "NOT_FOUND");
+
+  PalletRecord record;
+  record.id = "pallet_01";
+  registry.Insert(record);
+
+  EXPECT_EQ(
+    registry.ValidateMutable("pallet_01", {0.0201, 0, 0}, {0, 0, 0})->code,
+    "PALLET_NOT_STOPPED");
+  EXPECT_FALSE(
+    registry.ValidateMutable("pallet_01", {0.02, 0, 0}, {0, 0, 0.05})
+    .has_value());
+
+  registry.Erase("pallet_01");
+  EXPECT_EQ(registry.Find("pallet_01"), nullptr);
+}
+
 TEST(PalletModelFactory, BuildsPalletAndPayloadModelsFromTemplates)
 {
   PalletModelFactory factory(PALLET_TEMPLATE_DIR);
@@ -64,5 +88,19 @@ TEST(PalletModelFactory, BuildsPalletAndPayloadModelsFromTemplates)
   EXPECT_NEAR(normalColor.R(), 0.1, 1e-6);
   EXPECT_NEAR(normalColor.G(), 0.3, 1e-6);
   EXPECT_NEAR(normalColor.B(), 0.8, 1e-6);
+}
+
+TEST(PalletModelFactory, ReportsInvalidTemplate)
+{
+  PalletModelFactory factory(
+    std::filesystem::path(PALLET_TEMPLATE_DIR) / "missing");
+  try {
+    (void)factory.PalletModel("pallet_07", gz::math::Pose3d::Zero);
+    FAIL() << "missing template must throw";
+  } catch (const std::runtime_error & error) {
+    EXPECT_NE(
+      std::string(error.what()).find("MODEL_TEMPLATE_INVALID"),
+      std::string::npos);
+  }
 }
 }  // namespace mentorpi_gz_sim

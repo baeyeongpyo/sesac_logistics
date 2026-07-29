@@ -12,6 +12,7 @@ add_library(pallet_manager_core STATIC
   src/pallet_command.cpp
   src/pallet_registry.cpp
   src/pallet_model_factory.cpp)
+set_target_properties(pallet_manager_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_features(pallet_manager_core PUBLIC cxx_std_17)
 target_include_directories(pallet_manager_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -21,10 +22,28 @@ target_link_libraries(pallet_manager_core PUBLIC
   gz-sim8::gz-sim8
   sdformat14::sdformat14)
 
+add_library(mentorpi_warehouse_pallet_manager SHARED
+  src/warehouse_pallet_manager.cpp)
+target_compile_features(mentorpi_warehouse_pallet_manager PUBLIC cxx_std_17)
+target_link_libraries(mentorpi_warehouse_pallet_manager PRIVATE
+  gz-sim8::gz-sim8
+  gz-plugin2::register
+  gz-transport13::gz-transport13
+  gz-msgs10::gz-msgs10
+  sdformat14::sdformat14
+  pallet_manager_core)
+
 install(DIRECTORY config launch models worlds DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS scripts/gz_pose_to_odom.py DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
-install(TARGETS pallet_manager_core ARCHIVE DESTINATION lib)
+install(TARGETS
+  pallet_manager_core
+  mentorpi_warehouse_pallet_manager
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib)
+
+ament_environment_hooks(
+  "${CMAKE_CURRENT_SOURCE_DIR}/env-hooks/mentorpi_gz_sim.sh.in")
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -39,6 +58,13 @@ if(BUILD_TESTING)
     test/test_harmonic_launch_contract.py)
   ament_add_pytest_test(test_gz_pose_to_odom
     test/test_gz_pose_to_odom.py)
+  ament_add_pytest_test(
+    test_pallet_manager_integration
+    test/test_pallet_manager_integration.py
+    TIMEOUT 60
+    APPEND_ENV
+      "GZ_SIM_SYSTEM_PLUGIN_PATH=$<TARGET_FILE_DIR:mentorpi_warehouse_pallet_manager>"
+      "GZ_SIM_RESOURCE_PATH=${CMAKE_CURRENT_SOURCE_DIR}/models")
 endif()
 
 ament_package()

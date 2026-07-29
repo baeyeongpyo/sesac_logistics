@@ -47,6 +47,7 @@ class PalletRegistry
     const gz::math::Vector3d & angular);
 
   void Insert(PalletRecord record);
+  void Erase(std::string_view id);
   void SetOccupiedPoses(std::vector<gz::math::Vector2d> poses);
   PalletRecord * Find(std::string_view id);
   const PalletRecord * Find(std::string_view id) const;

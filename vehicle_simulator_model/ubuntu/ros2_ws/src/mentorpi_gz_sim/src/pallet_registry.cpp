@@ -72,6 +72,11 @@ void PalletRegistry::Insert(PalletRecord record)
   records_[record.id] = std::move(record);
 }
 
+void PalletRegistry::Erase(std::string_view id)
+{
+  records_.erase(std::string(id));
+}
+
 void PalletRegistry::SetOccupiedPoses(std::vector<gz::math::Vector2d> poses)
 {
   occupiedPoses_ = std::move(poses);
