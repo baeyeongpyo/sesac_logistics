@@ -45,6 +45,60 @@ class HarmonicLaunchContractTest(unittest.TestCase):
             self.assertIn(token, text)
         self.assertNotIn('gz_sim.launch.py', text)
 
+    def test_adapter_spawns_exactly_two_robots_at_warehouse_poses(self):
+        tree = ast.parse((LAUNCH / 'sim_adapter.launch.py').read_text())
+        calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == '_robot_nodes'
+        ]
+        self.assertEqual(len(calls), 2)
+        poses = {
+            call.args[0].value: (
+                tuple(element.value for element in call.args[1].elts),
+                call.args[2].value,
+            )
+            for call in calls
+        }
+        self.assertEqual(poses, {
+            'robot_1': (('1.8', '-2.8', '0.05'), '1.5708'),
+            'robot_2': (('3.2', '-2.8', '0.05'), '1.5708'),
+        })
+
+        robot_nodes = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == '_robot_nodes'
+        )
+        self.assertEqual(
+            [argument.arg for argument in robot_nodes.args.args],
+            ['name', 'xyz', 'yaw', 'package_share'],
+        )
+        create_node = next(
+            node for node in ast.walk(robot_nodes)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == 'Node'
+            and any(
+                keyword.arg == 'executable'
+                and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value == 'create'
+                for keyword in node.keywords
+            )
+        )
+        arguments = next(
+            keyword.value for keyword in create_node.keywords
+            if keyword.arg == 'arguments'
+        )
+        values = [
+            element.value if isinstance(element, ast.Constant) else element.id
+            for element in arguments.elts
+            if isinstance(element, (ast.Constant, ast.Name))
+        ]
+        self.assertIn('-Y', values)
+        self.assertIn('yaw', values)
+
     def test_combined_launch_includes_both_boundaries(self):
         text = (LAUNCH / 'two_robot_sim.launch.py').read_text()
         self.assertIn('gazebo_server.launch.py', text)
@@ -57,3 +111,7 @@ class HarmonicLaunchContractTest(unittest.TestCase):
         self.assertIn('ament_add_pytest_test(test_harmonic_launch_contract', cmake)
         self.assertIn('test/test_harmonic_launch_contract.py', cmake)
         self.assertIn('<test_depend>ament_cmake_pytest</test_depend>', package_xml)
+
+
+if __name__ == '__main__':
+    unittest.main()
