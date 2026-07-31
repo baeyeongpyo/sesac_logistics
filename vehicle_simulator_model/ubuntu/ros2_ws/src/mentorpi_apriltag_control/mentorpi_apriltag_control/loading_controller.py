@@ -26,7 +26,9 @@ class LoadingController(Node):
         self.declare_parameter("search_steering_angle", 0.65)
         self.declare_parameter("search_leg_duration", 2.0)
         self.declare_parameter("search_timeout", 12.0)
-        self.declare_parameter("align_tolerance", 0.08)
+        self.declare_parameter("align_tolerance", 0.03)
+        self.declare_parameter("final_align_tolerance", 0.02)
+        self.declare_parameter("final_align_hold_time", 0.5)
         self.declare_parameter("linear_gain", 0.30)
         self.declare_parameter("angular_gain", 1.1)
         self.declare_parameter("max_linear_speed", 0.16)
@@ -50,6 +52,8 @@ class LoadingController(Node):
         self.search_leg_duration = float(self.get_parameter("search_leg_duration").value)
         self.search_timeout = float(self.get_parameter("search_timeout").value)
         self.align_tolerance = float(self.get_parameter("align_tolerance").value)
+        self.final_align_tolerance = float(self.get_parameter("final_align_tolerance").value)
+        self.final_align_hold_time = float(self.get_parameter("final_align_hold_time").value)
         self.linear_gain = float(self.get_parameter("linear_gain").value)
         self.angular_gain = float(self.get_parameter("angular_gain").value)
         self.max_linear_speed = float(self.get_parameter("max_linear_speed").value)
@@ -68,6 +72,7 @@ class LoadingController(Node):
         self.lift_sent = False
         self.insert_started_at = None
         self.search_started_at = None
+        self.final_aligned_since = None
         self.last_published_state = None
 
         self.cmd_pub = self.create_publisher(Twist, self.get_parameter("cmd_vel_topic").value, 10)
@@ -130,16 +135,23 @@ class LoadingController(Node):
             )
 
             if abs(error_x) > self.align_tolerance:
+                self.final_aligned_since = None
                 self.state = "TAG_ALIGN"
-                cmd.linear.x = self.max_linear_speed * 0.35
+                cmd.linear.x = self.max_linear_speed * 0.20
                 cmd.angular.z = self.angular_from_steering(cmd.linear.x, steering_angle)
             elif self.should_approach(distance, tag_width_px):
+                self.final_aligned_since = None
                 self.state = "APPROACH"
                 cmd.linear.x = self.approach_speed(distance, tag_width_px)
                 cmd.angular.z = self.angular_from_steering(cmd.linear.x, steering_angle)
             elif self.should_back_off(distance, tag_width_px):
+                self.final_aligned_since = None
                 self.state = "BACK_OFF"
                 cmd.linear.x = self.approach_speed(distance, tag_width_px)
+                cmd.angular.z = self.angular_from_steering(cmd.linear.x, steering_angle)
+            elif not self.final_alignment_ready(error_x):
+                self.state = "FINAL_ALIGN"
+                cmd.linear.x = self.max_linear_speed * 0.12
                 cmd.angular.z = self.angular_from_steering(cmd.linear.x, steering_angle)
             else:
                 self.state = "STOP_AT_DISTANCE"
@@ -215,6 +227,16 @@ class LoadingController(Node):
         )
         cmd.angular.z = self.angular_from_steering(cmd.linear.x, steering_angle)
         return cmd
+
+    def final_alignment_ready(self, error_x):
+        now = time.monotonic()
+        if abs(error_x) > self.final_align_tolerance:
+            self.final_aligned_since = None
+            return False
+        if self.final_aligned_since is None:
+            self.final_aligned_since = now
+            return False
+        return now - self.final_aligned_since >= self.final_align_hold_time
 
     def publish_status(self):
         if self.state == self.last_published_state:

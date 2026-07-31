@@ -43,6 +43,7 @@ distance is reached, then command the fork lift-up action.
 | `TAG_ALIGN` | Target tag is visible but not centered | Move slowly while steering toward center |
 | `APPROACH` | Tag is centered but still too far | Move forward toward the tag |
 | `BACK_OFF` | Tag is centered but too close | Reverse until target distance band is reached |
+| `FINAL_ALIGN` | Stop distance is reached but final centering is not stable yet | Creep slowly while steering until the final alignment band is stable |
 | `STOP_AT_DISTANCE` | Tag is centered and inside stop band | Stop base motion |
 | `FORK_INSERT_FORWARD` | Stop position reached | Move forward for the fixed insert duration |
 | `LIFT_UP` | Stop position reached and lift command not sent yet | Publish lift height once |
@@ -73,6 +74,9 @@ distance is reached, then command the fork lift-up action.
 | `safety_stop_distance` | `0.0` in USB launch | Disabled for the current USB-camera + Gazebo hybrid test |
 | `wheelbase` | `0.22` m | Wheelbase used for steering-derived yaw rate |
 | `max_steering_angle` | `1.5708` rad | 90 degree steering limit |
+| `align_tolerance` | `0.03` | Image-center error allowed before normal approach |
+| `final_align_tolerance` | `0.02` | Stricter image-center error required before insert |
+| `final_align_hold_time` | `0.5` s | Time final alignment must remain stable before insert |
 | `search_linear_speed` | `0.04` m/s | Slow forward speed while searching for a missing tag |
 | `search_steering_angle` | `0.65` rad | Steering angle used during local arc search |
 | `search_leg_duration` | `2.0` s | Time before alternating the search steering direction |
