@@ -19,6 +19,15 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 Thumbs.db
+.tmp_screenshots/
+
+# ROS/colcon generated outputs
+build/
+install/
+log/
+**/build/
+**/install/
+**/log/
 
 # keep shared llm-wiki-core configuration tracked
 !wiki_stack.yaml
