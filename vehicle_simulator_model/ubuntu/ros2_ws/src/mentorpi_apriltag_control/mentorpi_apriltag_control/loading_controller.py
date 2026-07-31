@@ -34,7 +34,7 @@ class LoadingController(Node):
         self.declare_parameter("wheelbase", 0.22)
         self.declare_parameter("max_steering_angle", 1.5708)
         self.declare_parameter("lift_command", "UP")
-        self.declare_parameter("insert_distance", 0.19)
+        self.declare_parameter("insert_duration", 3.0)
         self.declare_parameter("insert_speed", 0.03)
         self.declare_parameter("lost_timeout", 0.5)
 
@@ -57,7 +57,7 @@ class LoadingController(Node):
         self.wheelbase = float(self.get_parameter("wheelbase").value)
         self.max_steering_angle = float(self.get_parameter("max_steering_angle").value)
         self.lift_command = str(self.get_parameter("lift_command").value)
-        self.insert_distance = float(self.get_parameter("insert_distance").value)
+        self.insert_duration_seconds = float(self.get_parameter("insert_duration").value)
         self.insert_speed = float(self.get_parameter("insert_speed").value)
         self.lost_timeout = float(self.get_parameter("lost_timeout").value)
 
@@ -115,6 +115,8 @@ class LoadingController(Node):
                 if not self.lift_sent:
                     self.lift_pub.publish(String(data=self.lift_command))
                     self.lift_sent = True
+        elif self.state == "LIFT_UP":
+            cmd = Twist()
         elif detection is None:
             cmd = self.search_command()
         else:
@@ -183,9 +185,7 @@ class LoadingController(Node):
         return linear_speed * math.tan(steering_angle) / self.wheelbase
 
     def insert_duration(self):
-        if self.insert_speed <= 0.0:
-            return 0.0
-        return self.insert_distance / self.insert_speed
+        return max(0.0, self.insert_duration_seconds)
 
     def insert_elapsed(self):
         if self.insert_started_at is None:

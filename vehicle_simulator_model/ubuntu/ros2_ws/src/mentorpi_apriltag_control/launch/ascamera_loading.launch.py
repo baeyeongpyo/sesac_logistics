@@ -36,7 +36,7 @@ def generate_launch_description():
                 "search_steering_angle": 0.65,
                 "search_leg_duration": 2.0,
                 "search_timeout": 12.0,
-                "insert_distance": 0.19,
+                "insert_duration": 3.0,
                 "insert_speed": 0.03,
             }],
         ),

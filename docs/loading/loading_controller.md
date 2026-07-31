@@ -44,7 +44,7 @@ distance is reached, then command the fork lift-up action.
 | `APPROACH` | Tag is centered but still too far | Move forward toward the tag |
 | `BACK_OFF` | Tag is centered but too close | Reverse until target distance band is reached |
 | `STOP_AT_DISTANCE` | Tag is centered and inside stop band | Stop base motion |
-| `FORK_INSERT_FORWARD` | Stop position reached | Move forward by fixed insert distance |
+| `FORK_INSERT_FORWARD` | Stop position reached | Move forward for the fixed insert duration |
 | `LIFT_UP` | Stop position reached and lift command not sent yet | Publish lift height once |
 | `SAFETY_STOP` | Front obstacle is closer than safety threshold | Stop base motion |
 
@@ -78,7 +78,7 @@ distance is reached, then command the fork lift-up action.
 | `search_leg_duration` | `2.0` s | Time before alternating the search steering direction |
 | `search_timeout` | `12.0` s | Time before publishing `TAG_SEARCH_FAILED` |
 | `lift_command` | `UP` | Fork command published after insert motion |
-| `insert_distance` | `0.19` m | Fixed forward motion after stopping at tag distance |
+| `insert_duration` | `3.0` s | Fixed forward motion time after stopping at tag distance |
 | `insert_speed` | `0.03` m/s | Slow insert speed used for time-based fixed motion |
 
 ## Notes For Next Implementation
