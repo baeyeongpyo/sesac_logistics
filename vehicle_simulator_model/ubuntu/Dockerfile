@@ -18,6 +18,7 @@ RUN apt-get update \
         python3-colcon-common-extensions \
         python3-rosdep \
         ros-humble-foxglove-bridge \
+        ros-humble-foxglove-msgs \
         ros-humble-navigation2 \
         ros-humble-nav2-bringup \
         ros-humble-robot-state-publisher \

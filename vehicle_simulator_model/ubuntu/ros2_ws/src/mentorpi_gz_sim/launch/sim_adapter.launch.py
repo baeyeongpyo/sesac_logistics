@@ -30,9 +30,26 @@ def _robot_nodes(name, xyz, yaw, package_share):
     ]
 
 
+def _scene_nodes(package_share):
+    scene_package_share = Path(get_package_share_directory('mentorpi_foxglove_scene'))
+    return [
+        Node(package='ros_gz_bridge', executable='parameter_bridge', name='warehouse_scene_bridge',
+             parameters=[{'config_file': str(Path(package_share) / 'config' / 'warehouse_scene_bridge.yaml')}],
+             output='screen'),
+        Node(package='mentorpi_foxglove_scene', executable='sdf_scene_publisher', name='sdf_scene_publisher',
+             parameters=[{
+                 'world_sdf': str(Path(package_share) / 'worlds' / 'warehouse.sdf'),
+                 'models_root': str(Path(package_share) / 'models'),
+                 'frame_id': 'robot_1/odom',
+                 'use_sim_time': True,
+             }], output='screen'),
+    ]
+
+
 def generate_launch_description():
     package_share = get_package_share_directory('mentorpi_gz_sim')
     return LaunchDescription(
         _robot_nodes('robot_1', ('1.8', '-2.8', '0.05'), '1.5708', package_share)
         + _robot_nodes('robot_2', ('3.2', '-2.8', '0.05'), '1.5708', package_share)
+        + _scene_nodes(package_share)
     )

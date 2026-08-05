@@ -14,6 +14,7 @@
   <depend>sdformat14</depend>
   <exec_depend>mentorpi_description</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>mentorpi_foxglove_scene</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>

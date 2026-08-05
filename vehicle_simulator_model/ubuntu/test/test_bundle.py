@@ -56,7 +56,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'ros2 pkg prefix mentorpi_gz_sim',
             'ros2 pkg prefix mentorpi_slam',
             'cd /opt/mentorpi_ws',
-            'colcon test --packages-select mentorpi_gz_sim mentorpi_slam',
+            'colcon test --packages-select mentorpi_gz_sim mentorpi_foxglove_scene mentorpi_slam',
             'colcon test-result --verbose',
         ):
             self.assertIn(runtime_check, test_command)

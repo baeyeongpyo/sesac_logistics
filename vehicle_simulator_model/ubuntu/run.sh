@@ -529,6 +529,7 @@ case "${RUN_COMMAND[0]}" in
     printf 'mentorpi test stage=host-static\n'
     python3 "$BUNDLE_DIR/test/test_bundle.py" -v
     python3 "$BUNDLE_DIR/test/test_navigation_bundle.py" -v
+    python3 "$BUNDLE_DIR/test/test_foxglove_scene_bundle.py" -v
     python3 "$BUNDLE_DIR/test/test_runtime_env_config.py" -v
     python3 "$BUNDLE_DIR/test/test_observation_bundle.py" -v
     python3 \
@@ -536,6 +537,9 @@ case "${RUN_COMMAND[0]}" in
     python3 -m unittest discover \
       -s "$BUNDLE_DIR/ros2_ws/src/mentorpi_gz_sim/test" \
       -p 'test_harmonic_launch_contract.py' -v
+    python3 -m unittest discover \
+      -s "$BUNDLE_DIR/ros2_ws/src/mentorpi_foxglove_scene/test" \
+      -p 'test_*.py' -v
 
     printf 'mentorpi test stage=compose-config\n'
     "${COMPOSE[@]}" config --quiet
@@ -548,6 +552,7 @@ case "${RUN_COMMAND[0]}" in
        gz sim --versions && \
        ros2 pkg prefix mentorpi_description && \
        ros2 pkg prefix mentorpi_gz_sim && \
+       ros2 pkg prefix mentorpi_foxglove_scene && \
        ros2 pkg prefix mentorpi_slam && \
        ros2 pkg prefix mentorpi_nav && \
        xacro \
@@ -555,7 +560,7 @@ case "${RUN_COMMAND[0]}" in
          robot_name:=robot_1 \
          | tee /tmp/robot_1.sdf \
          | grep -F 'model://mentorpi_description/meshes/mecanum/lidar_Link.STL' && \
-       colcon test --packages-select mentorpi_gz_sim mentorpi_slam mentorpi_nav --event-handlers console_direct+ && \
+       colcon test --packages-select mentorpi_gz_sim mentorpi_foxglove_scene mentorpi_slam mentorpi_nav --event-handlers console_direct+ && \
        colcon test-result --verbose"
     ;;
   fork-up)

@@ -657,3 +657,20 @@ cp .env.server-viewer.example .env.server-viewer
 필요하면 `.env.server-viewer`에서 `FOXGLOVE_PORT`를 변경할 수 있다. public viewer 모드는
 Foxglove Bridge 포트를 공개하지 않는다. Gazebo Transport, ROS DDS, VNC/noVNC와 Foxglove
 WebSocket을 공용 인터넷에 직접 port-forward하지 않는다.
+
+### Warehouse SDF 3D 장면
+
+`sim-adapter`는 warehouse SDF를 Foxglove의 표준 `SceneUpdate` 토픽으로 함께 발행한다.
+Foxglove 3D panel에서 `/warehouse_scene/static`과 `/warehouse_scene/dynamic`을 추가하면
+warehouse 구조물, `robot_1`·`robot_2`, 그리고 pallet/payload 상태를 볼 수 있다. 정적 장면은
+late-joiner도 받도록 durable QoS로 한 번 발행하며, 동적 장면은 10 Hz로 갱신된다.
+
+두 장면은 `robot_1/odom` 기준이다. SLAM을 함께 실행 중이면 3D panel Fixed frame은 `map`으로,
+Gazebo만 실행 중이면 `robot_1/odom`으로 선택한다. `/warehouse/entity_poses`는 Gazebo의
+`Pose_V`를 bridge한 내부 입력 토픽이므로 3D panel에 직접 추가할 필요는 없다.
+
+```text
+/warehouse_scene/static   # ground, walls, conveyor, rack, charger, markings
+/warehouse_scene/dynamic  # robot_1, robot_2, pallet_*, pallet_*_payload
+/warehouse/entity_poses   # Gazebo → ROS scene publisher input
+```
