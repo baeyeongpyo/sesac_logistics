@@ -16,8 +16,8 @@ X11 전달은 사용하지 않는다.
   `tf2_msgs/msg/TFMessage`로 bridge한다.
 - pose stream에서 `robot_1`, `robot_2`, `pallet_*`, `pallet_*_payload`를 골라
   Foxglove dynamic scene으로 갱신한다.
-- robot은 포크를 포함한 단순 cube assembly로 표시한다. pallet deck과 fresh/normal
-  payload도 cube assembly로 표시한다.
+- robot은 포크를 포함한 단순 cube assembly로 표시한다. pallet deck과 payload도 cube
+  assembly로 표시한다.
 
 ## Out of Scope
 
@@ -25,7 +25,7 @@ X11 전달은 사용하지 않는다.
 - robot STL mesh의 GLB 변환은 포함하지 않는다.
 - real robot의 scene source는 포함하지 않는다.
 - 팔레트 상태를 별도 custom ROS message로 publish하지 않는다. payload model의 존재로
-  loaded/empty를 표현한다.
+  loaded/empty를 표현하며, fresh/normal kind는 공통 payload 색상으로 표시한다.
 
 ## Architecture
 
@@ -87,11 +87,12 @@ SLAM은 `map -> robot_1/odom` transform을 제공한다. Foxglove의 fixed frame
 | `robot_1` | `robot_1` | chassis cube, mast cube, fork cubes, `robot_1` pose |
 | `robot_2` | `robot_2` | chassis cube, mast cube, fork cubes, `robot_2` pose |
 | `pallet_<id>` | `pallet_<id>` | brown deck and supports |
-| `pallet_<id>_payload` | `pallet_<id>_payload` | fresh: green cubes; normal: blue cubes |
+| `pallet_<id>_payload` | `pallet_<id>_payload` | 공통 payload cube assembly |
 
 로봇의 chassis는 `0.30 × 0.20 × 0.12 m`, mast는 `0.05 × 0.16 × 0.28 m`, fork는
 각각 `0.16 × 0.025 × 0.02 m`로 표시한다. pallet deck·support·payload는 현재
-`models/pallet/*.sdf.in`의 box size와 pose를 그대로 사용한다.
+`models/pallet/*.sdf.in`의 box size와 pose를 그대로 사용하고, payload는 pose stream만으로
+kind를 구별할 수 없으므로 중립적인 보라색으로 표시한다.
 
 알 수 없는 entity name은 무시한다. robot pose가 없을 때는 해당 robot entity를 발행하지
 않고, pallet payload가 없어지면 이전 payload ID를 deletion으로 발행한다.
