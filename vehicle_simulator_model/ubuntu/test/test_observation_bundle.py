@@ -210,13 +210,16 @@ class ObservationBundleTest(unittest.TestCase):
             log = docker_log.read_text() if docker_log.exists() else ''
             return bundle, result, log
 
-    def test_gateway_is_the_only_viewer_service_with_host_ports(self):
+    def test_viewer_host_ports_are_loopback_only_and_exclude_simulation_ports(self):
         viewer = (BUNDLE / 'compose.viewer.yaml').read_text()
         public = (BUNDLE / 'compose.viewer-public.yaml').read_text()
         caddy = (BUNDLE / 'Caddyfile.viewer').read_text()
 
         self.assertIn('web-gateway:', viewer)
         self.assertIn('127.0.0.1:${VIEWER_PORT-8080}:8080', viewer)
+        self.assertIn('foxglove-bridge:', viewer)
+        self.assertIn('127.0.0.1:${FOXGLOVE_PORT-8765}:8765', viewer)
+        self.assertIn('ports: !reset []', public)
         self.assertIn('ports: !override', public)
         self.assertIn('"80:80"', public)
         self.assertIn('"443:443"', public)
@@ -226,6 +229,26 @@ class ObservationBundleTest(unittest.TestCase):
         self.assertNotIn('basic_auth', caddy)
         for forbidden in ('10317:', '10318:', '11811:', '5900:', '6080:6080'):
             self.assertNotIn(forbidden, viewer + public)
+
+    def test_foxglove_bridge_joins_internal_dds_and_waits_for_adapter(self):
+        viewer = (BUNDLE / 'compose.viewer.yaml').read_text()
+        foxglove = viewer.split('  foxglove-bridge:', 1)[1].split(
+            '  web-gateway:', 1
+        )[0]
+
+        for required in (
+            'profiles: [viewer]',
+            '- mentorpi',
+            '- viewer-edge',
+            'DDS_DISCOVERY_HOST: dds-discovery',
+            'DDS_DISCOVERY_PORT: "11811"',
+            'FASTDDS_BUILTIN_TRANSPORTS: "UDPv4"',
+            'DDS_SUPER_CLIENT: "1"',
+            'ros2 launch foxglove_bridge foxglove_bridge_launch.xml',
+            'sim-adapter:',
+            'condition: service_healthy',
+        ):
+            self.assertIn(required, foxglove)
 
     def test_viewer_compose_gives_only_gateway_ports_and_edge_egress(self):
         base_files = [
@@ -285,6 +308,10 @@ class ObservationBundleTest(unittest.TestCase):
                 self.assertNotIn(
                     'viewer-edge', mode['services'][service]['networks']
                 )
+            self.assertEqual(
+                set(mode['services']['foxglove-bridge']['networks']),
+                {'mentorpi', 'viewer-edge'},
+            )
         self.assertEqual(
             [
                 (port.get('host_ip'), port['published'], port['target'])
@@ -493,7 +520,7 @@ class ObservationBundleTest(unittest.TestCase):
         )
         self.assertIn(
             '--profile viewer up -d --wait dds-discovery gazebo-server '
-            'sim-adapter gazebo-viewer web-gateway',
+            'sim-adapter foxglove-bridge gazebo-viewer web-gateway',
             local_log,
         )
         self.assertEqual(public_result.returncode, 0)
@@ -502,7 +529,7 @@ class ObservationBundleTest(unittest.TestCase):
         )
         self.assertIn(
             'up -d --wait dds-discovery gazebo-server sim-adapter '
-            'gazebo-viewer web-gateway',
+            'foxglove-bridge gazebo-viewer web-gateway',
             public_log,
         )
 
@@ -551,13 +578,13 @@ class ObservationBundleTest(unittest.TestCase):
 
         self.assertEqual(down_result.returncode, 0)
         self.assertIn(
-            '--profile viewer stop web-gateway gazebo-viewer', down_log
+            '--profile viewer stop web-gateway gazebo-viewer foxglove-bridge', down_log
         )
         self.assertNotIn('gazebo-server', down_log)
         self.assertNotIn('sim-adapter', down_log)
         self.assertEqual(logs_result.returncode, 0)
         self.assertIn(
-            '--profile viewer logs -f gazebo-viewer web-gateway', logs_log
+            '--profile viewer logs -f gazebo-viewer web-gateway foxglove-bridge', logs_log
         )
         self.assertNotIn('gazebo-server', logs_log)
         self.assertNotIn('sim-adapter', logs_log)
@@ -942,6 +969,7 @@ class ObservationBundleTest(unittest.TestCase):
             fake_gz.chmod(0o755)
             env = os.environ.copy()
             env['PATH'] = f'{temp_path}:{env["PATH"]}'
+            env.pop('GZ_PARTITION', None)
 
             result = subprocess.run(
                 [
@@ -971,6 +999,7 @@ class ObservationBundleTest(unittest.TestCase):
             fake_gz.chmod(0o755)
             env = os.environ.copy()
             env['PATH'] = f'{temp_path}:{env["PATH"]}'
+            env.pop('GZ_PARTITION', None)
 
             result = subprocess.run(
                 [
@@ -1003,6 +1032,7 @@ class ObservationBundleTest(unittest.TestCase):
             fake_gz.chmod(0o755)
             env = os.environ.copy()
             env['PATH'] = f'{temp_path}:{env["PATH"]}'
+            env.pop('GZ_PARTITION', None)
 
             result = subprocess.run(
                 [

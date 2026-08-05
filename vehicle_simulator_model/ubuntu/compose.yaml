@@ -116,6 +116,26 @@ services:
         target: /slam-data
         read_only: true
 
+  navigation:
+    <<: *runtime-networked
+    profiles: [navigation]
+    environment:
+      <<: *dds-client-environment
+      SERVICE_NAME: navigation
+      SLAM_DATA_ROOT: /slam-data
+      NAV_SESSION_ID: "${NAV_SESSION_ID-}"
+    command: /opt/mentorpi_ws/install/mentorpi_nav/lib/mentorpi_nav/run_navigation.sh
+    depends_on:
+      dds-discovery:
+        condition: service_started
+      sim-adapter:
+        condition: service_healthy
+    volumes:
+      - type: volume
+        source: slam-data
+        target: /slam-data
+        read_only: true
+
 networks:
   mentorpi:
     internal: true

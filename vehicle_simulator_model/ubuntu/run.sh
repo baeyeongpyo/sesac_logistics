@@ -53,7 +53,7 @@ validate_command_arity() {
   done
 
   case "${RUN_COMMAND[0]}" in
-    build|down|logs|topics|test|fork-up|viewer-down|viewer-logs|mapping-stop|gz-server|gz-gui|help|-h|--help)
+    build|down|logs|topics|test|fork-up|viewer-down|viewer-logs|mapping-stop|nav-down|nav-status|gz-server|gz-gui|help|-h|--help)
       if [[ "${#RUN_COMMAND[@]}" -ne 1 ]]; then
         echo "${RUN_COMMAND[0]} does not accept arguments" >&2
         return 2
@@ -90,6 +90,23 @@ validate_command_arity() {
       if [[ "${#RUN_COMMAND[@]}" -ne 2 ]]; then
         echo "${RUN_COMMAND[0]} requires exactly one session ID" >&2
         return 2
+      fi
+      ;;
+    nav-up)
+      if [[ "${#RUN_COMMAND[@]}" -gt 3 ]]; then
+        echo 'nav-up accepts auto and one optional mapping session ID' >&2
+        return 2
+      fi
+      if [[ "${#RUN_COMMAND[@]}" -ge 2 && "${RUN_COMMAND[1]}" != 'auto' ]]; then
+        echo 'nav-up first argument must be auto' >&2
+        return 2
+      fi
+      if [[ "${#RUN_COMMAND[@]}" -eq 3 ]]; then
+        if [[ ! "${RUN_COMMAND[2]}" =~ ^[A-Za-z0-9._-]+$ \
+          || "${RUN_COMMAND[2]}" == '.' || "${RUN_COMMAND[2]}" == '..' ]]; then
+          echo 'session ID may contain only A-Z, a-z, 0-9, period, underscore, and hyphen, but not . or ..' >&2
+          return 2
+        fi
       fi
       ;;
   esac
@@ -417,6 +434,9 @@ Commands:
   mapping-up <id>     Start a one-shot SLAM mapping session.
   mapping-stop        Send SIGINT and wait for safe SLAM finalization.
   mapping-status <id> Verify a published mapping session's checksums.
+  nav-up auto [id]    Start Nav2 with a verified map ID or SLAM fallback.
+  nav-down             Stop Nav2 without stopping the simulation.
+  nav-status           Show Nav2 topic-endpoint and selected-mode diagnostics.
   viewer-up [local|public] Start read-only Gazebo browser monitoring.
   viewer-down              Stop viewer services without stopping simulation.
   viewer-logs              Follow viewer and gateway logs.
@@ -471,21 +491,21 @@ case "${RUN_COMMAND[0]}" in
     esac
     require_viewer_compose_version
     "${viewer_compose[@]}" up -d --wait \
-      dds-discovery gazebo-server sim-adapter gazebo-viewer web-gateway
+      dds-discovery gazebo-server sim-adapter foxglove-bridge gazebo-viewer web-gateway
     ;;
   viewer-down)
     if [[ "${#RUN_COMMAND[@]}" -ne 1 ]]; then
       echo 'viewer-down does not accept arguments' >&2
       exit 2
     fi
-    "${viewer_compose[@]}" stop web-gateway gazebo-viewer
+    "${viewer_compose[@]}" stop web-gateway gazebo-viewer foxglove-bridge
     ;;
   viewer-logs)
     if [[ "${#RUN_COMMAND[@]}" -ne 1 ]]; then
       echo 'viewer-logs does not accept arguments' >&2
       exit 2
     fi
-    "${viewer_compose[@]}" logs -f gazebo-viewer web-gateway
+    "${viewer_compose[@]}" logs -f gazebo-viewer web-gateway foxglove-bridge
     ;;
   gz-server)
     prepare_native_gz
@@ -508,6 +528,7 @@ case "${RUN_COMMAND[0]}" in
   test)
     printf 'mentorpi test stage=host-static\n'
     python3 "$BUNDLE_DIR/test/test_bundle.py" -v
+    python3 "$BUNDLE_DIR/test/test_navigation_bundle.py" -v
     python3 "$BUNDLE_DIR/test/test_runtime_env_config.py" -v
     python3 "$BUNDLE_DIR/test/test_observation_bundle.py" -v
     python3 \
@@ -528,12 +549,13 @@ case "${RUN_COMMAND[0]}" in
        ros2 pkg prefix mentorpi_description && \
        ros2 pkg prefix mentorpi_gz_sim && \
        ros2 pkg prefix mentorpi_slam && \
+       ros2 pkg prefix mentorpi_nav && \
        xacro \
          /opt/mentorpi_ws/install/mentorpi_gz_sim/share/mentorpi_gz_sim/models/mentorpi_m1/model.sdf.xacro \
          robot_name:=robot_1 \
          | tee /tmp/robot_1.sdf \
          | grep -F 'model://mentorpi_description/meshes/mecanum/lidar_Link.STL' && \
-       colcon test --packages-select mentorpi_gz_sim mentorpi_slam --event-handlers console_direct+ && \
+       colcon test --packages-select mentorpi_gz_sim mentorpi_slam mentorpi_nav --event-handlers console_direct+ && \
        colcon test-result --verbose"
     ;;
   fork-up)
@@ -551,6 +573,28 @@ case "${RUN_COMMAND[0]}" in
     fi
     "${COMPOSE[@]}" exec -T sim-adapter bash -lc \
       "$ROS_SETUP && timeout 10 ros2 topic pub --once /robot_1/fork/command std_msgs/msg/Float64 '{data: 0.11}'"
+    ;;
+  nav-up)
+    unset NAV_SESSION_ID
+    if [[ "${#RUN_COMMAND[@]}" -eq 3 ]]; then
+      export NAV_SESSION_ID="${RUN_COMMAND[2]}"
+    fi
+    "${COMPOSE[@]}" --profile navigation up -d --wait \
+      dds-discovery gazebo-server sim-adapter navigation
+    ;;
+  nav-down)
+    "${COMPOSE[@]}" --profile navigation stop navigation
+    ;;
+  nav-status)
+    "${COMPOSE[@]}" --profile navigation ps navigation
+    "${COMPOSE[@]}" --profile navigation exec -T navigation bash -lc \
+      'set -eo pipefail
+       export DDS_SUPER_CLIENT=1
+       source /usr/local/bin/mentorpi-dds-env
+       trap '\''rm -f -- "$DDS_SUPER_CLIENT_PROFILE"'\'' EXIT
+       source /opt/ros/humble/setup.bash
+       source /opt/mentorpi_ws/install/setup.bash
+       ros2 topic list --no-daemon | grep -E "^/(cmd_vel_nav|map|move_base_simple/goal)$"'
     ;;
   mapping-up)
     if [[ "${#RUN_COMMAND[@]}" -ne 2 ]]; then

@@ -17,6 +17,9 @@ RUN apt-get update \
         novnc \
         python3-colcon-common-extensions \
         python3-rosdep \
+        ros-humble-foxglove-bridge \
+        ros-humble-navigation2 \
+        ros-humble-nav2-bringup \
         ros-humble-robot-state-publisher \
         ros-humble-ros-gzharmonic \
         ros-humble-rosbag2 \

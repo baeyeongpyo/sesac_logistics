@@ -1,0 +1,42 @@
+promotion_package:
+  source_owner: "yeongpyo"
+  claims:
+    - claim_id: "mentorpi-nav2-map-mode-selection"
+      content: "MentorPi simulator navigation selects checksum-verified saved maps for map_server plus AMCL localization and otherwise falls back to slam_toolbox mapping; the two localization providers are conditionally exclusive."
+      target_section: "concepts/mentorpi-nav2-driving-logic-analysis"
+    - claim_id: "mentorpi-nav2-planning-and-control-stack"
+      content: "The current MentorPi Nav2 configuration uses NavfnPlanner with unknown-space traversal disabled, static/laser/inflation global costmap layers, a 4 m rolling local costmap, and Regulated Pure Pursuit path following at 15 Hz."
+      target_section: "concepts/mentorpi-nav2-driving-logic-analysis"
+    - claim_id: "mentorpi-nav2-command-safety-and-risks"
+      content: "The simulator translates map-frame GUI goals to NavigateToPose, forwards the intended /cmd_vel_nav output through a 0.35-second watchdog relay, and requires runtime verification of cmd_vel remapping plus standard Nav2 lifecycle and parameter alignment."
+      target_section: "concepts/mentorpi-nav2-driving-logic-analysis"
+  evidence_digest:
+    - "Static analysis of mentorpi_nav config, launch, goal bridge, velocity relay, map-session selection, SLAM configuration, compose launcher, README, and the preserved multi-robot Nav2 reference launch on 2026-08-05."
+    - "The attached refined page separates code-confirmed behavior from runtime-dependent risks, including absent local remap evidence for /cmd_vel_nav and default behavior-tree dependency."
+    - "Static verification passed: 9 mentorpi_nav unit/contract tests and 4 navigation-bundle tests. No Gazebo/Nav2 end-to-end run was performed."
+  lineage:
+    - page_path: "vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_nav/config/nav2.yaml"
+      sha256: "4cc864045f97df80e7f4fb4dd30169f6fe0128b589372756cbce83bf5c366130"
+    - page_path: "vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_nav/launch/navigation.launch.py"
+      sha256: "9e2e77b7964ae75badcf24e6af133520ada890110b3c9b26ed8da83ed073f9ee"
+    - page_path: "vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_nav/scripts/goal_bridge.py"
+      sha256: "813faf7483cbef3968e39d76e269267b9fe69a89a45baa8e230a5adbef2e624b"
+    - page_path: "vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_nav/scripts/cmd_vel_relay.py"
+      sha256: "533acb1ec044d11de6c092571c5cb31f2cebdd950cfce6105fd803d87a7c587b"
+    - page_path: "vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_nav/scripts/map_session.py"
+      sha256: "fe94a9d5e2143b26a3591969b65a2bc7286a087b71b31d9591ad89121423a55a"
+    - page_path: "vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_nav/scripts/run_navigation.sh"
+      sha256: "3382b1df23aa38e36462090f5979dda7507daa7236c031dee0e502ebf997b3ff"
+    - page_path: "vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/config/slam.yaml"
+      sha256: "cadda6ae65e74aff66aaa0f16b32111a7557d508593404615293dc6b768d1fb0"
+    - page_path: "artifacts/vehicle/raw/ros2_ws/src/mentorpi_navigation/launch/shared_map_navigation.launch.py"
+      sha256: "b9c36cf2afd1bf919f66f847c69b47f00f9f886daad077bd13af9d128acf3318"
+  confidence: medium
+  requested_target_pages:
+    - "concepts/mentorpi-nav2-driving-logic-analysis.md"
+  raw_transfer_policy: none
+  refined_pages:
+    - pack_path: "files/concepts/mentorpi-nav2-driving-logic-analysis.md"
+      target_path: "concepts/mentorpi-nav2-driving-logic-analysis.md"
+      sha256: "eac65e0614ea7c6237bac000bd6d1eaf9b4f3cc2aba76aad7347ae323110873f"
+  reviewer_required: true

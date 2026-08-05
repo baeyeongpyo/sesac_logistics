@@ -104,10 +104,30 @@ cd vehicle_simulator_model/ubuntu
 | mapper 로그 | `docker compose --profile mapping logs -f slam-mapper` | `Ctrl+C`는 log follow만 종료 |
 | mapper 안전 종료 | `./run.sh --env dev mapping-stop` | 지도 저장과 atomic publish 수행 |
 | 지도 검증 | `./run.sh --env dev mapping-status <session-id>` | named volume을 read-only로 검사 |
+| 자율주행 시작 | `./run.sh --env dev nav-up auto [session-id]` | 저장 지도가 있으면 AMCL, 없으면 SLAM으로 기동 |
+| 자율주행 상태 | `./run.sh --env dev nav-status` | 선택 모드와 Nav2 토픽 endpoint 확인 |
+| 자율주행 종료 | `./run.sh --env dev nav-down` | Nav2·목표점 bridge·속도 relay만 정지 |
 
 `docker compose up -d sim-adapter`도 Compose dependency에 의해 Gazebo와 Discovery Server를
 함께 시작한다. 다만 운영 절차와 GPU profile 처리를 일관되게 유지하려면 `./run.sh --env dev sim-up`을
 사용한다. mapper는 `docker compose up`으로 직접 시작하지 않는다.
+
+### Nav2 자율주행: 저장 지도 우선, SLAM 자동 전환
+
+`nav-up auto`는 `/slam-data`의 지도 세션을 먼저 checksum과 manifest로 검증한다. 유효한 세션이 있으면 `map_server + AMCL + Nav2`를 실행하고, 지정한 세션이 없거나 유효하지 않으면 `slam_toolbox + Nav2`로 전환한다. 두 모드가 동시에 `map → robot_1/odom` TF를 publish하지 않도록, 실행 중인 `slam-mapper`는 먼저 `mapping-stop`으로 안전 종료해야 한다.
+
+```bash
+# 기본: 가장 최근의 유효 세션으로 localization
+./run.sh --env dev nav-up auto
+
+# 특정 세션으로 localization. 세션이 없거나 훼손되면 SLAM 모드로 전환
+./run.sh --env dev nav-up auto warehouse-20260727-01
+./run.sh --env dev nav-status
+```
+
+Foxglove는 `ws://localhost:8765/`에 연결하고 3D panel의 Fixed frame을 `map`으로 선택한다. 저장 지도 모드에서는 먼저 `Publish` panel에서 `/initialpose` (`geometry_msgs/PoseWithCovarianceStamped`, frame_id=`map`)로 로봇의 대략적인 현재 위치와 heading을 한 번 지정한다. 그 다음 `Publish` panel에서 `/move_base_simple/goal` (`geometry_msgs/PoseStamped`, frame_id=`map`)을 발행하면 bridge가 Nav2 `/navigate_to_pose` Action으로 전달한다. Nav2의 `/cmd_vel_nav`은 watchdog relay를 거쳐 `/robot_1/controller/cmd_vel`로 전달되며, 명령이 끊기면 0.35초 후 정지 명령을 보낸다.
+
+SLAM fallback은 즉시 탐색·주행을 위한 임시 지도 모드다. 재사용할 지도가 필요하면 `nav-down` 후 `mapping-up <session-id>`와 `mapping-stop`으로 별도 세션을 저장하고, 다시 `nav-up auto <session-id>`를 실행한다.
 
 ### 케이스 1 — 개발 PC: 네이티브 Gazebo GUI
 
@@ -506,7 +526,7 @@ Linux firewall도 같은 노출 정책을 강제한다.
 ./run.sh --env server-viewer down
 ```
 
-`viewer-down`은 `gazebo-viewer`와 `web-gateway`만 중지한다. Task 6 runtime 검증은 이 viewer
+`viewer-down`은 `gazebo-viewer`, `web-gateway`, `foxglove-bridge`만 중지한다. Task 6 runtime 검증은 이 viewer
 lifecycle 변경이 `gazebo-server`와 `sim-adapter`를 중지시키지 않음을 확인했다. 따라서 이 두
 서비스의 viewer 장애 복구는 `viewer-down` 뒤 동일한 local/public 명령으로 viewer만 다시 올린다.
 반대로 `--env server-viewer down`은 전용 browser simulation stack을 중지하며, LAN stack의
@@ -616,8 +636,24 @@ docker run --rm -v mentorpi-slam-data:/slam-data -v "$PWD":/backup \
 
 ## 렌더링 경계
 
-서버는 카메라·라이다 등 시뮬레이션 센서에 필요한 오프스크린 렌더링만 수행한다. 현재
-Docker bundle에는 브라우저 Gazebo viewer, rosbridge, Foxglove bridge가 포함되어 있지 않다.
-따라서 서버 Compose 구성에는 X11, Xauthority, DISPLAY, 원격 GUI 전달 또는 외부 공개 웹
-포트가 없다. 개발 PC의 네이티브 GUI와 서버 headless 운영은 서로 분리되며, 브라우저
-모니터링은 별도 기능으로 구현해야 한다.
+서버는 카메라·라이다 등 시뮬레이션 센서에 필요한 오프스크린 렌더링만 수행한다. Docker
+bundle의 `viewer` profile은 브라우저 Gazebo viewer와 Foxglove Bridge를 제공하지만, X11,
+Xauthority, DISPLAY 또는 원격 GUI 전달은 사용하지 않는다.
+
+### Foxglove Studio 연결
+
+`viewer-up local`은 `foxglove-bridge`를 기존 internal `mentorpi` 네트워크의 Fast DDS discovery
+client로 실행한다. Docker Desktop의 loopback 포트 전달을 위해 Bridge는 `viewer-edge`에도
+연결하지만 ROS/DDS 서비스는 `mentorpi`에서만 발견한다. Foxglove WebSocket만 host loopback에
+공개하며, Foxglove Studio는 Docker 서비스가 아니라 개발 PC의 macOS 앱 또는 브라우저에서
+실행한다.
+
+```bash
+cp .env.server-viewer.example .env.server-viewer
+./run.sh --env server-viewer viewer-up local
+# Foxglove Studio에서 Foxglove WebSocket 연결: ws://localhost:8765
+```
+
+필요하면 `.env.server-viewer`에서 `FOXGLOVE_PORT`를 변경할 수 있다. public viewer 모드는
+Foxglove Bridge 포트를 공개하지 않는다. Gazebo Transport, ROS DDS, VNC/noVNC와 Foxglove
+WebSocket을 공용 인터넷에 직접 port-forward하지 않는다.

@@ -833,6 +833,9 @@ class DeployOnlyBundleTest(unittest.TestCase):
             '직접 호출로 public viewer를 올리는 것은 지원하지 않는다',
             'mapping session 환경은 mapper와 inspector에만 전달',
             'viewer lifecycle은 실행 중 mapper를 재생성하지 않는다',
+            'Foxglove Studio',
+            'ws://localhost:8765',
+            'Foxglove Bridge 포트를 공개하지 않는다',
         ):
             self.assertIn(text, readme)
 

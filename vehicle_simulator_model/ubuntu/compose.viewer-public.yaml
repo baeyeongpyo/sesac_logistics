@@ -1,4 +1,7 @@
 services:
+  foxglove-bridge:
+    ports: !reset []
+
   web-gateway:
     environment:
       VIEWER_SITE: "https://${VIEWER_DOMAIN:?set VIEWER_DOMAIN for automatic HTTPS}"
