@@ -123,7 +123,10 @@ configure_network_mode() {
         echo 'GZ_SERVER_IP is required when SIM_NETWORK_MODE=lan' >&2
         exit 2
       fi
-      COMPOSE+=( -f "$BUNDLE_DIR/compose.lan.yaml" )
+      COMPOSE+=(
+        -f "$BUNDLE_DIR/compose.foxglove.yaml"
+        -f "$BUNDLE_DIR/compose.lan.yaml"
+      )
       FOXGLOVE_COMPOSE+=( -f "$BUNDLE_DIR/compose.lan.yaml" )
       ;;
     *)
@@ -425,7 +428,7 @@ case "${RUN_COMMAND[0]}" in
     validate_session_id "${RUN_COMMAND[1]}"
     export SESSION_ID="${RUN_COMMAND[1]}"
     export IMAGE_VERSION="${IMAGE_VERSION-mentorpi-sim:harmonic}"
-    export GIT_COMMIT="${GIT_COMMIT-$(git -C "$BUNDLE_DIR" rev-parse HEAD)}"
+    export GIT_COMMIT="${GIT_COMMIT-$(git -C "$BUNDLE_DIR" rev-parse HEAD 2>/dev/null || printf 'unknown')}"
     export WORLD_VERSION="${WORLD_VERSION-warehouse-v1}"
     export MODEL_VERSION="${MODEL_VERSION-mentorpi-m1-v1}"
     export TF_CALIBRATION_VERSION="${TF_CALIBRATION_VERSION-ground-truth-v1}"

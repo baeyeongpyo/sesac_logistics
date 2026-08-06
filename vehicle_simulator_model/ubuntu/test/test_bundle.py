@@ -508,7 +508,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
             '[[ "${#RUN_COMMAND[@]}" -ne 2 ]]',
             'export SESSION_ID="${RUN_COMMAND[1]}"',
             'export IMAGE_VERSION="${IMAGE_VERSION-mentorpi-sim:harmonic}"',
-            'export GIT_COMMIT="${GIT_COMMIT-$(git -C "$BUNDLE_DIR" rev-parse HEAD)}"',
+            'export GIT_COMMIT="${GIT_COMMIT-$(git -C "$BUNDLE_DIR" rev-parse HEAD 2>/dev/null || printf \'unknown\')}"',
             'export WORLD_VERSION="${WORLD_VERSION-warehouse-v1}"',
             'export MODEL_VERSION="${MODEL_VERSION-mentorpi-m1-v1}"',
             'export TF_CALIBRATION_VERSION="${TF_CALIBRATION_VERSION-ground-truth-v1}"',

@@ -165,7 +165,8 @@ def main(args=None) -> None:
             self._static_entities = static_scene_from_sdf(world_sdf, models_root)
             self._dynamic_scene = DynamicScene()
             self._poses: dict[str, Pose] = {}
-            self._static_publisher.publish(self._update(self._static_entities, ()))
+            self._publish_static()
+            self.create_timer(1.0, self._publish_static)
             self.create_timer(0.1, self._publish_dynamic)
 
         def _update(self, entities, deleted_ids):
@@ -174,6 +175,9 @@ def main(args=None) -> None:
 
         def _on_poses(self, message: TFMessage) -> None:
             self._poses = _poses_from_tf(message)
+
+        def _publish_static(self) -> None:
+            self._static_publisher.publish(self._update(self._static_entities, ()))
 
         def _publish_dynamic(self) -> None:
             snapshot = self._dynamic_scene.snapshot(self._poses)

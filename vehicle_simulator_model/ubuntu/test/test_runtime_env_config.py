@@ -212,6 +212,31 @@ class RuntimeEnvConfigTest(unittest.TestCase):
         self.assertIn('compose.foxglove.yaml', docker_log)
         self.assertIn('<foxglove-bridge>', docker_log)
 
+    def test_mapping_up_uses_foxglove_base_before_lan_overlay(self):
+        result, docker_log = self.run_command(
+            'server',
+            'SIM_NETWORK_MODE=lan\nGZ_SERVER_IP=192.168.50.10\n',
+            {'GIT_COMMIT': 'test-commit'},
+            command=('mapping-up', 'warehouse-01'),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('compose.foxglove.yaml', docker_log)
+        self.assertLess(
+            docker_log.index('compose.foxglove.yaml'),
+            docker_log.index('compose.lan.yaml'),
+        )
+
+    def test_mapping_up_does_not_require_a_git_checkout(self):
+        result, _ = self.run_command(
+            'server',
+            'SIM_NETWORK_MODE=lan\nGZ_SERVER_IP=192.168.50.10\n',
+            command=('mapping-up', 'warehouse-01'),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('fatal: not a git repository', result.stderr)
+
     def test_foxglove_lifecycle_targets_only_the_bridge(self):
         result, docker_log = self.run_command(
             'dev',

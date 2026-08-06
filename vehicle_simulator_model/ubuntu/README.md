@@ -633,7 +633,7 @@ TCP 8765에 허용한다. Gazebo Transport와 ROS DDS discovery는 개발 PC나 
 `sim-adapter`는 warehouse SDF를 Foxglove의 표준 `SceneUpdate` 토픽으로 함께 발행한다.
 Foxglove 3D panel에서 `/warehouse_scene/static`과 `/warehouse_scene/dynamic`을 추가하면
 warehouse 구조물, `robot_1`·`robot_2`, 그리고 pallet/payload 상태를 볼 수 있다. 정적 장면은
-late-joiner도 받도록 durable QoS로 한 번 발행하며, 동적 장면은 10 Hz로 갱신된다.
+late-joiner도 받도록 durable QoS를 사용하고 1 Hz로 재발행하며, 동적 장면은 10 Hz로 갱신된다.
 
 두 장면은 `robot_1/odom` 기준이다. SLAM을 함께 실행 중이면 3D panel Fixed frame은 `map`으로,
 Gazebo만 실행 중이면 `robot_1/odom`으로 선택한다. `/warehouse/entity_poses`는 Gazebo의

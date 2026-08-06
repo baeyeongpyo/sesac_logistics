@@ -9,6 +9,7 @@ SIM_PACKAGE = WORKSPACE_SRC / 'mentorpi_gz_sim'
 WORLD = SIM_PACKAGE / 'worlds/warehouse.sdf'
 BRIDGE = SIM_PACKAGE / 'config/warehouse_scene_bridge.yaml'
 LAUNCH = SIM_PACKAGE / 'launch/sim_adapter.launch.py'
+PUBLISHER = SCENE_PACKAGE / 'mentorpi_foxglove_scene/sdf_scene_publisher.py'
 
 
 class SceneContractTest(unittest.TestCase):
@@ -39,6 +40,13 @@ class SceneContractTest(unittest.TestCase):
         self.assertIn("package='mentorpi_foxglove_scene'", text)
         self.assertIn("executable='sdf_scene_publisher'", text)
         self.assertIn("'frame_id': 'robot_1/odom'", text)
+
+    def test_static_scene_is_republished_for_late_foxglove_subscribers(self):
+        text = PUBLISHER.read_text()
+
+        self.assertIn('self._publish_static()', text)
+        self.assertIn('self.create_timer(1.0, self._publish_static)', text)
+        self.assertIn('def _publish_static(self) -> None:', text)
 
 
 if __name__ == '__main__':
