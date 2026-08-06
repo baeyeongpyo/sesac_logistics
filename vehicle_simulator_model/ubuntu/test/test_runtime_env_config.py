@@ -167,8 +167,8 @@ class RuntimeEnvConfigTest(unittest.TestCase):
             'topics',
             'test',
             'fork-up',
-            'viewer-down',
-            'viewer-logs',
+            'foxglove-down',
+            'foxglove-logs',
             'mapping-stop',
             'help',
         ):
@@ -202,15 +202,26 @@ class RuntimeEnvConfigTest(unittest.TestCase):
         self.assertIn('optional gpu', result.stderr)
         self.assertEqual(docker_log, '')
 
-    def test_viewer_up_rejects_explicit_empty_tail_before_docker(self):
+    def test_sim_up_uses_bridge_compose_and_starts_foxglove(self):
         result, docker_log = self.run_command(
-            'dev1',
-            'SIM_NETWORK_MODE=internal\n',
-            command=('viewer-up', ''),
+            'server',
+            'SIM_NETWORK_MODE=lan\nGZ_SERVER_IP=192.168.50.10\n',
         )
-        self.assertEqual(result.returncode, 2)
-        self.assertIn('local or public', result.stderr)
-        self.assertEqual(docker_log, '')
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('compose.foxglove.yaml', docker_log)
+        self.assertIn('<foxglove-bridge>', docker_log)
+
+    def test_foxglove_lifecycle_targets_only_the_bridge(self):
+        result, docker_log = self.run_command(
+            'dev',
+            'SIM_NETWORK_MODE=internal\n',
+            command=('foxglove-down',),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('<stop>\n<foxglove-bridge>', docker_log)
+        self.assertNotIn('<gazebo-server>', docker_log)
 
     def test_blank_profile_image_overrides_inherited_image_and_default(self):
         result, docker_log = self.run_command(
@@ -223,35 +234,6 @@ class RuntimeEnvConfigTest(unittest.TestCase):
         self.assertIn('<--tag>\n<>\n', docker_log)
         self.assertNotIn('registry.example/inherited:latest', docker_log)
         self.assertNotIn('mentorpi-sim:harmonic', docker_log)
-
-    def test_server_viewer_template_starts_local_viewer_with_internal_profile(self):
-        template = BUNDLE / '.env.server-viewer.example'
-        if not template.is_file():
-            self.fail('.env.server-viewer.example is required')
-
-        profile = dict(
-            line.split('=', 1)
-            for line in template.read_text().splitlines()
-            if line and not line.startswith('#')
-        )
-        self.assertEqual(profile['SIM_NETWORK_MODE'], 'internal')
-        self.assertEqual(profile['MENTORPI_IMAGE'], 'mentorpi-sim:harmonic')
-        self.assertEqual(profile['TARGET_PLATFORM'], 'linux/amd64')
-        self.assertEqual(
-            profile['COMPOSE_PROJECT_NAME'],
-            'mentorpi-server-viewer',
-        )
-
-        result, docker_log = self.run_command(
-            'server-viewer',
-            template.read_text(),
-            {'SIM_NETWORK_MODE': 'lan'},
-            command=('viewer-up', 'local'),
-        )
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('compose.viewer.yaml', docker_log)
-        self.assertIn('<up>\n<-d>\n<--wait>\n', docker_log)
 
     def test_fork_up_error_uses_named_profile_sim_up_guidance(self):
         result, _ = self.run_command(

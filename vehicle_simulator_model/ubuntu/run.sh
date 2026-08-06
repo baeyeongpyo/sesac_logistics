@@ -53,7 +53,7 @@ validate_command_arity() {
   done
 
   case "${RUN_COMMAND[0]}" in
-    build|down|logs|topics|test|fork-up|viewer-down|viewer-logs|mapping-stop|nav-down|nav-status|gz-server|gz-gui|help|-h|--help)
+    build|down|logs|topics|test|fork-up|foxglove-down|foxglove-logs|mapping-stop|nav-down|nav-status|gz-server|gz-gui|help|-h|--help)
       if [[ "${#RUN_COMMAND[@]}" -ne 1 ]]; then
         echo "${RUN_COMMAND[0]} does not accept arguments" >&2
         return 2
@@ -68,22 +68,6 @@ validate_command_arity() {
         && "${RUN_COMMAND[1]}" != 'gpu' ]]; then
         echo 'sim-up accepts only the optional gpu profile' >&2
         return 2
-      fi
-      ;;
-    viewer-up)
-      if [[ "${#RUN_COMMAND[@]}" -gt 2 ]]; then
-        echo 'viewer-up accepts only local or public' >&2
-        return 2
-      fi
-      if [[ "${#RUN_COMMAND[@]}" -eq 2 ]]; then
-        case "${RUN_COMMAND[1]}" in
-          local|public)
-            ;;
-          *)
-            echo 'viewer mode must be local or public' >&2
-            return 2
-            ;;
-        esac
       fi
       ;;
     mapping-up|mapping-status)
@@ -124,11 +108,10 @@ fi
 
 export MENTORPI_IMAGE="${MENTORPI_IMAGE-mentorpi-sim:harmonic}"
 COMPOSE=(docker compose --env-file "$PROFILE_FILE" -f "$BUNDLE_DIR/compose.yaml")
-viewer_compose=(
+FOXGLOVE_COMPOSE=(
   docker compose --env-file "$PROFILE_FILE"
   -f "$BUNDLE_DIR/compose.yaml"
-  -f "$BUNDLE_DIR/compose.viewer.yaml"
-  --profile viewer
+  -f "$BUNDLE_DIR/compose.foxglove.yaml"
 )
 
 configure_network_mode() {
@@ -141,6 +124,7 @@ configure_network_mode() {
         exit 2
       fi
       COMPOSE+=( -f "$BUNDLE_DIR/compose.lan.yaml" )
+      FOXGLOVE_COMPOSE+=( -f "$BUNDLE_DIR/compose.lan.yaml" )
       ;;
     *)
       echo 'SIM_NETWORK_MODE must be internal or lan' >&2
@@ -227,136 +211,6 @@ validate_mapping_reconnect_timeout() {
   fi
 }
 
-validate_public_viewer() {
-  local normalized_allowlist
-  local normalized_domain
-  local validation_status
-
-  : "${VIEWER_DOMAIN:?VIEWER_DOMAIN is required for public viewer}"
-  : "${VIEWER_ALLOW_CIDRS:?VIEWER_ALLOW_CIDRS is required for public viewer}"
-
-  # Public domains are ASCII FQDNs without a trailing dot; IDNs use A-labels.
-  if normalized_domain="$(
-    VIEWER_DOMAIN_RAW="$VIEWER_DOMAIN" python3 - <<'PY'
-import ipaddress
-import os
-import re
-import sys
-
-domain = os.environ['VIEWER_DOMAIN_RAW']
-label_pattern = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?')
-
-if (
-    not domain.isascii()
-    or len(domain) > 253
-    or domain.endswith('.')
-    or len(domain.split('.')) < 2
-    or any(
-        not label_pattern.fullmatch(label)
-        for label in domain.split('.')
-    )
-):
-    sys.exit(1)
-
-try:
-    ipaddress.ip_address(domain)
-except ValueError:
-    pass
-else:
-    sys.exit(1)
-
-print(domain.lower())
-PY
-  )"; then
-    VIEWER_DOMAIN="$normalized_domain"
-  else
-    echo 'VIEWER_DOMAIN must be an ASCII DNS hostname without a trailing dot' >&2
-    exit 2
-  fi
-
-  if [[ ! "$VIEWER_ALLOW_CIDRS" =~ [^[:space:]] ]]; then
-    echo 'VIEWER_ALLOW_CIDRS is required for public viewer' >&2
-    exit 2
-  fi
-
-  if normalized_allowlist="$(
-    VIEWER_ALLOW_CIDRS_RAW="$VIEWER_ALLOW_CIDRS" python3 - <<'PY'
-import ipaddress
-import os
-import sys
-
-raw_allowlist = os.environ['VIEWER_ALLOW_CIDRS_RAW']
-if (
-    not raw_allowlist.isascii()
-    or any((ord(character) < 32 and character != '\t')
-           or ord(character) == 127
-           for character in raw_allowlist)
-):
-    sys.exit(1)
-
-normalized = []
-for token in raw_allowlist.replace('\t', ' ').split(' '):
-    if not token:
-        continue
-    if '%' in token:
-        sys.exit(1)
-    try:
-        if '/' in token:
-            value = ipaddress.ip_network(token, strict=True)
-            if value.prefixlen == 0:
-                sys.exit(3)
-        else:
-            value = ipaddress.ip_address(token)
-    except ValueError:
-        sys.exit(1)
-    normalized.append(str(value))
-
-if not normalized:
-    sys.exit(1)
-
-print(' '.join(normalized))
-PY
-  )"; then
-    VIEWER_ALLOW_CIDRS="$normalized_allowlist"
-  else
-    validation_status="$?"
-    if [[ "$validation_status" -eq 3 ]]; then
-      echo 'public viewer does not allow unrestricted CIDRs' >&2
-    else
-      echo 'VIEWER_ALLOW_CIDRS must be a space- or tab-separated list of valid IP addresses or CIDRs' >&2
-    fi
-    exit 2
-  fi
-
-  export VIEWER_DOMAIN VIEWER_ALLOW_CIDRS
-}
-
-require_viewer_compose_version() {
-  local compose_version
-
-  if ! compose_version="$(docker compose --env-file "$PROFILE_FILE" version --short 2>/dev/null)"; then
-    echo 'viewer-up requires Docker Compose 2.24.4 or newer' >&2
-    return 2
-  fi
-
-  if ! COMPOSE_VERSION_RAW="$compose_version" python3 - <<'PY'
-import os
-import re
-import sys
-
-match = re.fullmatch(
-    r'v?([0-9]+)\.([0-9]+)\.([0-9]+)(?:[-+].*)?',
-    os.environ['COMPOSE_VERSION_RAW'].strip(),
-)
-if not match or tuple(map(int, match.groups())) < (2, 24, 4):
-    sys.exit(1)
-PY
-  then
-    echo "viewer-up requires Docker Compose 2.24.4 or newer (found ${compose_version})" >&2
-    return 2
-  fi
-}
-
 wait_for_mapper_exit() {
   local mapper_id="$1"
   local timeout_seconds="$2"
@@ -425,9 +279,9 @@ Usage: ./run.sh --env <profile> <command>
 
 Commands:
   build              Build the immutable linux/amd64 MentorPi image.
-  sim-up [gpu]       Start Gazebo and the ROS adapter in the background.
-  down               Stop and remove the simulation services.
-  logs               Follow Gazebo and adapter service logs.
+  sim-up [gpu]       Start Gazebo, ROS adapter, and Foxglove Bridge.
+  down               Stop and remove simulation and Foxglove services.
+  logs               Follow Gazebo, adapter, and Foxglove Bridge logs.
   topics             List ROS topics from the running adapter.
   test               Run static checks and validate the runtime image.
   fork-up             Publish the robot_1 fork target height of 0.11 m.
@@ -437,9 +291,8 @@ Commands:
   nav-up auto [id]    Start Nav2 with a verified map ID or SLAM fallback.
   nav-down             Stop Nav2 without stopping the simulation.
   nav-status           Show Nav2 topic-endpoint and selected-mode diagnostics.
-  viewer-up [local|public] Start read-only Gazebo browser monitoring.
-  viewer-down              Stop viewer services without stopping simulation.
-  viewer-logs              Follow viewer and gateway logs.
+  foxglove-down            Stop Foxglove Bridge without stopping simulation.
+  foxglove-logs            Follow Foxglove Bridge logs.
   gz-server                 Start the native Gazebo server from the selected profile.
   gz-gui                    Connect the native Gazebo GUI using the selected profile.
 EOF
@@ -454,58 +307,21 @@ case "${RUN_COMMAND[0]}" in
     if [[ "${#RUN_COMMAND[@]}" -eq 2 ]]; then
       prepare_gpu
       COMPOSE+=( -f "$BUNDLE_DIR/compose.gpu.yaml" )
+      FOXGLOVE_COMPOSE+=( -f "$BUNDLE_DIR/compose.gpu.yaml" )
     fi
-    "${COMPOSE[@]}" up -d dds-discovery gazebo-server sim-adapter
+    "${FOXGLOVE_COMPOSE[@]}" up -d dds-discovery gazebo-server sim-adapter foxglove-bridge
     ;;
   down)
-    "${COMPOSE[@]}" down
+    "${FOXGLOVE_COMPOSE[@]}" down
     ;;
   logs)
-    "${COMPOSE[@]}" logs -f dds-discovery gazebo-server sim-adapter
+    "${FOXGLOVE_COMPOSE[@]}" logs -f dds-discovery gazebo-server sim-adapter foxglove-bridge
     ;;
-  viewer-up)
-    if [[ "${#RUN_COMMAND[@]}" -gt 2 ]]; then
-      echo 'viewer-up accepts only local or public' >&2
-      exit 2
-    fi
-    if [[ "${SIM_NETWORK_MODE-internal}" != 'internal' ]]; then
-      echo 'viewer-up requires SIM_NETWORK_MODE=internal' >&2
-      exit 2
-    fi
-    if [[ "${#RUN_COMMAND[@]}" -eq 2 ]]; then
-      viewer_mode="${RUN_COMMAND[1]}"
-    else
-      viewer_mode="${VIEWER_MODE-local}"
-    fi
-    case "$viewer_mode" in
-      local)
-        ;;
-      public)
-        validate_public_viewer
-        viewer_compose+=( -f "$BUNDLE_DIR/compose.viewer-public.yaml" )
-        ;;
-      *)
-        echo 'viewer mode must be local or public' >&2
-        exit 2
-        ;;
-    esac
-    require_viewer_compose_version
-    "${viewer_compose[@]}" up -d --wait \
-      dds-discovery gazebo-server sim-adapter foxglove-bridge gazebo-viewer web-gateway
+  foxglove-down)
+    "${FOXGLOVE_COMPOSE[@]}" stop foxglove-bridge
     ;;
-  viewer-down)
-    if [[ "${#RUN_COMMAND[@]}" -ne 1 ]]; then
-      echo 'viewer-down does not accept arguments' >&2
-      exit 2
-    fi
-    "${viewer_compose[@]}" stop web-gateway gazebo-viewer foxglove-bridge
-    ;;
-  viewer-logs)
-    if [[ "${#RUN_COMMAND[@]}" -ne 1 ]]; then
-      echo 'viewer-logs does not accept arguments' >&2
-      exit 2
-    fi
-    "${viewer_compose[@]}" logs -f gazebo-viewer web-gateway foxglove-bridge
+  foxglove-logs)
+    "${FOXGLOVE_COMPOSE[@]}" logs -f foxglove-bridge
     ;;
   gz-server)
     prepare_native_gz
@@ -542,9 +358,9 @@ case "${RUN_COMMAND[0]}" in
       -p 'test_*.py' -v
 
     printf 'mentorpi test stage=compose-config\n'
-    "${COMPOSE[@]}" config --quiet
+    "${FOXGLOVE_COMPOSE[@]}" config --quiet
     RENDER_GID="${RENDER_GID-0}" \
-      "${COMPOSE[@]}" -f "$BUNDLE_DIR/compose.gpu.yaml" config --quiet
+      "${FOXGLOVE_COMPOSE[@]}" -f "$BUNDLE_DIR/compose.gpu.yaml" config --quiet
 
     printf 'mentorpi test stage=runtime-ctest\n'
     "${COMPOSE[@]}" run --rm --no-deps gazebo-server bash -lc \
