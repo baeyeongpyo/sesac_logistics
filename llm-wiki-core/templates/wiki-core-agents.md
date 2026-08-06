@@ -46,5 +46,6 @@ caller-managed and are not pruned by the default retention policy.
 
 - Do not directly mutate Team/Project wiki artifacts.
 - Project/Team truth changes require promotion package review and a new artifact publish.
+- Do not create, validate, submit, review, or publish a promotion package unless the user explicitly requests promotion. By default, leave pending or local wiki data unpromoted.
 - Do not ingest instruction/schema/generated files as normal wiki knowledge unless explicitly requested as schema/instruction context.
 - Apply the mutation, promotion, artifact, conflict, and source-binding rules from the `llm-wiki-core` documents above.
