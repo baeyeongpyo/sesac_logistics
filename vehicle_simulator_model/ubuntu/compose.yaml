@@ -37,6 +37,15 @@ services:
       <<: *runtime-environment
       SERVICE_NAME: gazebo-server
     command: ros2 launch mentorpi_gz_sim gazebo_server.launch.py
+    volumes:
+      - type: bind
+        source: ./ros2_ws/src/mentorpi_gz_sim/worlds
+        target: /opt/mentorpi_ws/install/mentorpi_gz_sim/share/mentorpi_gz_sim/worlds
+        read_only: true
+      - type: bind
+        source: ./ros2_ws/src/mentorpi_gz_sim/models
+        target: /opt/mentorpi_ws/install/mentorpi_gz_sim/share/mentorpi_gz_sim/models
+        read_only: true
     healthcheck:
       test: ['CMD', '/usr/local/bin/mentorpi-healthcheck', 'server']
       interval: 10s
@@ -51,6 +60,15 @@ services:
       SERVICE_NAME: sim-adapter
       GZ_RELAY_HOST: gazebo-server
     command: ros2 launch mentorpi_gz_sim sim_adapter.launch.py
+    volumes:
+      - type: bind
+        source: ./ros2_ws/src/mentorpi_gz_sim/worlds
+        target: /opt/mentorpi_ws/install/mentorpi_gz_sim/share/mentorpi_gz_sim/worlds
+        read_only: true
+      - type: bind
+        source: ./ros2_ws/src/mentorpi_gz_sim/models
+        target: /opt/mentorpi_ws/install/mentorpi_gz_sim/share/mentorpi_gz_sim/models
+        read_only: true
     depends_on:
       dds-discovery:
         condition: service_started

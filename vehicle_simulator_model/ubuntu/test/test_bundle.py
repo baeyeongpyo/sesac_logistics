@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import yaml
+
 
 BUNDLE = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = BUNDLE.parents[1]
@@ -81,6 +83,36 @@ class DeployOnlyBundleTest(unittest.TestCase):
         self.assertNotIn('GZ_RELAY_HOST', gazebo_server)
         for forbidden in ('GZ_RELAY:', 'ipv4_address:', 'network_mode: host'):
             self.assertNotIn(forbidden, compose)
+
+    def test_gazebo_services_bind_runtime_sdf_assets_read_only(self):
+        compose = yaml.safe_load((BUNDLE / 'compose.yaml').read_text())
+        expected_mounts = [
+            {
+                'type': 'bind',
+                'source': './ros2_ws/src/mentorpi_gz_sim/worlds',
+                'target': (
+                    '/opt/mentorpi_ws/install/mentorpi_gz_sim/share/'
+                    'mentorpi_gz_sim/worlds'
+                ),
+                'read_only': True,
+            },
+            {
+                'type': 'bind',
+                'source': './ros2_ws/src/mentorpi_gz_sim/models',
+                'target': (
+                    '/opt/mentorpi_ws/install/mentorpi_gz_sim/share/'
+                    'mentorpi_gz_sim/models'
+                ),
+                'read_only': True,
+            },
+        ]
+
+        for service in ('gazebo-server', 'sim-adapter'):
+            with self.subTest(service=service):
+                self.assertEqual(
+                    compose['services'][service].get('volumes', []),
+                    expected_mounts,
+                )
 
     def test_entrypoint_resolves_relay_ipv4_or_fails_fast(self):
         entrypoint = (BUNDLE / 'entrypoint.sh').read_text()
