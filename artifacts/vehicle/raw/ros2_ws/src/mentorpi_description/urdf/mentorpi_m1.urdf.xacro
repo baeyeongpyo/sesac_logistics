@@ -1,0 +1,51 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="mentorpi_m1">
+  <xacro:arg name="robot_name" default="robot_1"/>
+  <xacro:arg name="frame_prefix" default="robot_1/"/>
+  <xacro:arg name="fork_enabled" default="false"/>
+  <xacro:property name="robot_name" value="$(arg robot_name)"/>
+  <xacro:property name="frame_prefix" value="$(arg frame_prefix)"/>
+  <xacro:property name="fork_enabled" value="$(arg fork_enabled)"/>
+  <xacro:property name="chassis_length" value="0.212"/>
+  <xacro:property name="chassis_width" value="0.171"/>
+  <xacro:property name="chassis_height" value="0.147"/>
+
+  <link name="base_footprint"/>
+  <joint name="base_joint" type="fixed">
+    <parent link="base_footprint"/><child link="base_link"/>
+    <origin xyz="0 0 0.0735"/>
+  </joint>
+  <link name="base_link">
+    <inertial><mass value="2.4"/><origin xyz="0 0 0"/>
+      <inertia ixx="0.010" ixy="0" ixz="0" iyy="0.012" iyz="0" izz="0.018"/></inertial>
+    <collision><geometry><box size="${chassis_length} ${chassis_width} ${chassis_height}"/></geometry></collision>
+    <visual><geometry><box size="${chassis_length} ${chassis_width} ${chassis_height}"/></geometry>
+      <material name="mentorpi_blue"><color rgba="0.04 0.28 0.62 1"/></material></visual>
+  </link>
+
+  <xacro:macro name="wheel" params="name x y">
+    <link name="${name}_wheel">
+      <visual><origin rpy="1.5708 0 0"/><geometry><cylinder radius="0.032" length="0.024"/></geometry>
+        <material name="wheel_black"><color rgba="0.03 0.03 0.03 1"/></material></visual>
+    </link>
+    <joint name="${name}_wheel_joint" type="fixed"><parent link="base_link"/><child link="${name}_wheel"/>
+      <origin xyz="${x} ${y} -0.042"/></joint>
+  </xacro:macro>
+  <xacro:wheel name="front_left" x="0.070" y="0.094"/>
+  <xacro:wheel name="front_right" x="0.070" y="-0.094"/>
+  <xacro:wheel name="rear_left" x="-0.070" y="0.094"/>
+  <xacro:wheel name="rear_right" x="-0.070" y="-0.094"/>
+
+  <link name="base_laser"><visual><geometry><cylinder radius="0.032" length="0.025"/></geometry>
+    <material name="laser_black"><color rgba="0.06 0.06 0.06 1"/></material></visual></link>
+  <joint name="laser_joint" type="fixed"><parent link="base_link"/><child link="base_laser"/>
+    <origin xyz="0.055 0 0.100"/></joint>
+
+  <link name="depth_camera_link"><visual><geometry><box size="0.045 0.055 0.025"/></geometry>
+    <material name="camera_black"><color rgba="0.02 0.02 0.02 1"/></material></visual></link>
+  <joint name="depth_camera_joint" type="fixed"><parent link="base_link"/><child link="depth_camera_link"/>
+    <origin xyz="0.108 0 0.055"/></joint>
+  <link name="imu_link"/>
+  <joint name="imu_joint" type="fixed"><parent link="base_link"/><child link="imu_link"/></joint>
+
+</robot>
