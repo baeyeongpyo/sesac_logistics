@@ -4,6 +4,7 @@
 # local mutable wiki
 # Project/Team artifact로 승격하기 전의 개인/프로젝트 작업 영역이다.
 llm-wiki/
+promotion-shelf/
 
 # generated llm-wiki-core runtime outputs
 # context bundle은 현재 wiki 상태에서 재생성되는 산출물이다.
@@ -29,6 +30,8 @@ Thumbs.db
 !.agent-os/**
 !llm-wiki-promotion-queue/
 !llm-wiki-promotion-queue/**
+!promotion-packages/
+!promotion-packages/**
 
 # keep shared agent hook configs tracked when used
 !.codex/
@@ -37,3 +40,10 @@ Thumbs.db
 !.claude/settings.json
 !.agents/
 !.agents/hooks.json
+docs/superpowers/
+.superpowers/
+.worktrees/
+.env
+.env.*
+!.env.*.example
+.venv
