@@ -17,6 +17,29 @@ BUNDLE = Path(__file__).resolve().parents[1]
 
 
 class ObservationBundleTest(unittest.TestCase):
+    def test_foxglove_bridge_has_no_browser_proxy_dependencies(self):
+        bridge_path = BUNDLE / 'compose.foxglove.yaml'
+        self.assertTrue(bridge_path.is_file())
+
+        bridge = bridge_path.read_text()
+        lan = (BUNDLE / 'compose.lan.yaml').read_text()
+
+        for required in (
+            'foxglove-bridge:',
+            '127.0.0.1:${FOXGLOVE_PORT-8765}:8765',
+            'DDS_SUPER_CLIENT: "1"',
+            'sim-adapter:',
+            'condition: service_healthy',
+        ):
+            self.assertIn(required, bridge)
+        for required in (
+            'foxglove-bridge:',
+            'network_mode: host',
+            'DDS_DISCOVERY_HOST: 127.0.0.1',
+            'ports: !reset []',
+        ):
+            self.assertIn(required, lan)
+
     def start_fake_viewer_server(self, mode):
         listener = socket.socket()
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

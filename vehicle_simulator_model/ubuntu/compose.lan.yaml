@@ -17,6 +17,13 @@ services:
       GZ_RELAY_HOST: ""
       DDS_DISCOVERY_HOST: 127.0.0.1
 
+  foxglove-bridge:
+    network_mode: host
+    networks: !reset []
+    environment:
+      DDS_DISCOVERY_HOST: 127.0.0.1
+    ports: !reset []
+
   slam-data-init:
     network_mode: host
     networks: !reset []

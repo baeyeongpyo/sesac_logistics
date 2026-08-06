@@ -1,0 +1,22 @@
+services:
+  foxglove-bridge:
+    image: "${MENTORPI_IMAGE-mentorpi-sim:harmonic}"
+    platform: ${TARGET_PLATFORM-linux/amd64}
+    restart: unless-stopped
+    networks: [mentorpi]
+    environment:
+      GZ_PARTITION: mentorpi-sim
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID-0}"
+      DDS_DISCOVERY_HOST: dds-discovery
+      DDS_DISCOVERY_PORT: "11811"
+      FASTDDS_BUILTIN_TRANSPORTS: "UDPv4"
+      DDS_SUPER_CLIENT: "1"
+      SERVICE_NAME: foxglove-bridge
+      IMAGE_VERSION: "${MENTORPI_IMAGE-mentorpi-sim:harmonic}"
+      ROBOT_IDS: robot_1,robot_2
+    command: ros2 launch foxglove_bridge foxglove_bridge_launch.xml
+    depends_on:
+      sim-adapter:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${FOXGLOVE_PORT-8765}:8765"
