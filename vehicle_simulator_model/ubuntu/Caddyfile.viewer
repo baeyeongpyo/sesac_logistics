@@ -1,9 +1,0 @@
-{$VIEWER_SITE:http://:8080} {
-  @allowed remote_ip {$VIEWER_ALLOW_CIDRS}
-
-  handle @allowed {
-    reverse_proxy gazebo-viewer:6080
-  }
-
-  respond 403
-}

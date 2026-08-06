@@ -333,15 +333,15 @@ class DeployOnlyBundleTest(unittest.TestCase):
             compose,
         )
 
-    def test_mapping_session_does_not_change_viewer_simulation_services(self):
+    def test_mapping_session_does_not_change_foxglove_simulation_services(self):
         base_files = ['-f', str(BUNDLE / 'compose.yaml')]
         mapping_env = os.environ.copy()
         mapping_env.update({
             'SESSION_ID': 'active-mapping-session',
             'SLAM_VOLUME_NAME': 'mentorpi-test-isolated-slam-data',
         })
-        viewer_env = mapping_env.copy()
-        viewer_env.pop('SESSION_ID')
+        foxglove_env = mapping_env.copy()
+        foxglove_env.pop('SESSION_ID')
 
         mapping_result = subprocess.run(
             [
@@ -353,26 +353,26 @@ class DeployOnlyBundleTest(unittest.TestCase):
             capture_output=True,
             check=False,
         )
-        viewer_result = subprocess.run(
+        foxglove_result = subprocess.run(
             [
                 'docker', 'compose', *base_files,
-                '-f', str(BUNDLE / 'compose.viewer.yaml'),
-                '--profile', 'viewer', 'config', '--format', 'json',
+                '-f', str(BUNDLE / 'compose.foxglove.yaml'),
+                'config', '--format', 'json',
             ],
-            env=viewer_env,
+            env=foxglove_env,
             text=True,
             capture_output=True,
             check=False,
         )
 
         self.assertEqual(mapping_result.returncode, 0, mapping_result.stderr)
-        self.assertEqual(viewer_result.returncode, 0, viewer_result.stderr)
+        self.assertEqual(foxglove_result.returncode, 0, foxglove_result.stderr)
         mapping = json.loads(mapping_result.stdout)
-        viewer = json.loads(viewer_result.stdout)
+        foxglove = json.loads(foxglove_result.stdout)
         for service in ('dds-discovery', 'gazebo-server', 'sim-adapter'):
             self.assertEqual(
                 mapping['services'][service],
-                viewer['services'][service],
+                foxglove['services'][service],
             )
             self.assertNotIn(
                 'SESSION_ID',
@@ -382,10 +382,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'SESSION_ID',
             mapping['services']['slam-data-init']['environment'],
         )
-        self.assertNotIn(
-            'SESSION_ID',
-            viewer['services']['gazebo-viewer']['environment'],
-        )
+        self.assertNotIn('SESSION_ID', foxglove['services']['foxglove-bridge']['environment'])
         for service in ('slam-mapper', 'slam-inspector'):
             self.assertEqual(
                 mapping['services'][service]['environment']['SESSION_ID'],
@@ -718,7 +715,8 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'healthcheck.sh',
             'run.sh',
             'README.md',
-            '.env.server-viewer.example',
+            '.env.server.example',
+            'compose.foxglove.yaml',
             'ros2_ws/src/mentorpi_description/package.xml',
             'ros2_ws/src/mentorpi_gz_sim/package.xml',
         ):
@@ -789,6 +787,24 @@ class DeployOnlyBundleTest(unittest.TestCase):
         for removed in ('ros-humble-ros-gz \\', 'VirtualGL', 'x11-apps', 'xauth', 'dbus-x11'):
             self.assertNotIn(removed, dockerfile)
         self.assertFalse((BUNDLE / 'vendor/virtualgl_3.1.4_amd64.deb').exists())
+
+    def test_runtime_contains_only_direct_foxglove_observation_assets(self):
+        for removed in (
+            'Caddyfile.viewer',
+            'compose.viewer.yaml',
+            'compose.viewer-public.yaml',
+            'viewer-entrypoint.sh',
+            '.env.server-viewer.example',
+        ):
+            self.assertFalse((BUNDLE / removed).exists(), removed)
+
+        dockerfile = (BUNDLE / 'Dockerfile').read_text()
+        for removed_package in ('novnc', 'websockify', 'x11vnc', 'xvfb'):
+            self.assertNotIn(removed_package, dockerfile)
+
+        readme = (BUNDLE / 'README.md').read_text()
+        self.assertIn('ws://<server-lan-ip>:8765', readme)
+        self.assertIn('TCP 8765', readme)
 
     def test_repository_has_no_duplicate_root_runtime_layout(self):
         for legacy_path in ('docker', 'ros2_ws', 'compose.yaml', 'test'):
@@ -867,29 +883,19 @@ class DeployOnlyBundleTest(unittest.TestCase):
         readme = (BUNDLE / 'README.md').read_text()
         for text in (
             '.env.server',
-            '.env.server-viewer',
             'GZ_SERVER_IP',
-            'scripts/gz-gui-connect.sh',
-            './run.sh --env server-viewer viewer-up local',
-            './run.sh --env server-viewer viewer-up public',
-            '자체 internal stack',
-            'Docker Compose 2.24.4',
-            'VIEWER_DOMAIN',
-            'VIEWER_ALLOW_CIDRS',
-            'read-only',
-            '동시에 접속',
-            'Gazebo Transport를 공용 인터넷에 공개하지 않는다',
-            '허용 CIDR 외 요청은 HTTP 403',
-            '`0.0.0.0/0`와 `::/0`은 거부된다',
-            'noVNC 6080, VNC 5900, Gazebo Transport, ROS DDS는 절대로 port-forward하지 않는다',
-            '직접 호출로 public viewer를 올리는 것은 지원하지 않는다',
-            'mapping session 환경은 mapper와 inspector에만 전달',
-            'viewer lifecycle은 실행 중 mapper를 재생성하지 않는다',
+            './run.sh --env server foxglove-logs',
+            './run.sh --env server foxglove-down',
+            'ws://<server-lan-ip>:8765',
+            'TCP 8765',
+            'Gazebo Transport와 ROS DDS discovery는 개발 PC나 공용 인터넷에 직접',
             'Foxglove Studio',
-            'ws://localhost:8765',
-            'Foxglove Bridge 포트를 공개하지 않는다',
+            '별도 web image',
         ):
             self.assertIn(text, readme)
+
+        for removed in ('server-viewer', 'viewer-up', 'viewer-down'):
+            self.assertNotIn(removed, readme)
 
         old_plan = (
             REPOSITORY_ROOT
@@ -910,7 +916,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
         for text in (
             '`--env server`는 LAN 모드',
             'host networking',
-            '`--env dev`와 `--env server-viewer`만 Docker 내부 모드',
+            '`--env dev`는 Docker 내부 모드',
             '`.env.server`의 `MENTORPI_IMAGE`',
             '그 정확한 reference를 `docker pull`',
         ):

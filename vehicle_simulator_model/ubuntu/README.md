@@ -13,9 +13,8 @@ Mac에서는 Docker 컨테이너 GUI 대신 네이티브 Gazebo GUI 개발 환�
 MentorPi 서버에서 센서와 물리 시뮬레이션을 운영하기 위한 `linux/amd64` 이미지다.
 
 Mac Docker Desktop에서 `scripts/gz-gui-connect.sh`의 Gazebo Transport preflight가 `exit 4`로
-끝나면 direct Gazebo GUI transport는 **UNSUPPORTED**다. 이 결과는 내부 네트워크와 외부 포트
-비공개 계약을 바꾸어 우회하지 않는다. Mac Docker Desktop에서 native `gz sim -g` transport를
-사용할 수 없으므로 Task 4 browser viewer 제공 후 이를 사용한다.
+끝나면 direct Gazebo GUI transport는 **UNSUPPORTED**다. 이 경우에도 시뮬레이션은 Linux 서버에서
+계속 실행하고, 개발 PC의 Foxglove Studio를 사내망 Bridge에 연결해 관찰한다.
 
 모든 launcher 명령은 명시적인 named profile을 요구한다. profile 값은 이미 export된 환경
 변수보다 우선하며, launcher는 legacy bare `.env`를 읽지 않는다. 개발 PC에서는
@@ -35,9 +34,7 @@ cp .env.server.example .env.server
 # Edit GZ_SERVER_IP to this server's LAN or VPN IP.
 ./run.sh --env server sim-up
 
-# Dedicated browser viewer stack
-cp .env.server-viewer.example .env.server-viewer
-./run.sh --env server-viewer viewer-up local
+# Foxglove Studio에서 ws://<server-lan-ip>:8765 연결
 ```
 
 ```bash
@@ -382,9 +379,7 @@ MAPPING_RECONNECT_TIMEOUT_SECONDS=60 ./run.sh --env server mapping-stop
 
 ## 서버 운영
 
-Docker Engine 및 Docker Compose 2.24.4 이상이 설치된 Linux 서버에서 실행한다.
-`viewer-up`은 이 최소 버전을 preflight하고, 미지원 버전에서는 서비스를 변경하기 전에
-nonzero로 종료한다.
+Docker Engine 및 Docker Compose가 설치된 Linux 서버에서 실행한다.
 
 ```bash
 ./run.sh --env server sim-up
@@ -453,19 +448,16 @@ Mac Docker Desktop에서 대체할 수 없다.
 
 ## 공유 관찰 운영
 
-`--env server`는 LAN 모드이며, affected simulation services에 host networking을 적용한다.
-`--env dev`와 `--env server-viewer`만 Docker 내부 모드로 시뮬레이션과 ROS adapter를
-운영한다. 이 두 profile에서 simulation services는 internal `mentorpi` bridge network를 사용하고,
-DDS client는 Docker DNS의 `dds-discovery`를 locator로 해석한다. browser viewer의
-`web-gateway`는 별도의 viewer edge exposure 정책을 유지한다. 다음 표는 지원하는 운영 조합과
+`--env server`는 LAN 모드이며, `dds-discovery`, Gazebo, ROS adapter, Foxglove Bridge에
+host networking을 적용한다. `--env dev`는 Docker 내부 모드로 같은 서비스를 실행하며,
+Foxglove Bridge만 host loopback의 TCP 8765으로 제공한다. 다음 표는 지원하는 운영 조합과
 각각의 개발 PC 접속 방법이다.
 
 | 목적 | 서버 실행 | 개발 PC 접속 |
 | --- | --- | --- |
 | Headless 통합 검증 | `./run.sh --env dev sim-up` | `topics`, logs, healthcheck |
+| 사내망 Foxglove Studio | `.env.server`의 `GZ_SERVER_IP` 설정 후 `./run.sh --env server sim-up` | `ws://<server-lan-ip>:8765` |
 | 같은 LAN 네이티브 GUI | `.env.server`의 `GZ_SERVER_IP` 설정 후 `./run.sh --env server sim-up` | `scripts/gz-gui-connect.sh <server-lan-ip> <client-lan-ip>` |
-| 로컬 브라우저 viewer | `./run.sh --env server-viewer viewer-up local` | `http://127.0.0.1:8080/vnc.html?view_only=1&autoconnect=1` |
-| 외부 팀 viewer | `.env.server-viewer`에 viewer 값을 설정 후 `./run.sh --env server-viewer viewer-up public` | `https://<VIEWER_DOMAIN>/vnc.html?view_only=1&autoconnect=1` |
 | 지도 생성 | `./run.sh --env dev mapping-up <session-id>` | logs와 `mapping-status` |
 
 ### Linux LAN 네이티브 GUI
@@ -508,72 +500,21 @@ GUI client는 서버의 `.env.server`에 있는 주소를 재사용하지 않는
 
 두 GUI client는 같은 Gazebo world에 동시에 접속한다. 모든 GUI 창을 닫아도 simulation은
 서버에서 계속 실행되며, 중지는 서버에서 `./run.sh --env server down`으로만 수행한다. Mac Docker Desktop의
-preflight가 `exit 4`이면 이 raw transport 경로는 UNSUPPORTED이므로 아래 local 또는 public
-browser viewer로 전환한다.
+preflight가 `exit 4`이면 이 raw transport 경로는 UNSUPPORTED이므로 Foxglove Studio를 사용한다.
 
-### Read-only browser viewer
+### Foxglove Bridge lifecycle
 
-browser viewer는 `.env.server-viewer.example`을 복사한 전용 profile로 운영한다. 이 profile의
-`COMPOSE_PROJECT_NAME=mentorpi-server-viewer`와 `SIM_NETWORK_MODE=internal` 설정은 browser viewer가
-실행 중인 LAN stack에 붙지 않고 discovery, simulation, adapter, viewer를 포함한 자체 internal stack을
-시작하도록 분리한다. LAN 네이티브 GUI는 계속 `.env.server`와 `--env server`를 사용한다.
-local viewer는 서버 자신의 브라우저에서만 접속하도록 loopback에 바인드한다.
+`sim-up`은 Gazebo, ROS adapter와 Foxglove Bridge를 함께 시작한다. Bridge만 재시작하거나
+관찰할 때는 다음 명령을 사용하며, 두 명령은 시뮬레이션 서비스를 중지하지 않는다.
 
 ```bash
-cp .env.server-viewer.example .env.server-viewer
-./run.sh --env server-viewer viewer-up local
-# http://127.0.0.1:8080/vnc.html?view_only=1&autoconnect=1
+./run.sh --env server foxglove-logs
+./run.sh --env server foxglove-down
+./run.sh --env server sim-up
 ```
 
-외부 팀용 public 모드는 application auth나 basic auth를 제공하지 않는다. 허용한 source CIDR와
-Linux host firewall만 접근 경계이며, 허용 CIDR 외 요청은 HTTP 403을 받는다. public 모드의 strict
-입력 검증을 거치는 유일한 지원 운영 진입점은
-`./run.sh --env server-viewer viewer-up public`이다.
-`docker compose` 직접 호출로 public viewer를 올리는 것은 지원하지 않는다.
-
-```bash
-# Edit .env.server-viewer: VIEWER_DOMAIN=sim.example.com
-# Edit .env.server-viewer: VIEWER_ALLOW_CIDRS=203.0.113.10/32 203.0.113.11/32
-./run.sh --env server-viewer viewer-up public
-```
-
-Router/NAT는 public 80과 443만 Linux 서버로 전달한다. Caddy는 ACME redirect/challenge에 80을
-사용하고 viewer는 443에서 제공한다. 동적으로 바뀌는 팀 IP는 allowlist를 갱신하거나, 별도의
-인증된 access method를 선택해야 한다. `0.0.0.0/0`와 `::/0`은 거부된다.
-
-noVNC 6080, VNC 5900, Gazebo Transport, ROS DDS는 절대로 port-forward하지 않는다. 특히
-Gazebo Transport를 공용 인터넷에 공개하지 않는다. router의 공개 포트는 80/443으로 제한하고
-Linux firewall도 같은 노출 정책을 강제한다.
-
-### 종료, 로그, 복구와 서비스 독립성
-
-```bash
-./run.sh --env server-viewer viewer-logs
-./run.sh --env server-viewer viewer-down
-./run.sh --env server-viewer logs
-./run.sh --env server-viewer topics
-./run.sh --env server-viewer down
-```
-
-`viewer-down`은 `gazebo-viewer`, `web-gateway`, `foxglove-bridge`만 중지한다. Task 6 runtime 검증은 이 viewer
-lifecycle 변경이 `gazebo-server`와 `sim-adapter`를 중지시키지 않음을 확인했다. 따라서 이 두
-서비스의 viewer 장애 복구는 `viewer-down` 뒤 동일한 local/public 명령으로 viewer만 다시 올린다.
-반대로 `--env server-viewer down`은 전용 browser simulation stack을 중지하며, LAN stack의
-`--env server down`과 서로 다른 Compose project를 대상으로 한다.
-
-mapping session 환경은 mapper와 inspector에만 전달되며 server, adapter, discovery, viewer에는
-전달되지 않는다. 따라서 같은 Compose project와 volume 설정을 유지하면 `viewer-up`이 active
-mapping의 simulation service 구성을 변경하지 않고, viewer lifecycle은 실행 중 mapper를 재생성하지 않는다.
-지도 생성은 독립적인 one-shot mapper이므로 `mapping-up <session-id>`,
-`mapping-stop`, `mapping-status <session-id>`를 사용하며, viewer lifecycle과 묶어서 중지하지
-않는다.
-
-### 릴리스 상태
-
-다음 항목은 아직 최종 acceptance 전이며 release blocker다.
-
-- Ubuntu native LAN two-client/visual gate
-- official Caddy image의 public direct 80/443 port 검증
+외부 인터넷 공개용 browser viewer, Caddy reverse proxy, TLS와 인증은 이 runtime에 포함하지
+않는다. 필요해질 때 별도 web image와 proxy 배포로 구성한다.
 
 ## SLAM 매핑 세션 운영
 
@@ -631,7 +572,7 @@ entrypoint가 ROS 환경을 source한 뒤 `exec`하므로 이 Bash가 container 
 ```
 
 기본 운영 volume 이름은 `mentorpi-slam-data`다. 기존 운영 자료와 분리된 검증이나 migration을
-수행할 때만 `SLAM_VOLUME_NAME`을 명시하고, 한 mapping/viewer lifecycle의 모든 명령에 같은
+수행할 때만 `SLAM_VOLUME_NAME`을 명시하고, 한 mapping/Foxglove lifecycle의 모든 명령에 같은
 `COMPOSE_PROJECT_NAME`과 `SLAM_VOLUME_NAME`을 유지한다.
 
 `COMPOSE_PROJECT_NAME`과 `SLAM_VOLUME_NAME`을 별도 profile 파일에 설정한 뒤 그 이름을
@@ -639,8 +580,8 @@ entrypoint가 ROS 환경을 source한 뒤 `exec`하므로 이 Bash가 container 
 
 ```bash
 ./run.sh --env mapping-validation mapping-up validation-01
-./run.sh --env mapping-validation viewer-up local
-./run.sh --env mapping-validation viewer-down
+./run.sh --env mapping-validation foxglove-logs
+./run.sh --env mapping-validation foxglove-down
 ./run.sh --env mapping-validation mapping-stop
 ./run.sh --env mapping-validation mapping-status validation-01
 ```
@@ -665,27 +606,27 @@ docker run --rm -v mentorpi-slam-data:/slam-data -v "$PWD":/backup \
 
 ## 렌더링 경계
 
-서버는 카메라·라이다 등 시뮬레이션 센서에 필요한 오프스크린 렌더링만 수행한다. Docker
-bundle의 `viewer` profile은 브라우저 Gazebo viewer와 Foxglove Bridge를 제공하지만, X11,
-Xauthority, DISPLAY 또는 원격 GUI 전달은 사용하지 않는다.
+서버는 카메라·라이다 등 시뮬레이션 센서에 필요한 오프스크린 렌더링만 수행한다. browser
+viewer, X11, Xauthority, DISPLAY 또는 원격 GUI 전달은 runtime에 포함하지 않는다.
 
 ### Foxglove Studio 연결
 
-`viewer-up local`은 `foxglove-bridge`를 기존 internal `mentorpi` 네트워크의 Fast DDS discovery
-client로 실행한다. Docker Desktop의 loopback 포트 전달을 위해 Bridge는 `viewer-edge`에도
-연결하지만 ROS/DDS 서비스는 `mentorpi`에서만 발견한다. Foxglove WebSocket만 host loopback에
-공개하며, Foxglove Studio는 Docker 서비스가 아니라 개발 PC의 macOS 앱 또는 브라우저에서
-실행한다.
+`sim-up`은 `foxglove-bridge`를 함께 실행한다. `--env server` LAN profile에서는 Bridge가
+host network의 Fast DDS discovery client로 실행되어 TCP 8765을 서버의 사내망 인터페이스에
+직접 제공한다. Foxglove Studio는 개발 PC에서 실행하며, Docker browser viewer는 사용하지
+않는다.
 
 ```bash
-cp .env.server-viewer.example .env.server-viewer
-./run.sh --env server-viewer viewer-up local
-# Foxglove Studio에서 Foxglove WebSocket 연결: ws://localhost:8765
+cp .env.server.example .env.server
+# GZ_SERVER_IP를 이 서버의 LAN 또는 VPN IP로 설정
+./run.sh --env server sim-up
+# Foxglove Studio에서 Foxglove WebSocket 연결: ws://<server-lan-ip>:8765
 ```
 
-필요하면 `.env.server-viewer`에서 `FOXGLOVE_PORT`를 변경할 수 있다. public viewer 모드는
-Foxglove Bridge 포트를 공개하지 않는다. Gazebo Transport, ROS DDS, VNC/noVNC와 Foxglove
-WebSocket을 공용 인터넷에 직접 port-forward하지 않는다.
+`.env.server`의 `FOXGLOVE_PORT` 기본값은 8765다. 서버 host firewall은 신뢰된 개발자 CIDR만
+TCP 8765에 허용한다. Gazebo Transport와 ROS DDS discovery는 개발 PC나 공용 인터넷에 직접
+공개하지 않는다. 외부 접근이 필요해지면 TLS·인증을 포함한 reverse proxy를 별도 web image로
+추가한다.
 
 ### Warehouse SDF 3D 장면
 
