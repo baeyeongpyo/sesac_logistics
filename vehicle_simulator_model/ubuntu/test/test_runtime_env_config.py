@@ -223,6 +223,16 @@ class RuntimeEnvConfigTest(unittest.TestCase):
         self.assertIn('<stop>\n<foxglove-bridge>', docker_log)
         self.assertNotIn('<gazebo-server>', docker_log)
 
+    def test_down_removes_orphaned_browser_viewer_containers(self):
+        result, docker_log = self.run_command(
+            'dev',
+            'SIM_NETWORK_MODE=internal\n',
+            command=('down',),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('<down>\n<--remove-orphans>', docker_log)
+
     def test_blank_profile_image_overrides_inherited_image_and_default(self):
         result, docker_log = self.run_command(
             'dev1',

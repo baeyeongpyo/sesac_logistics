@@ -312,7 +312,7 @@ case "${RUN_COMMAND[0]}" in
     "${FOXGLOVE_COMPOSE[@]}" up -d dds-discovery gazebo-server sim-adapter foxglove-bridge
     ;;
   down)
-    "${FOXGLOVE_COMPOSE[@]}" down
+    "${FOXGLOVE_COMPOSE[@]}" down --remove-orphans
     ;;
   logs)
     "${FOXGLOVE_COMPOSE[@]}" logs -f dds-discovery gazebo-server sim-adapter foxglove-bridge
