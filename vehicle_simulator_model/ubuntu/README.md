@@ -1,9 +1,11 @@
 # MentorPi Headless Docker Bundle
 
 MentorPi Gazebo Harmonic 시뮬레이션을 Docker Compose로 운영하는 headless 번들이다.
-서버에는 이미지와 Compose 파일만 배포하며 실행 중인 서비스에 ROS 소스를 bind mount하지
-않는다. 기본 렌더러는 Mesa 소프트웨어 렌더링이고, GPU 장치는 명시적인 `gpu` profile에서만
-전달한다.
+서버에는 이미지와 Compose 파일, 그리고 런타임 SDF·mesh·model 자산을 함께 배포한다. 일반
+ROS 소스와 Gazebo 플러그인 바이너리는 실행 중인 서비스에 bind mount하지 않는다. 단,
+`ros2_ws/src/mentorpi_gz_sim/worlds`와 `ros2_ws/src/mentorpi_gz_sim/models`는 런타임 자산
+갱신을 위한 읽기 전용 bind mount 예외다. 기본 렌더러는 Mesa 소프트웨어 렌더링이고, GPU 장치는
+명시적인 `gpu` profile에서만 전달한다.
 
 ## 이미지 참조와 개발 빌드
 
@@ -65,9 +67,34 @@ docker pull registry.example.com/mentorpi-sim:2026.07.26
 ```
 
 버전 tag는 레지스트리에서 다른 이미지로 이동할 수 있으므로 그 자체로 불변하지 않다. digest
-reference만 내용 불변성을 제공한다. 이 번들의 운영 불변성은 Compose가 source bind mount나
-build context를 갖지 않아 배포 서버에서 소스를 재빌드하지 않는 범위까지다. digest로 운영하는
-서버에서는 `./run.sh --env server build`를 실행하지 말고, 검증된 digest를 pull하여 사용한다.
+reference만 내용 불변성을 제공한다. 이 번들의 운영 불변성은 Compose가 일반 ROS 소스 bind mount나
+build context를 갖지 않아 배포 서버에서 소스를 재빌드하지 않는 범위까지다. 단, 아래 런타임
+SDF·model 자산 디렉터리는 읽기 전용 예외다. digest로 운영하는 서버에서는
+`./run.sh --env server build`를 실행하지 말고, 검증된 digest를 pull하여 사용한다.
+
+### 런타임 SDF·model 자산
+
+Compose는 `gazebo-server`와 `sim-adapter`에 다음 두 디렉터리만 읽기 전용으로 bind mount한다.
+이 경로에는 world SDF, model SDF, mesh와 관련 자산이 있으므로 실행 중인 Gazebo world와
+Foxglove SceneUpdate publisher가 같은 데이터를 읽는다.
+
+- `ros2_ws/src/mentorpi_gz_sim/worlds`
+- `ros2_ws/src/mentorpi_gz_sim/models`
+
+서버 배포 시에는 이미지와 Compose 파일뿐 아니라 위 두 디렉터리도
+`vehicle_simulator_model/ubuntu`를 기준으로 같은 상대 경로에 배포해야 한다. 일반 ROS 코드와
+Gazebo 플러그인 바이너리는 이 예외에 포함하지 않으며 이미지 안에 빌드된 결과를 사용한다.
+
+SDF·mesh·model 자산을 변경한 뒤에는 사용하는 profile로 전체 simulation 서비스를 다시
+시작한다. 이 절차는 Gazebo와 SceneUpdate publisher가 변경된 자산을 다시 읽도록 한다.
+
+```bash
+./run.sh --env <profile> down
+./run.sh --env <profile> sim-up
+```
+
+ROS 코드나 Gazebo 플러그인을 변경한 경우에는 bind mount로 반영되지 않으므로 이미지를 다시
+빌드한 뒤 서비스를 시작해야 한다.
 
 ## 실행 구조와 케이스 선택
 
@@ -227,8 +254,10 @@ docker compose --profile mapping logs -f slam-mapper
 
 ### 케이스 3 — 서버 PC: 시뮬레이션만 실행
 
-서버에서는 검증된 이미지 tag 또는 digest를 pull한 뒤 headless로 실행한다. 서버에서 source를
-bind mount하거나 다시 빌드하지 않는다.
+서버에서는 검증된 이미지 tag 또는 digest를 pull한 뒤 headless로 실행한다. 일반 ROS source나
+Gazebo 플러그인 바이너리는 bind mount하거나 서버에서 다시 빌드하지 않는다. 단, 런타임
+SDF·model 자산은 위 정책에 따라 읽기 전용으로 mount하며, 배포 시 두 자산 디렉터리를 같은
+상대 경로에 포함해야 한다.
 
 ```bash
 cd vehicle_simulator_model/ubuntu

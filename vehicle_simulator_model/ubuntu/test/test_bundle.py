@@ -843,6 +843,26 @@ class DeployOnlyBundleTest(unittest.TestCase):
             readme.splitlines(),
         )
 
+    def test_operator_docs_describe_runtime_sdf_asset_mount_contract(self):
+        readme = (BUNDLE / 'README.md').read_text()
+
+        for asset_path in (
+            '`ros2_ws/src/mentorpi_gz_sim/worlds`',
+            '`ros2_ws/src/mentorpi_gz_sim/models`',
+        ):
+            self.assertIn(asset_path, readme)
+        for contract_text in (
+            '서버 배포 시에는 이미지와 Compose 파일뿐 아니라 위 두 디렉터리도',
+            '읽기 전용으로 bind mount한다.',
+            '일반 ROS 코드와\nGazebo 플러그인 바이너리는 이 예외에 포함하지 않으며',
+            'SDF·mesh·model 자산을 변경한 뒤에는 사용하는 profile로 전체 simulation 서비스를 다시\n시작한다.',
+            './run.sh --env <profile> down',
+            './run.sh --env <profile> sim-up',
+            'Gazebo와 SceneUpdate publisher가 변경된 자산을 다시 읽도록 한다.',
+            'ROS 코드나 Gazebo 플러그인을 변경한 경우에는 bind mount로 반영되지 않으므로 이미지를 다시\n빌드한 뒤 서비스를 시작해야 한다.',
+        ):
+            self.assertIn(contract_text, readme)
+
     def test_operator_docs_describe_shared_observation_operations(self):
         readme = (BUNDLE / 'README.md').read_text()
         for text in (
