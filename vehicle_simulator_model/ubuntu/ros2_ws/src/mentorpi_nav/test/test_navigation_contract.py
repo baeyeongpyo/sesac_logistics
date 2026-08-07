@@ -39,6 +39,10 @@ class NavigationContractTest(unittest.TestCase):
         relay = (PACKAGE / 'scripts' / 'cmd_vel_relay.py').read_text()
         self.assertIn("input_topic', '/cmd_vel_nav'", relay)
 
+    def test_controller_server_publishes_to_velocity_relay_topic(self):
+        config = (PACKAGE / 'config' / 'nav2.yaml').read_text()
+        self.assertIn('cmd_vel_topic: /cmd_vel_nav', config)
+
     def test_goal_bridge_ignores_results_from_preempted_goals(self):
         bridge = (PACKAGE / 'scripts' / 'goal_bridge.py').read_text()
         self.assertIn('lambda future, goal_handle=handle: self.on_result(goal_handle, future)', bridge)
