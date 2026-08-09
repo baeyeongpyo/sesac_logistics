@@ -33,13 +33,21 @@ class SceneContractTest(unittest.TestCase):
         self.assertIn('gz_type_name: gz.msgs.Pose_V', text)
         self.assertIn('direction: GZ_TO_ROS', text)
 
-    def test_adapter_launch_starts_the_scene_bridge_and_publisher(self):
+    def test_adapter_launch_starts_scene_publisher_without_robot_owned_warehouse_tf(self):
         text = LAUNCH.read_text()
 
         self.assertIn("warehouse_scene_bridge.yaml", text)
         self.assertIn("package='mentorpi_foxglove_scene'", text)
         self.assertIn("executable='sdf_scene_publisher'", text)
-        self.assertIn("'frame_id': 'robot_1/odom'", text)
+        self.assertIn("'frame_id': 'warehouse'", text)
+        self.assertNotIn("name='warehouse_frame'", text)
+        self.assertNotIn("'--frame-id', 'robot_1/odom'", text)
+        self.assertNotIn("'--child-frame-id', 'warehouse'", text)
+
+    def test_scene_publisher_defaults_to_the_shared_warehouse_frame(self):
+        text = PUBLISHER.read_text()
+
+        self.assertIn("self.declare_parameter('frame_id', 'warehouse')", text)
 
     def test_static_scene_is_republished_for_late_foxglove_subscribers(self):
         text = PUBLISHER.read_text()

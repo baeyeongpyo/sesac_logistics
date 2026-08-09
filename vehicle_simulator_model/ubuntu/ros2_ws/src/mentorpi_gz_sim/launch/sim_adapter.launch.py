@@ -40,7 +40,7 @@ def _scene_nodes(package_share):
              parameters=[{
                  'world_sdf': str(Path(package_share) / 'worlds' / 'warehouse.sdf'),
                  'models_root': str(Path(package_share) / 'models'),
-                 'frame_id': 'robot_1/odom',
+                 'frame_id': 'warehouse',
                  'use_sim_time': True,
              }], output='screen'),
     ]
