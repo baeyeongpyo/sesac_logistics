@@ -636,17 +636,18 @@ TCP 8765에 허용한다. Gazebo Transport와 ROS DDS discovery는 개발 PC나 
 
 `sim-adapter`는 warehouse SDF를 Foxglove의 표준 `SceneUpdate` 토픽으로 함께 발행한다.
 Foxglove 3D panel에서 `/warehouse_scene/static`과 `/warehouse_scene/dynamic`을 추가하면
-warehouse 구조물, `robot_1`·`robot_2`, 그리고 pallet/payload 상태를 볼 수 있다. 정적 장면은
-late-joiner도 받도록 durable QoS를 사용하고 1 Hz로 재발행하며, 동적 장면은 10 Hz로 갱신된다.
+warehouse 구조물과 `robot_1`·`robot_2`를 볼 수 있다. 정적 장면은 late-joiner도 받도록
+durable QoS를 사용하고 1 Hz로 재발행하며, 동적 장면은 10 Hz로 갱신된다.
 
 두 장면은 공용 `warehouse` 기준이다. Gazebo만 실행 중이면 3D panel Fixed/Display frame을
 `warehouse`로 선택한다. 저장 지도 기반 Nav2를 함께 실행 중이면 Nav2가 `map → warehouse`를
 발행하므로 Fixed frame은 `map`으로 선택할 수 있고, 두 로봇의 TF와 SceneUpdate를 한 화면에서
-확인할 수 있다. `/warehouse/entity_poses`는 Gazebo의 `Pose_V`를 bridge한 내부 입력 토픽이므로
-3D panel에 직접 추가할 필요는 없다.
+확인할 수 있다. 차량 동적 장면은 각 Gazebo 차량 모델의
+`/robot_i/ground_truth/pose`를 입력으로 사용하므로, 3D panel에는 SceneUpdate 두 토픽만
+추가하면 된다.
 
 ```text
 /warehouse_scene/static   # ground, walls, conveyor, rack, charger, markings
-/warehouse_scene/dynamic  # robot_1, robot_2, pallet_*, pallet_*_payload
-/warehouse/entity_poses   # Gazebo → ROS scene publisher input
+/warehouse_scene/dynamic  # robot_1, robot_2
+/robot_i/ground_truth/pose # Gazebo 차량 pose → SceneUpdate publisher input
 ```

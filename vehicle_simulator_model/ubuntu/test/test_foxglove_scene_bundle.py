@@ -29,7 +29,7 @@ class FoxgloveSceneBundleTest(unittest.TestCase):
         readme = (BUNDLE / 'README.md').read_text()
         self.assertIn('/warehouse_scene/static', readme)
         self.assertIn('/warehouse_scene/dynamic', readme)
-        self.assertIn('/warehouse/entity_poses', readme)
+        self.assertIn('/robot_i/ground_truth/pose', readme)
 
 
 if __name__ == '__main__':

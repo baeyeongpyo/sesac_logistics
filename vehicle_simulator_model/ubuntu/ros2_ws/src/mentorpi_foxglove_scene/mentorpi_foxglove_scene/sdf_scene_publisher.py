@@ -161,7 +161,9 @@ def main(args=None) -> None:
             )
             self._static_publisher = self.create_publisher(messages.scene_update, '/warehouse_scene/static', static_qos)
             self._dynamic_publisher = self.create_publisher(messages.scene_update, '/warehouse_scene/dynamic', 10)
-            self.create_subscription(TFMessage, '/warehouse/entity_poses', self._on_poses, 10)
+            for robot_id in ('robot_1', 'robot_2'):
+                self.create_subscription(
+                    TFMessage, f'/{robot_id}/ground_truth/pose', self._on_poses, 10)
             self._static_entities = static_scene_from_sdf(world_sdf, models_root)
             self._dynamic_scene = DynamicScene()
             self._poses: dict[str, Pose] = {}
@@ -174,7 +176,7 @@ def main(args=None) -> None:
                 entities, deleted_ids, self._frame_id, self.get_clock().now().to_msg(), messages)
 
         def _on_poses(self, message: TFMessage) -> None:
-            self._poses = _poses_from_tf(message)
+            self._poses.update(_poses_from_tf(message))
 
         def _publish_static(self) -> None:
             self._static_publisher.publish(self._update(self._static_entities, ()))

@@ -33,9 +33,6 @@ def _robot_nodes(name, xyz, yaw, package_share):
 def _scene_nodes(package_share):
     scene_package_share = Path(get_package_share_directory('mentorpi_foxglove_scene'))
     return [
-        Node(package='ros_gz_bridge', executable='parameter_bridge', name='warehouse_scene_bridge',
-             parameters=[{'config_file': str(Path(package_share) / 'config' / 'warehouse_scene_bridge.yaml')}],
-             output='screen'),
         Node(package='mentorpi_foxglove_scene', executable='sdf_scene_publisher', name='sdf_scene_publisher',
              parameters=[{
                  'world_sdf': str(Path(package_share) / 'worlds' / 'warehouse.sdf'),
