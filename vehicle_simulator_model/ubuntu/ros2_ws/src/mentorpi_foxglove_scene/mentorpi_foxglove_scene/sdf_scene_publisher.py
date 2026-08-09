@@ -148,7 +148,7 @@ def main(args=None) -> None:
             super().__init__('sdf_scene_publisher')
             self.declare_parameter('world_sdf', '')
             self.declare_parameter('models_root', '')
-            self.declare_parameter('frame_id', 'robot_1/odom')
+            self.declare_parameter('frame_id', 'warehouse')
             world_sdf = Path(self.get_parameter('world_sdf').value)
             models_root = Path(self.get_parameter('models_root').value)
             self._frame_id = self.get_parameter('frame_id').value

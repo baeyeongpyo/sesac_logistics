@@ -6,6 +6,22 @@ PACKAGE = Path(__file__).resolve().parents[1]
 
 
 class NavigationContractTest(unittest.TestCase):
+    def test_shared_launch_starts_one_map_server_and_two_namespaced_amcl_nodes(self):
+        launch = (PACKAGE / 'launch' / 'shared_navigation.launch.py').read_text()
+
+        self.assertIn("package='nav2_map_server'", launch)
+        self.assertEqual(launch.count("executable='map_server'"), 1)
+        self.assertEqual(launch.count("package='nav2_amcl'"), 1)
+        for robot in ('robot_1', 'robot_2'):
+            self.assertIn(f"robot_stack('{robot}'", launch)
+
+    def test_shared_launch_owns_map_to_warehouse_not_robot_to_warehouse(self):
+        launch = (PACKAGE / 'launch' / 'shared_navigation.launch.py').read_text()
+
+        self.assertIn("'--frame-id', 'map'", launch)
+        self.assertIn("'--child-frame-id', 'warehouse'", launch)
+        self.assertNotIn("robot_1/odom', '--child-frame-id', 'warehouse'", launch)
+
     def test_nav2_configuration_uses_robot_1_frames_and_lidar(self):
         config = (PACKAGE / 'config' / 'nav2.yaml').read_text()
         for required in (
@@ -45,6 +61,8 @@ class NavigationContractTest(unittest.TestCase):
 
     def test_goal_bridge_ignores_results_from_preempted_goals(self):
         bridge = (PACKAGE / 'scripts' / 'goal_bridge.py').read_text()
+        self.assertIn("self.declare_parameter('action_name', '/navigate_to_pose')", bridge)
+        self.assertIn("self.get_parameter('action_name').value", bridge)
         self.assertIn('lambda future, goal_handle=handle: self.on_result(goal_handle, future)', bridge)
         self.assertIn('if goal_handle is not self.active_goal:', bridge)
 

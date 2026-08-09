@@ -10,6 +10,7 @@
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>nav2_amcl</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_common</exec_depend>
   <exec_depend>nav2_msgs</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>slam_toolbox</exec_depend>

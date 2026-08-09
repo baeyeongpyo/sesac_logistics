@@ -18,6 +18,9 @@ class NavigationBundleTest(unittest.TestCase):
             'profiles: [navigation]',
             'SLAM_DATA_ROOT: /slam-data',
             'NAV_SESSION_ID:',
+            'MAP_TO_WAREHOUSE_X:',
+            'MAP_TO_WAREHOUSE_Y:',
+            'MAP_TO_WAREHOUSE_YAW:',
             'run_navigation.sh',
             'condition: service_healthy',
             'read_only: true',
@@ -33,9 +36,23 @@ class NavigationBundleTest(unittest.TestCase):
             '--profile navigation up -d --wait',
             'unset NAV_SESSION_ID',
             'NAV_SESSION_ID="${RUN_COMMAND[2]}"',
-            'ros2 topic list --no-daemon | grep -E "^/(cmd_vel_nav|map|move_base_simple/goal)$"',
+            'robot_1/cmd_vel_nav',
+            'robot_2/cmd_vel_nav',
+            'robot_(1|2)/navigate_to_pose',
         ):
             self.assertIn(required, script)
+
+    def test_navigation_runner_starts_shared_map_dual_localization(self):
+        runner = (BUNDLE / 'ros2_ws/src/mentorpi_nav/scripts/run_navigation.sh').read_text()
+        for required in (
+            'shared_navigation.launch.py',
+            'navigation_mode=localization-dual',
+            'map_yaml:="$map_yaml"',
+            'warehouse_x:="${MAP_TO_WAREHOUSE_X:-0.0}"',
+            'warehouse_y:="${MAP_TO_WAREHOUSE_Y:-0.0}"',
+            'warehouse_yaw:="${MAP_TO_WAREHOUSE_YAW:-0.0}"',
+        ):
+            self.assertIn(required, runner)
 
     def test_nav_package_registers_its_contract_tests(self):
         package = BUNDLE / 'ros2_ws/src/mentorpi_nav'

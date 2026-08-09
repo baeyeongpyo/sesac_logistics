@@ -136,20 +136,24 @@ cd vehicle_simulator_model/ubuntu
 함께 시작한다. 다만 운영 절차와 GPU profile 처리를 일관되게 유지하려면 `./run.sh --env dev sim-up`을
 사용한다. mapper는 `docker compose up`으로 직접 시작하지 않는다.
 
-### Nav2 자율주행: 저장 지도 우선, SLAM 자동 전환
+### Nav2 자율주행: 공유 지도와 두 로봇 AMCL
 
-`nav-up auto`는 `/slam-data`의 지도 세션을 먼저 checksum과 manifest로 검증한다. 유효한 세션이 있으면 `map_server + AMCL + Nav2`를 실행하고, 지정한 세션이 없거나 유효하지 않으면 `slam_toolbox + Nav2`로 전환한다. 두 모드가 동시에 `map → robot_1/odom` TF를 publish하지 않도록, 실행 중인 `slam-mapper`는 먼저 `mapping-stop`으로 안전 종료해야 한다.
+`nav-up auto`는 `/slam-data`의 지도 세션을 먼저 checksum과 manifest로 검증한다. 유효한 세션이 있으면 하나의 `map_server`와 `map → warehouse` TF를 시작하고, `robot_1`·`robot_2` 각각에 AMCL과 Nav2를 동시에 시작한다. 각 로봇은 독립된 `map → robot_i/odom → robot_i/base_footprint` TF와 costmap을 가지며, Gazebo LiDAR에서 다른 차량을 관측해 자기 costmap의 장애물로 반영한다. 충돌 회피는 각 로봇의 Nav2와 Gazebo 물리 충돌에 의존하며, 중앙 교통 관제·예약·deadlock 해소 기능은 포함하지 않는다.
+
+저장 지도가 없거나 유효하지 않으면 기존의 단일 로봇 SLAM fallback으로 전환한다. 두 로봇 공유 주행은 검증된 PGM 지도 세션이 있을 때 사용한다.
 
 ```bash
 # 기본: 가장 최근의 유효 세션으로 localization
 ./run.sh --env dev nav-up auto
 
-# 특정 세션으로 localization. 세션이 없거나 훼손되면 SLAM 모드로 전환
+# 특정 세션으로 두 로봇 localization. 세션이 없거나 훼손되면 단일 로봇 SLAM 모드로 전환
 ./run.sh --env dev nav-up auto warehouse-20260727-01
 ./run.sh --env dev nav-status
 ```
 
-Foxglove는 `ws://localhost:8765/`에 연결하고 3D panel의 Fixed frame을 `map`으로 선택한다. 저장 지도 모드에서는 먼저 `Publish` panel에서 `/initialpose` (`geometry_msgs/PoseWithCovarianceStamped`, frame_id=`map`)로 로봇의 대략적인 현재 위치와 heading을 한 번 지정한다. 그 다음 `Publish` panel에서 `/move_base_simple/goal` (`geometry_msgs/PoseStamped`, frame_id=`map`)을 발행하면 bridge가 Nav2 `/navigate_to_pose` Action으로 전달한다. Nav2의 `/cmd_vel_nav`은 watchdog relay를 거쳐 `/robot_1/controller/cmd_vel`로 전달되며, 명령이 끊기면 0.35초 후 정지 명령을 보낸다.
+Foxglove는 `ws://localhost:8765/`에 연결하고 3D panel의 Fixed frame을 `map`으로 선택한다. 저장 지도 모드에서는 각 로봇마다 `Publish` panel에서 `/robot_i/initialpose` (`geometry_msgs/PoseWithCovarianceStamped`, frame_id=`map`)로 대략적인 현재 위치와 heading을 한 번 지정한다. 목적지는 `/robot_i/move_base_simple/goal` (`geometry_msgs/PoseStamped`, frame_id=`map`)로 발행하면 해당 robot의 bridge가 `/robot_i/navigate_to_pose` Action으로 전달한다. 각 Nav2의 `/robot_i/cmd_vel_nav`은 watchdog relay를 거쳐 `/robot_i/controller/cmd_vel`로 전달되며, 명령이 끊기면 0.35초 후 정지 명령을 보낸다.
+
+PGM의 `map` 원점과 Gazebo `warehouse` 원점이 다르면 navigation 서비스의 `MAP_TO_WAREHOUSE_X`, `MAP_TO_WAREHOUSE_Y`, `MAP_TO_WAREHOUSE_YAW`를 실제 좌표 정합값으로 설정한다. 기본값은 모두 `0.0`이며, 이 값은 `map → warehouse` 변환에만 적용되어 Gazebo world와 PGM의 좌표계를 동기화한다.
 
 SLAM fallback은 즉시 탐색·주행을 위한 임시 지도 모드다. 재사용할 지도가 필요하면 `nav-down` 후 `mapping-up <session-id>`와 `mapping-stop`으로 별도 세션을 저장하고, 다시 `nav-up auto <session-id>`를 실행한다.
 
@@ -635,9 +639,11 @@ Foxglove 3D panel에서 `/warehouse_scene/static`과 `/warehouse_scene/dynamic`�
 warehouse 구조물, `robot_1`·`robot_2`, 그리고 pallet/payload 상태를 볼 수 있다. 정적 장면은
 late-joiner도 받도록 durable QoS를 사용하고 1 Hz로 재발행하며, 동적 장면은 10 Hz로 갱신된다.
 
-두 장면은 `robot_1/odom` 기준이다. SLAM을 함께 실행 중이면 3D panel Fixed frame은 `map`으로,
-Gazebo만 실행 중이면 `robot_1/odom`으로 선택한다. `/warehouse/entity_poses`는 Gazebo의
-`Pose_V`를 bridge한 내부 입력 토픽이므로 3D panel에 직접 추가할 필요는 없다.
+두 장면은 공용 `warehouse` 기준이다. Gazebo만 실행 중이면 3D panel Fixed/Display frame을
+`warehouse`로 선택한다. 저장 지도 기반 Nav2를 함께 실행 중이면 Nav2가 `map → warehouse`를
+발행하므로 Fixed frame은 `map`으로 선택할 수 있고, 두 로봇의 TF와 SceneUpdate를 한 화면에서
+확인할 수 있다. `/warehouse/entity_poses`는 Gazebo의 `Pose_V`를 bridge한 내부 입력 토픽이므로
+3D panel에 직접 추가할 필요는 없다.
 
 ```text
 /warehouse_scene/static   # ground, walls, conveyor, rack, charger, markings

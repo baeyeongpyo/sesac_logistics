@@ -418,7 +418,8 @@ case "${RUN_COMMAND[0]}" in
        trap '\''rm -f -- "$DDS_SUPER_CLIENT_PROFILE"'\'' EXIT
        source /opt/ros/humble/setup.bash
        source /opt/mentorpi_ws/install/setup.bash
-       ros2 topic list --no-daemon | grep -E "^/(cmd_vel_nav|map|move_base_simple/goal)$"'
+       ros2 topic list --no-daemon | grep -E "^/(map|robot_1/cmd_vel_nav|robot_2/cmd_vel_nav)$"
+       ros2 action list --no-daemon | grep -E "^/robot_(1|2)/navigate_to_pose$"'
     ;;
   mapping-up)
     if [[ "${#RUN_COMMAND[@]}" -ne 2 ]]; then

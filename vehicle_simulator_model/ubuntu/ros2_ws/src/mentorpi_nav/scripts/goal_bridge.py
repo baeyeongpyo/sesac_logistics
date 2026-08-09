@@ -16,7 +16,8 @@ class GoalBridge(Node):
         self.declare_parameter('goal_topic', '/move_base_simple/goal')
         self.declare_parameter('command_topic', '/robot_1/controller/cmd_vel')
         self.declare_parameter('status_topic', '/robot_1/navigation/status')
-        self.goal_client = ActionClient(self, NavigateToPose, '/navigate_to_pose')
+        self.declare_parameter('action_name', '/navigate_to_pose')
+        self.goal_client = ActionClient(self, NavigateToPose, self.get_parameter('action_name').value)
         self.stop_publisher = self.create_publisher(Twist, self.get_parameter('command_topic').value, 10)
         self.status_publisher = self.create_publisher(String, self.get_parameter('status_topic').value, 10)
         self.subscription = self.create_subscription(
