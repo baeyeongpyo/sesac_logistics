@@ -22,8 +22,9 @@ class ObservationBundleTest(unittest.TestCase):
             'foxglove-bridge:',
             '127.0.0.1:${FOXGLOVE_PORT-8765}:8765',
             'DDS_SUPER_CLIENT: "1"',
-            'sim-adapter:',
-            'condition: service_healthy',
+            'fleet-manager:',
+            'fleet-scene:',
+            'condition: service_started',
         ):
             self.assertIn(required, bridge)
         for required in (

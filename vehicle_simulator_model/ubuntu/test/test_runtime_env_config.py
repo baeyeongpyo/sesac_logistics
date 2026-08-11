@@ -212,7 +212,45 @@ class RuntimeEnvConfigTest(unittest.TestCase):
         self.assertIn('compose.foxglove.yaml', docker_log)
         self.assertIn('<foxglove-bridge>', docker_log)
 
-    def test_mapping_up_uses_foxglove_base_before_lan_overlay(self):
+    def test_sim_up_starts_core_observation_without_simulation_adapter(self):
+        result, docker_log = self.run_command(
+            'dev',
+            'SIM_NETWORK_MODE=internal\n',
+            command=('sim-up',),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for service in ('dds-discovery', 'gazebo-server', 'fleet-manager', 'fleet-scene', 'foxglove-bridge'):
+            self.assertIn(f'<{service}>', docker_log)
+        self.assertNotIn('<sim-adapter>', docker_log)
+
+    def test_sim_adapter_lifecycle_targets_only_optional_adapter_service(self):
+        result, up_log = self.run_command(
+            'dev', 'SIM_NETWORK_MODE=internal\n', command=('sim-adapter-up',),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('<up>', up_log)
+        self.assertIn('<sim-adapter>', up_log)
+        self.assertNotIn('<fleet-manager>', up_log)
+
+        result, down_log = self.run_command(
+            'dev', 'SIM_NETWORK_MODE=internal\n', command=('sim-adapter-down',),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('<kill>\n<-s>\n<SIGTERM>\n<sim-adapter>', down_log)
+        self.assertIn('<stop>\n<sim-adapter>', down_log)
+        self.assertNotIn('<gazebo-server>', down_log)
+
+    def test_nav_up_requires_an_already_running_simulation_adapter(self):
+        result, docker_log = self.run_command(
+            'dev', 'SIM_NETWORK_MODE=internal\n', command=('nav-up',),
+        )
+
+        self.assertEqual(result.returncode, 3)
+        self.assertIn('sim-adapter-up', result.stderr)
+        self.assertNotIn('<navigation>', docker_log)
+
+    def test_mapping_up_requires_an_already_running_simulation_adapter(self):
         result, docker_log = self.run_command(
             'server',
             'SIM_NETWORK_MODE=lan\nGZ_SERVER_IP=192.168.50.10\n',
@@ -220,12 +258,9 @@ class RuntimeEnvConfigTest(unittest.TestCase):
             command=('mapping-up', 'warehouse-01'),
         )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('compose.foxglove.yaml', docker_log)
-        self.assertLess(
-            docker_log.index('compose.foxglove.yaml'),
-            docker_log.index('compose.lan.yaml'),
-        )
+        self.assertEqual(result.returncode, 3)
+        self.assertIn('sim-adapter-up', result.stderr)
+        self.assertNotIn('<slam-mapper>', docker_log)
 
     def test_mapping_up_does_not_require_a_git_checkout(self):
         result, _ = self.run_command(
@@ -234,7 +269,8 @@ class RuntimeEnvConfigTest(unittest.TestCase):
             command=('mapping-up', 'warehouse-01'),
         )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn('sim-adapter-up', result.stderr)
         self.assertNotIn('fatal: not a git repository', result.stderr)
 
     def test_foxglove_lifecycle_targets_only_the_bridge(self):

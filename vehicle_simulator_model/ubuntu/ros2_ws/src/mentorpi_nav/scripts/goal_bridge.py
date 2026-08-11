@@ -7,7 +7,7 @@ from nav2_msgs.action import NavigateToPose
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from std_msgs.msg import String
+from std_msgs.msg import Empty, String
 
 
 class GoalBridge(Node):
@@ -15,6 +15,7 @@ class GoalBridge(Node):
         super().__init__('goal_bridge')
         self.declare_parameter('goal_topic', '/move_base_simple/goal')
         self.declare_parameter('command_topic', '/robot_1/controller/cmd_vel')
+        self.declare_parameter('cancel_topic', '/robot_1/navigation/cancel')
         self.declare_parameter('status_topic', '/robot_1/navigation/status')
         self.declare_parameter('action_name', '/navigate_to_pose')
         self.goal_client = ActionClient(self, NavigateToPose, self.get_parameter('action_name').value)
@@ -22,6 +23,8 @@ class GoalBridge(Node):
         self.status_publisher = self.create_publisher(String, self.get_parameter('status_topic').value, 10)
         self.subscription = self.create_subscription(
             PoseStamped, self.get_parameter('goal_topic').value, self.on_goal, 10)
+        self.cancel_subscription = self.create_subscription(
+            Empty, self.get_parameter('cancel_topic').value, self.on_cancel, 10)
         self.active_goal = None
         self.pending_goal = None
 
@@ -45,6 +48,14 @@ class GoalBridge(Node):
             self.active_goal = None
             return
         self.send_pending_goal()
+
+    def on_cancel(self, _message):
+        self.pending_goal = None
+        if self.active_goal is not None:
+            self.active_goal.cancel_goal_async()
+            self.active_goal = None
+        self.publish_status('canceled')
+        self.stop()
 
     def send_pending_goal(self, _future=None):
         if self.pending_goal is None:

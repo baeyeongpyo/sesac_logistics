@@ -58,6 +58,8 @@ if(BUILD_TESTING)
     test/test_harmonic_launch_contract.py)
   ament_add_pytest_test(test_gz_pose_to_odom
     test/test_gz_pose_to_odom.py)
+  ament_add_pytest_test(test_vehicle_adapter_contract
+    test/test_vehicle_adapter_contract.py)
   ament_add_pytest_test(
     test_pallet_manager_integration
     test/test_pallet_manager_integration.py

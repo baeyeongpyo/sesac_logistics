@@ -1,0 +1,32 @@
+control_domain: 215
+profiles:
+  - mentorpi
+vehicles:
+  - id: robot_1
+    kind: physical
+    domain_id: 1
+    namespace: /robot_1
+    profile: mentorpi
+    enabled: true
+  - id: robot_2
+    kind: physical
+    domain_id: 2
+    namespace: /robot_2
+    profile: mentorpi
+    enabled: true
+  - id: sim_robot_1
+    kind: simulation
+    domain_id: 100
+    namespace: /sim_robot_1
+    profile: mentorpi
+    enabled: true
+    spawn: {x: -2.0, y: -1.2, z: 0.05, yaw: 0.0}
+    nav_enabled: true
+  - id: sim_robot_2
+    kind: simulation
+    domain_id: 101
+    namespace: /sim_robot_2
+    profile: mentorpi
+    enabled: true
+    spawn: {x: 2.0, y: 1.2, z: 0.05, yaw: 3.14159}
+    nav_enabled: true

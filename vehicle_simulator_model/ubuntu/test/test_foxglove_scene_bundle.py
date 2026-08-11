@@ -23,7 +23,7 @@ class FoxgloveSceneBundleTest(unittest.TestCase):
         self.assertIn('test_foxglove_scene_bundle.py', test_command)
         self.assertIn('mentorpi_foxglove_scene/test', test_command)
         self.assertIn('ros2 pkg prefix mentorpi_foxglove_scene', test_command)
-        self.assertIn('--packages-select mentorpi_gz_sim mentorpi_foxglove_scene mentorpi_slam mentorpi_nav', test_command)
+        self.assertIn('--packages-select mentorpi_gz_sim mentorpi_foxglove_scene mentorpi_fleet mentorpi_slam mentorpi_nav', test_command)
 
     def test_readme_describes_the_two_scene_topics(self):
         readme = (BUNDLE / 'README.md').read_text()

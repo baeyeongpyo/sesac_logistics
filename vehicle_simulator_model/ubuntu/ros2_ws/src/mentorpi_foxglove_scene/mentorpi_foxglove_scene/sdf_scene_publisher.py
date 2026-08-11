@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import time
 from typing import Callable
+
+import yaml
 
 from .dynamic_scene import DynamicScene
 from .sdf_scene import Cube, Cylinder, Pose, SceneEntity, Sphere, static_scene_from_sdf
@@ -149,6 +152,8 @@ def main(args=None) -> None:
             self.declare_parameter('world_sdf', '')
             self.declare_parameter('models_root', '')
             self.declare_parameter('frame_id', 'warehouse')
+            self.declare_parameter('registry_path', '')
+            self.declare_parameter('pose_timeout_seconds', 1.0)
             world_sdf = Path(self.get_parameter('world_sdf').value)
             models_root = Path(self.get_parameter('models_root').value)
             self._frame_id = self.get_parameter('frame_id').value
@@ -161,12 +166,16 @@ def main(args=None) -> None:
             )
             self._static_publisher = self.create_publisher(messages.scene_update, '/warehouse_scene/static', static_qos)
             self._dynamic_publisher = self.create_publisher(messages.scene_update, '/warehouse_scene/dynamic', 10)
-            for robot_id in ('robot_1', 'robot_2'):
-                self.create_subscription(
-                    TFMessage, f'/{robot_id}/ground_truth/pose', self._on_poses, 10)
+            self._registry_path = Path(self.get_parameter('registry_path').value)
+            self._registry_mtime = None
+            self._vehicle_subscriptions = {}
+            self._pose_timeout_seconds = float(self.get_parameter('pose_timeout_seconds').value)
             self._static_entities = static_scene_from_sdf(world_sdf, models_root)
             self._dynamic_scene = DynamicScene()
             self._poses: dict[str, Pose] = {}
+            self._pose_seen_at: dict[str, float] = {}
+            self._tf_message_type = TFMessage
+            self._reload_vehicle_subscriptions()
             self._publish_static()
             self.create_timer(1.0, self._publish_static)
             self.create_timer(0.1, self._publish_dynamic)
@@ -176,12 +185,50 @@ def main(args=None) -> None:
                 entities, deleted_ids, self._frame_id, self.get_clock().now().to_msg(), messages)
 
         def _on_poses(self, message: TFMessage) -> None:
-            self._poses.update(_poses_from_tf(message))
+            poses = _poses_from_tf(message)
+            self._poses.update(poses)
+            now = time.monotonic()
+            self._pose_seen_at.update({name: now for name in poses})
+
+        def _reload_vehicle_subscriptions(self) -> None:
+            try:
+                mtime = self._registry_path.stat().st_mtime_ns
+                if mtime == self._registry_mtime:
+                    return
+                registry = yaml.safe_load(self._registry_path.read_text())
+                vehicle_ids = {
+                    vehicle['id'] for vehicle in registry.get('vehicles', [])
+                    if vehicle.get('enabled') is True
+                }
+            except (OSError, yaml.YAMLError, AttributeError, KeyError, TypeError):
+                return
+            for vehicle_id in tuple(self._vehicle_subscriptions):
+                if vehicle_id not in vehicle_ids:
+                    self.destroy_subscription(self._vehicle_subscriptions.pop(vehicle_id))
+            for vehicle_id in vehicle_ids:
+                if vehicle_id not in self._vehicle_subscriptions:
+                    self._vehicle_subscriptions[vehicle_id] = self.create_subscription(
+                        self._tf_message_type,
+                        f'/{vehicle_id}/ground_truth/pose',
+                        self._on_poses,
+                        10,
+                    )
+            self._registry_mtime = mtime
 
         def _publish_static(self) -> None:
             self._static_publisher.publish(self._update(self._static_entities, ()))
 
         def _publish_dynamic(self) -> None:
+            self._reload_vehicle_subscriptions()
+            deadline = time.monotonic() - self._pose_timeout_seconds
+            self._poses = {
+                name: pose for name, pose in self._poses.items()
+                if self._pose_seen_at.get(name, 0.0) >= deadline
+            }
+            self._pose_seen_at = {
+                name: seen_at for name, seen_at in self._pose_seen_at.items()
+                if seen_at >= deadline
+            }
             snapshot = self._dynamic_scene.snapshot(self._poses)
             self._dynamic_publisher.publish(self._update(snapshot.entities, snapshot.deleted_ids))
 

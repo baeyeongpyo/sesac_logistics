@@ -99,15 +99,17 @@ ROS 코드나 Gazebo 플러그인을 변경한 경우에는 bind mount로 반영
 
 | 서비스 | 실행 위치 | 역할 | 단독 실행 여부 |
 | --- | --- | --- | --- |
-| `dds-discovery` | Docker 내부 | `sim-adapter`와 `slam-mapper` 사이의 ROS 2 discovery | 일반 운영에서는 `run.sh`가 함께 실행 |
+| `dds-discovery` | Docker 내부 | 차량 Domain과 중앙 Domain 215의 ROS 2 discovery | 일반 운영에서는 `run.sh`가 함께 실행 |
 | `gazebo-server` | Docker 내부 | 물리·센서 시뮬레이션과 오프스크린 렌더링 | 가능하지만 ROS sensor topic은 생성하지 않음 |
-| `sim-adapter` | Docker 내부 | robot spawn, Gazebo–ROS bridge, odom 변환, TF 발행 | Gazebo와 Discovery Server가 먼저 준비돼야 함 |
+| `fleet-manager` | Docker 내부, Domain 215 | 실제 차량 registry·차량별 Domain Bridge worker·online 상태 관리 | `sim-up`에서 상시 실행 |
+| `fleet-scene` | Docker 내부, Domain 215 | 공용 warehouse Scene과 online 차량의 Foxglove Scene 발행 | `sim-up`에서 상시 실행 |
+| `sim-adapter` | Docker 내부, Domain 215 | registry의 simulation 항목별 spawn·Gazebo–ROS bridge·Nav2·worker 관리 | `sim-adapter-up`에서만 실행 |
 | `slam-mapper` | Docker 내부 | scan·odom·TF를 사용한 지도 생성과 rosbag 기록 | 단독 실행 금지, `mapping-up`으로만 시작 |
 | `slam-inspector` | Docker 내부 | 저장된 지도 세션과 checksum을 read-only로 검증 | `mapping-status`가 필요할 때만 one-shot 실행 |
 | Gazebo GUI·URDF viewer | 개발 PC | world·모델 작성 및 시각 확인 | Docker 서비스와 분리된 개발 도구 |
 
-`sim-adapter만` 실행해도 센서 데이터의 원본인 Gazebo가 없으면 정상 상태가 될 수 없다.
-따라서 일반 시뮬레이션은 `sim-up`, 지도 생성은 `mapping-up`을 진입점으로 사용한다.
+`sim-adapter`만 실행해도 센서 데이터의 원본인 Gazebo가 없으면 정상 상태가 될 수 없다.
+따라서 공용 기반은 `sim-up`, 가상 차량 추가는 `sim-adapter-up`을 순서대로 사용한다.
 `slam-mapper`는 실행 중인 adapter와 container ID를 공유하지 않으며 독립적으로 통신하지만,
 유효한 입력 데이터가 있어야 지도 세션을 publish할 수 있다.
 
@@ -122,9 +124,10 @@ cd vehicle_simulator_model/ubuntu
 | 목적 | 명령 | 비고 |
 | --- | --- | --- |
 | Gazebo server만 진단 | `docker compose up -d gazebo-server` | world만 실행되며 robot spawn·ROS topic은 없음 |
-| Gazebo + sim adapter | `./run.sh --env dev sim-up` | Discovery Server까지 포함하는 권장 진입점 |
-| sim adapter 재시작 | `docker compose restart sim-adapter` | Gazebo와 mapper는 유지 |
-| SLAM mapper 시작 | `./run.sh --env dev mapping-up <session-id>` | 필요한 시뮬레이션 서비스도 함께 시작 |
+| 공용 Gazebo + 관제 | `./run.sh --env dev sim-up` | warehouse Scene·Fleet manager·Foxglove만 시작, 가상 차량은 없음 |
+| 가상 차량 추가 | `./run.sh --env dev sim-adapter-up` | enabled simulation registry 항목만 시작 |
+| 가상 차량 제거 | `./run.sh --env dev sim-adapter-down` | 가상 차량만 정상 종료·Gazebo entity 삭제 |
+| SLAM mapper 시작 | `./run.sh --env dev mapping-up <session-id>` | `sim-adapter-up` 이후에만 시작 |
 | mapper 로그 | `docker compose --profile mapping logs -f slam-mapper` | `Ctrl+C`는 log follow만 종료 |
 | mapper 안전 종료 | `./run.sh --env dev mapping-stop` | 지도 저장과 atomic publish 수행 |
 | 지도 검증 | `./run.sh --env dev mapping-status <session-id>` | named volume을 read-only로 검사 |
@@ -132,9 +135,25 @@ cd vehicle_simulator_model/ubuntu
 | 자율주행 상태 | `./run.sh --env dev nav-status` | 선택 모드와 Nav2 토픽 endpoint 확인 |
 | 자율주행 종료 | `./run.sh --env dev nav-down` | Nav2·목표점 bridge·속도 relay만 정지 |
 
-`docker compose up -d sim-adapter`도 Compose dependency에 의해 Gazebo와 Discovery Server를
-함께 시작한다. 다만 운영 절차와 GPU profile 처리를 일관되게 유지하려면 `./run.sh --env dev sim-up`을
-사용한다. mapper는 `docker compose up`으로 직접 시작하지 않는다.
+`sim-up`은 `sim-adapter`를 시작하지 않는다. simulation 차량이 필요한 경우 반드시
+`./run.sh --env <profile> sim-adapter-up`을 호출한다. `sim-adapter-down`은 SIGTERM으로 manager에
+정상 제거를 요청하므로 Gazebo, Foxglove, 실제 차량 worker는 계속 실행된다.
+
+### Fleet registry와 ROS Domain
+
+`ros2_ws/src/mentorpi_fleet/config/fleet_registry.yaml`은 사람이 관리하는 선언 구성이다.
+기본 Domain은 실제 `robot_1=1`, `robot_2=2`, simulation `sim_robot_1=100`,
+`sim_robot_2=101`, 중앙 PC=215이다. 차량을 추가할 때는 고유한 `id`, namespace, 안전 Domain ID를
+등록한다. 파일 변경을 manager가 감지하면 바뀐 차량의 worker만 생성·교체·제거한다.
+
+중앙에서 보내는 명령은 전역 `/cmd_vel`이 아니라 차량별
+`/{vehicle}/manual/cmd_vel`, `/{vehicle}/move_base_simple/goal`,
+`/{vehicle}/navigation/cancel`, `/{vehicle}/safety/stop`만 사용한다. 로컬 차량 mux는
+정지 > 수동 > Nav2 우선순위와 watchdog 정지를 적용한다.
+
+Foxglove에서는 `ws://<server>:8765`로 연결하고 Fixed frame을 `warehouse` 또는 `map`으로 선택한다.
+`/warehouse_scene/static`은 공용 창고, `/warehouse_scene/dynamic`은 registry에서 발견되고 pose를
+계속 수신하는 차량만 표시한다. 가상 차량이 종료되면 pose timeout으로 해당 Scene entity만 삭제된다.
 
 ### Nav2 자율주행: 공유 지도와 두 로봇 AMCL
 
@@ -232,15 +251,17 @@ cp .env.dev.example .env.dev
 ./run.sh --env dev build
 ./run.sh --env dev test
 ./run.sh --env dev sim-up
+./run.sh --env dev sim-adapter-up
 docker compose ps
 ./run.sh --env dev topics
 ./run.sh --env dev fork-up
 ./run.sh --env dev down
 ```
 
-`sim-up`은 `dds-discovery`, `gazebo-server`, `sim-adapter`를 함께 시작한다. `topics`에서
-`/clock`, `/tf`, `/robot_1/scan_raw`, `/robot_1/odom`, `/robot_2/scan_raw`,
-`/robot_2/odom` 등이 확인되면 ROS adapter가 실제 payload를 받고 있는 상태다.
+`sim-up`은 `dds-discovery`, `gazebo-server`, `fleet-manager`, `fleet-scene`, Foxglove만 시작한다.
+이 시점에는 warehouse Scene만 보이는 것이 정상이다. 이어서 `sim-adapter-up`을 실행하면 registry의
+enabled `sim_robot_*`만 생성된다. `topics`에서 중앙 Domain 215의 `/fleet/status`,
+`/sim_robot_1/odom`, `/sim_robot_2/odom` 등이 확인되면 차량별 bridge가 payload를 받고 있는 상태다.
 
 개발 PC Docker에서도 지도 생성까지 검증하려면 서버와 동일한 SLAM 절차를 사용한다.
 

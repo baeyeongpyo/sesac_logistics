@@ -58,7 +58,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'ros2 pkg prefix mentorpi_gz_sim',
             'ros2 pkg prefix mentorpi_slam',
             'cd /opt/mentorpi_ws',
-            'colcon test --packages-select mentorpi_gz_sim mentorpi_foxglove_scene mentorpi_slam',
+            'colcon test --packages-select mentorpi_gz_sim mentorpi_foxglove_scene mentorpi_fleet mentorpi_slam',
             'colcon test-result --verbose',
         ):
             self.assertIn(runtime_check, test_command)
@@ -107,12 +107,16 @@ class DeployOnlyBundleTest(unittest.TestCase):
             },
         ]
 
-        for service in ('gazebo-server', 'sim-adapter'):
-            with self.subTest(service=service):
-                self.assertEqual(
-                    compose['services'][service].get('volumes', []),
-                    expected_mounts,
-                )
+        self.assertEqual(compose['services']['gazebo-server'].get('volumes', []), expected_mounts)
+        adapter_mounts = compose['services']['sim-adapter'].get('volumes', [])
+        for expected in expected_mounts:
+            self.assertIn(expected, adapter_mounts)
+        self.assertIn({
+            'type': 'bind',
+            'source': './ros2_ws/src/mentorpi_fleet/config',
+            'target': '/etc/mentorpi-fleet',
+            'read_only': True,
+        }, adapter_mounts)
 
     def test_entrypoint_resolves_relay_ipv4_or_fails_fast(self):
         entrypoint = (BUNDLE / 'entrypoint.sh').read_text()
@@ -213,7 +217,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
         ):
             self.assertIn(required, profile_text)
 
-    def test_healthchecks_require_payload_progression_for_both_robots(self):
+    def test_healthchecks_separate_shared_world_and_optional_adapter_liveness(self):
         compose = (BUNDLE / 'compose.yaml').read_text()
         health_path = BUNDLE / 'healthcheck.sh'
         self.assertTrue(health_path.is_file(), 'healthcheck.sh')
@@ -237,29 +241,16 @@ class DeployOnlyBundleTest(unittest.TestCase):
         for section in (gazebo_server, sim_adapter):
             self.assertIn('start_period:', section)
         for required in (
-            'source /opt/ros/humble/setup.bash',
-            'source /opt/mentorpi_ws/install/setup.bash',
             '/world/mentorpi_warehouse/stats',
             'gz topic',
             '-n 2',
             'iterations:',
-            'check_ros_payload robot_1 scan_raw',
-            'check_ros_payload robot_1 odom',
-            'check_ros_payload robot_2 scan_raw',
-            'check_ros_payload robot_2 odom',
-            'sensor_msgs/msg/LaserScan',
-            'nav_msgs/msg/Odometry',
-            'rosgraph_msgs/msg/Clock',
-            'check_clock_progress',
-            'tf2_echo',
-            'check_robot_tf robot_1',
-            'check_robot_tf robot_2',
-            'local parent="${robot}/odom"',
-            'local child="${robot}/base_footprint"',
-            'timeout',
+            'check_adapter_manager',
+            'simulation_manager.py',
+            'pgrep',
         ):
             self.assertIn(required, health)
-        self.assertNotIn('ros2 topic list', health)
+        self.assertNotIn('check_ros_payload robot_1', health)
 
     def test_runtime_image_contains_fastdds_discovery_cli(self):
         dockerfile = (BUNDLE / 'Dockerfile').read_text()
@@ -303,7 +294,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'DDS_SUPER_CLIENT=1',
             'source /opt/ros/humble/setup.bash',
             'source /opt/mentorpi_ws/install/setup.bash',
-            'exec sim-adapter bash -lc',
+            'exec fleet-manager bash -lc',
             'ros2 topic list --no-daemon',
         ):
             self.assertIn(required, script)
@@ -513,7 +504,8 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'export MODEL_VERSION="${MODEL_VERSION-mentorpi-m1-v1}"',
             'export TF_CALIBRATION_VERSION="${TF_CALIBRATION_VERSION-ground-truth-v1}"',
             '--profile mapping up -d',
-            'gazebo-server sim-adapter slam-mapper',
+            'require_healthy_sim_adapter',
+            'up -d slam-mapper',
         ):
             self.assertIn(required, mapping_up)
 
@@ -730,7 +722,9 @@ class DeployOnlyBundleTest(unittest.TestCase):
             'condition: service_healthy',
             'LIBGL_ALWAYS_SOFTWARE',
             'ros2 launch mentorpi_gz_sim gazebo_server.launch.py',
-            'ros2 launch mentorpi_gz_sim sim_adapter.launch.py',
+            'ros2 run mentorpi_fleet simulation_manager.py',
+            'fleet-manager:',
+            'fleet-scene:',
             'mentorpi:',
         ):
             self.assertIn(required, compose)
@@ -760,7 +754,10 @@ class DeployOnlyBundleTest(unittest.TestCase):
         script = (BUNDLE / 'run.sh').read_text()
         for command in ('build', 'sim-up', 'down', 'logs', 'test', 'fork-up'):
             self.assertIn(command, script)
-        self.assertIn('up -d dds-discovery gazebo-server sim-adapter', script)
+        self.assertIn(
+            'up -d dds-discovery gazebo-server fleet-manager fleet-scene foxglove-bridge',
+            script,
+        )
         self.assertIn('MENTORPI_IMAGE', script)
         self.assertIn('docker build --platform', script)
         self.assertNotIn('"${COMPOSE[@]}" build', script)
@@ -843,7 +840,7 @@ class DeployOnlyBundleTest(unittest.TestCase):
             '서버 PC: 시뮬레이션만 실행',
             '서버 PC: SLAM 지도 생성',
             '서비스별 실행 범위',
-            'sim-adapter만',
+            'sim-adapter-up',
             'slam-mapper',
             'docker compose --profile mapping logs -f slam-mapper',
             '--force-recreate sim-adapter',

@@ -28,6 +28,11 @@ class DynamicSceneTest(unittest.TestCase):
         self.assertEqual(robot.primitives[0].size, (0.30, 0.20, 0.12))
         self.assertEqual(robot.primitives[0].pose.position, (1.0, 2.0, 0.06))
 
+    def test_simulation_robot_pose_creates_a_vehicle_entity_without_fixed_robot_id(self):
+        snapshot = DynamicScene().snapshot({'sim_robot_3': pose(3.0, 4.0)})
+
+        self.assertEqual([entity.id for entity in snapshot.entities], ['sim_robot_3'])
+
     def test_pallet_payload_is_rendered_only_when_payload_model_exists(self):
         scene = DynamicScene()
         snapshot = scene.snapshot({

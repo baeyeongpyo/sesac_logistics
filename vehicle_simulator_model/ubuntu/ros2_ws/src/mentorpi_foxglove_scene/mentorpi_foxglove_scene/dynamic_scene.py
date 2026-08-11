@@ -65,7 +65,10 @@ class DynamicScene:
     def snapshot(self, poses: Mapping[str, Pose]) -> DynamicSnapshot:
         normalized = {_simple_name(name): pose for name, pose in poses.items()}
         entities: list[SceneEntity] = []
-        for entity_id in sorted(name for name in normalized if name in {'robot_1', 'robot_2'}):
+        for entity_id in sorted(
+            name for name in normalized
+            if name.startswith('robot_') or name.startswith('sim_robot_')
+        ):
             entities.append(_robot_entity(entity_id, normalized[entity_id]))
         for entity_id in sorted(name for name in normalized if name.startswith('pallet_') and not name.endswith('_payload')):
             entities.append(_pallet_entity(entity_id, normalized[entity_id]))

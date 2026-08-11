@@ -66,6 +66,12 @@ class NavigationContractTest(unittest.TestCase):
         self.assertIn('lambda future, goal_handle=handle: self.on_result(goal_handle, future)', bridge)
         self.assertIn('if goal_handle is not self.active_goal:', bridge)
 
+    def test_goal_bridge_exposes_a_namespaced_cancel_input(self):
+        bridge = (PACKAGE / 'scripts' / 'goal_bridge.py').read_text()
+        self.assertIn("self.declare_parameter('cancel_topic'", bridge)
+        self.assertIn('self.on_cancel', bridge)
+        self.assertIn('cancel_goal_async()', bridge)
+
 
 if __name__ == '__main__':
     unittest.main()

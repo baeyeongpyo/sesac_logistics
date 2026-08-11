@@ -14,8 +14,11 @@ RUN apt-get update \
         fastdds-tools \
         libxml2-utils \
         mesa-utils \
+        procps \
         python3-colcon-common-extensions \
         python3-rosdep \
+        python3-yaml \
+        ros-humble-domain-bridge \
         ros-humble-foxglove-bridge \
         ros-humble-foxglove-msgs \
         ros-humble-navigation2 \

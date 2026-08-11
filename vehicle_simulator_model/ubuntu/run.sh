@@ -53,7 +53,7 @@ validate_command_arity() {
   done
 
   case "${RUN_COMMAND[0]}" in
-    build|down|logs|topics|test|fork-up|foxglove-down|foxglove-logs|mapping-stop|nav-down|nav-status|gz-server|gz-gui|help|-h|--help)
+    build|down|logs|topics|test|fork-up|foxglove-down|foxglove-logs|mapping-stop|nav-down|nav-status|sim-adapter-up|sim-adapter-down|gz-server|gz-gui|help|-h|--help)
       if [[ "${#RUN_COMMAND[@]}" -ne 1 ]]; then
         echo "${RUN_COMMAND[0]} does not accept arguments" >&2
         return 2
@@ -276,16 +276,34 @@ wait_for_healthy_adapter() {
   done
 }
 
+require_healthy_sim_adapter() {
+  local adapter_id adapter_health
+  adapter_id="$("${COMPOSE[@]}" ps -q sim-adapter)"
+  if [[ -z "$adapter_id" ]]; then
+    echo 'sim-adapter is not running; start it with ./run.sh --env <profile> sim-adapter-up.' >&2
+    return 3
+  fi
+  adapter_health="$(
+    docker inspect --format '{{.State.Health.Status}}' "$adapter_id" 2>/dev/null || true
+  )"
+  if [[ "$adapter_health" != 'healthy' ]]; then
+    echo "sim-adapter is not healthy: ${adapter_health:-unknown}" >&2
+    return 4
+  fi
+}
+
 usage() {
   cat <<'EOF'
 Usage: ./run.sh --env <profile> <command>
 
 Commands:
   build              Build the immutable linux/amd64 MentorPi image.
-  sim-up [gpu]       Start Gazebo, ROS adapter, and Foxglove Bridge.
+  sim-up [gpu]       Start shared Gazebo, fleet manager, warehouse Scene, and Foxglove Bridge.
+  sim-adapter-up     Start registry-enabled simulation vehicle adapters.
+  sim-adapter-down   Gracefully remove only simulation vehicle adapters.
   down               Stop and remove simulation and Foxglove services.
-  logs               Follow Gazebo, adapter, and Foxglove Bridge logs.
-  topics             List ROS topics from the running adapter.
+  logs               Follow shared Gazebo, fleet, Scene, and Foxglove Bridge logs.
+  topics             List central fleet ROS topics.
   test               Run static checks and validate the runtime image.
   fork-up             Publish the robot_1 fork target height of 0.11 m.
   mapping-up <id>     Start a one-shot SLAM mapping session.
@@ -312,13 +330,20 @@ case "${RUN_COMMAND[0]}" in
       COMPOSE+=( -f "$BUNDLE_DIR/compose.gpu.yaml" )
       FOXGLOVE_COMPOSE+=( -f "$BUNDLE_DIR/compose.gpu.yaml" )
     fi
-    "${FOXGLOVE_COMPOSE[@]}" up -d dds-discovery gazebo-server sim-adapter foxglove-bridge
+    "${FOXGLOVE_COMPOSE[@]}" up -d dds-discovery gazebo-server fleet-manager fleet-scene foxglove-bridge
+    ;;
+  sim-adapter-up)
+    "${COMPOSE[@]}" up -d sim-adapter
+    ;;
+  sim-adapter-down)
+    "${COMPOSE[@]}" kill -s SIGTERM sim-adapter || true
+    "${COMPOSE[@]}" stop sim-adapter
     ;;
   down)
     "${FOXGLOVE_COMPOSE[@]}" down --remove-orphans
     ;;
   logs)
-    "${FOXGLOVE_COMPOSE[@]}" logs -f dds-discovery gazebo-server sim-adapter foxglove-bridge
+    "${FOXGLOVE_COMPOSE[@]}" logs -f dds-discovery gazebo-server fleet-manager fleet-scene foxglove-bridge
     ;;
   foxglove-down)
     "${FOXGLOVE_COMPOSE[@]}" stop foxglove-bridge
@@ -335,7 +360,7 @@ case "${RUN_COMMAND[0]}" in
     exec gz sim -g
     ;;
   topics)
-    "${COMPOSE[@]}" exec sim-adapter bash -lc \
+    "${COMPOSE[@]}" exec fleet-manager bash -lc \
       'set -eo pipefail
        export DDS_SUPER_CLIENT=1
        source /usr/local/bin/mentorpi-dds-env
@@ -359,6 +384,12 @@ case "${RUN_COMMAND[0]}" in
     python3 -m unittest discover \
       -s "$BUNDLE_DIR/ros2_ws/src/mentorpi_foxglove_scene/test" \
       -p 'test_*.py' -v
+    python3 -m unittest discover \
+      -s "$BUNDLE_DIR/ros2_ws/src/mentorpi_nav/test" \
+      -p 'test_*.py' -v
+    python3 -m unittest discover \
+      -s "$BUNDLE_DIR/ros2_ws/src/mentorpi_fleet/test" \
+      -p 'test_*.py' -v
 
     printf 'mentorpi test stage=compose-config\n'
     "${FOXGLOVE_COMPOSE[@]}" config --quiet
@@ -372,6 +403,7 @@ case "${RUN_COMMAND[0]}" in
        ros2 pkg prefix mentorpi_description && \
        ros2 pkg prefix mentorpi_gz_sim && \
        ros2 pkg prefix mentorpi_foxglove_scene && \
+       ros2 pkg prefix mentorpi_fleet && \
        ros2 pkg prefix mentorpi_slam && \
        ros2 pkg prefix mentorpi_nav && \
        xacro \
@@ -379,7 +411,7 @@ case "${RUN_COMMAND[0]}" in
          robot_name:=robot_1 \
          | tee /tmp/robot_1.sdf \
          | grep -F 'model://mentorpi_description/meshes/mecanum/lidar_Link.STL' && \
-       colcon test --packages-select mentorpi_gz_sim mentorpi_foxglove_scene mentorpi_slam mentorpi_nav --event-handlers console_direct+ && \
+       colcon test --packages-select mentorpi_gz_sim mentorpi_foxglove_scene mentorpi_fleet mentorpi_slam mentorpi_nav --event-handlers console_direct+ && \
        colcon test-result --verbose"
     ;;
   fork-up)
@@ -399,12 +431,12 @@ case "${RUN_COMMAND[0]}" in
       "$ROS_SETUP && timeout 10 ros2 topic pub --once /robot_1/fork/command std_msgs/msg/Float64 '{data: 0.11}'"
     ;;
   nav-up)
+    require_healthy_sim_adapter
     unset NAV_SESSION_ID
     if [[ "${#RUN_COMMAND[@]}" -eq 3 ]]; then
       export NAV_SESSION_ID="${RUN_COMMAND[2]}"
     fi
-    "${COMPOSE[@]}" --profile navigation up -d --wait \
-      dds-discovery gazebo-server sim-adapter navigation
+    "${COMPOSE[@]}" --profile navigation up -d --wait navigation
     ;;
   nav-down)
     "${COMPOSE[@]}" --profile navigation stop navigation
@@ -427,14 +459,14 @@ case "${RUN_COMMAND[0]}" in
       exit 2
     fi
     validate_session_id "${RUN_COMMAND[1]}"
+    require_healthy_sim_adapter
     export SESSION_ID="${RUN_COMMAND[1]}"
     export IMAGE_VERSION="${IMAGE_VERSION-mentorpi-sim:harmonic}"
     export GIT_COMMIT="${GIT_COMMIT-$(git -C "$BUNDLE_DIR" rev-parse HEAD 2>/dev/null || printf 'unknown')}"
     export WORLD_VERSION="${WORLD_VERSION-warehouse-v1}"
     export MODEL_VERSION="${MODEL_VERSION-mentorpi-m1-v1}"
     export TF_CALIBRATION_VERSION="${TF_CALIBRATION_VERSION-ground-truth-v1}"
-    "${COMPOSE[@]}" --profile mapping up -d \
-      dds-discovery gazebo-server sim-adapter slam-mapper
+    "${COMPOSE[@]}" --profile mapping up -d slam-mapper
     ;;
   mapping-stop)
     if [[ "${#RUN_COMMAND[@]}" -ne 1 ]]; then

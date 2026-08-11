@@ -18,19 +18,18 @@ class SceneContractTest(unittest.TestCase):
 
         self.assertIsNone(plugin)
 
-    def test_scene_publisher_uses_named_ground_truth_streams_for_each_robot(self):
+    def test_scene_publisher_uses_registry_discovered_ground_truth_streams(self):
         text = PUBLISHER.read_text()
 
-        self.assertIn("for robot_id in ('robot_1', 'robot_2')", text)
-        self.assertIn("f'/{robot_id}/ground_truth/pose'", text)
-        self.assertIn('self._poses.update(_poses_from_tf(message))', text)
+        self.assertIn("self.declare_parameter('registry_path'", text)
+        self.assertIn("vehicle['id']", text)
+        self.assertIn("f'/{vehicle_id}/ground_truth/pose'", text)
+        self.assertIn('self._pose_seen_at.update', text)
 
-    def test_adapter_launch_starts_scene_publisher_without_robot_owned_warehouse_tf(self):
+    def test_adapter_launch_does_not_own_shared_warehouse_scene(self):
         text = LAUNCH.read_text()
 
-        self.assertIn("package='mentorpi_foxglove_scene'", text)
-        self.assertIn("executable='sdf_scene_publisher'", text)
-        self.assertIn("'frame_id': 'warehouse'", text)
+        self.assertNotIn("package='mentorpi_foxglove_scene'", text)
         self.assertNotIn("name='warehouse_frame'", text)
         self.assertNotIn("'--frame-id', 'robot_1/odom'", text)
         self.assertNotIn("'--child-frame-id', 'warehouse'", text)
