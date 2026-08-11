@@ -70,6 +70,28 @@ worker는 모두 중앙 PC에서 실행한다. 실제 차량에는 domain_bridge
 /{robot}/safety/stop
 ```
 
+## 시뮬레이션 기반과 차량 adapter의 분리
+
+`sim-up`과 `sim-adapter-up`은 별도 명령으로 둔다. 이 분리는 실행 모드 전환이
+아니라, 공용 Gazebo 기반과 가상 차량 ROS adapter의 독립 생명주기다.
+
+| 명령 | 시작 또는 종료 대상 | 차량 표시 결과 |
+| --- | --- | --- |
+| `sim-up` | DDS discovery, Gazebo server, Foxglove Bridge, Fleet manager | 창고 Scene만 표시, 가상 차량 없음 |
+| `sim-adapter-up` | simulation registry에서 `enabled: true`인 차량의 adapter·Nav2·worker·Gazebo entity | 해당 `sim_robot_*`만 추가 표시 |
+| `sim-adapter-down` | 모든 simulation adapter·Nav2·worker·Gazebo entity를 정상 종료·삭제 | 가상 차량만 제거, 창고·실제 차량 관제 유지 |
+| `down` | 전체 시뮬레이션 기반과 관제 컨테이너 종료 | 전체 종료 |
+
+현재 `sim-up`에 포함된 `sim-adapter`는 제거한다. Foxglove Bridge는 `sim-adapter`
+healthcheck가 아니라 Gazebo server와 중앙 Fleet manager에 의존한다. `nav-up`은
+sim-adapter를 자동으로 시작하지 않고, 필요한 simulation adapter가 이미 online인지
+검사하여 아니라면 명확한 오류를 반환한다.
+
+`sim-adapter-down`은 단순 Docker stop을 사용하지 않는다. Fleet manager가 먼저 해당
+차량의 명령 수락을 중지하고, Nav2와 ROS-Gazebo bridge를 종료하며, Gazebo entity와
+Foxglove Scene entity를 삭제한 뒤 adapter 프로세스를 종료한다. 이 순서로 고아 차량
+모델과 마지막 자세가 화면에 남는 것을 방지한다.
+
 ## 차량 추가·삭제 절차
 
 ### 실제 차량
@@ -124,6 +146,10 @@ Foxglove Scene publisher는 registry의 `enabled` 차량 중 온라인 차량만
    Foxglove Scene entity가 생성·삭제되는지 검증한다.
 5. odom timeout 후 해당 차량만 offline 및 Scene 삭제가 되고 다른 차량의 명령 경로가
    유지되는지 검증한다.
+6. `sim-up` 직후 Gazebo 창고 Scene은 보이지만 sim_robot entity와 simulation adapter는
+   존재하지 않는지 검증한다.
+7. `sim-adapter-up`과 `sim-adapter-down`이 각각 가상 차량만 생성·삭제하고 Gazebo
+   server, Foxglove, 실제 차량 worker를 재시작하지 않는지 검증한다.
 
 ## 근거와 범위
 
