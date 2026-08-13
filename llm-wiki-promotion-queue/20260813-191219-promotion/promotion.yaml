@@ -1,0 +1,62 @@
+promotion_package:
+  source_owner: yeongpyo
+  claims:
+  - claim_id: mentorpi-fastdds-discovery-server-architecture
+    content: The MentorPi Fast DDS deployment centralizes only DDS discovery through
+      a Discovery Server on UDP 11811; matched ROS 2 endpoint payload remains direct
+      UDPv4 traffic between vehicles and consumers rather than being relayed by the
+      server.
+    target_section: concepts/fast-dds-domain-bridge
+  - claim_id: mentorpi-domain-isolation-and-telemetry-bridge
+    content: The standalone bridge keeps robot_1 and robot_2 in separate source DDS
+      Domains (default 1 and 2) and forwards an explicit, one-way telemetry allowlist
+      to central Domain 215; it excludes cmd_vel and other control topics.
+    target_section: concepts/fast-dds-domain-bridge
+  - claim_id: mentorpi-fastdds-operational-boundaries
+    content: The Fast DDS bridge requires rmw_fastrtps_cpp, a reachable central Discovery
+      Server IPv4 locator, UDPv4 transport, and Linux host networking; the original
+      MentorPi runtime documents a separate CycloneDDS default, so the two middleware
+      configurations must be selected explicitly rather than mixed implicitly.
+    target_section: concepts/fast-dds-domain-bridge
+  evidence_digest:
+  - Static analysis on 2026-08-13 of the standalone dds-domain-bridge compose, entrypoint,
+    Fast DDS environment helper, observer, and explicit bridge template confirmed
+    the service topology, Domain validation, Discovery Server command, diagnostic
+    Super Client handling, and 16-topic telemetry allowlist.
+  - The refined page records the official Fast DDS Discovery Server model and distinguishes
+    discovery control traffic from direct user payload traffic.
+  - Selected Project wiki records the original MentorPi .typerc default as CycloneDDS
+    with ROS_DOMAIN_ID=0; the refined page treats Fast DDS as a separate, explicit
+    deployment configuration.
+  - No central Linux server or physical MentorPi end-to-end test was run; firewall
+    reachability, actual topic names/types, QoS compatibility, and live telemetry
+    remain runtime verification items.
+  lineage:
+  - page_path: vehicle_simulator_model/ubuntu/dds-domain-bridge/README.md
+    sha256: 7bed10bee4905adc6d3870882ca1ced7a3ba1b2c4fb6753f4a589e7709756434
+  - page_path: vehicle_simulator_model/ubuntu/dds-domain-bridge/docker-compose.yaml
+    sha256: b029e58e63024a92a6fceb7697f6e874cdb6214aa42b1d769a0046b8493701d2
+  - page_path: vehicle_simulator_model/ubuntu/dds-domain-bridge/bridge.yaml.template
+    sha256: e1669efe480ca424586b828b1856d2fa74d21542073aabd14e6d1b0788332211
+  - page_path: vehicle_simulator_model/ubuntu/dds-domain-bridge/dds_env.sh
+    sha256: ee094a1a615c14dbe7da5205c3f285253452afebd5efc5892d06b81236cd908d
+  - page_path: vehicle_simulator_model/ubuntu/dds-domain-bridge/dds-observe
+    sha256: f4acfa52db52cb3b75eafd6cbd97a03a3599176b049a141a95957ba6678f9be6
+  - page_path: vehicle_simulator_model/ubuntu/dds-domain-bridge/entrypoint.sh
+    sha256: 4c59a98dc5f4175c0ae5399456d5aa506feae33e0cd71e38965cc7ec358c6158
+  - page_path: vehicle_simulator_model/ubuntu/dds_env.sh
+    sha256: a9b722b56188ddf4ec798f22ba398fcae040b5bbd9103f3b5a4282baf360efef
+  - page_path: vehicle_simulator_model/ubuntu/compose.yaml
+    sha256: 4e6d802f39dc22316e95390c7168954679e6b7541c7c11f27f0f171b671b19b7
+  - page_path: artifacts/vehicle/sources/hiwonder-mentorpi-getting-ready-implementation-guide.md
+    sha256: 7cf3d2c3c20441f8aec7c901ccca69923a2f73c0df313d7cb0920a9a958b8731
+  confidence: medium
+  requested_target_pages:
+  - concepts/fast-dds-domain-bridge.md
+  raw_transfer_policy: none
+  refined_pages:
+  - pack_path: files/concepts/fast-dds-domain-bridge.md
+    target_path: concepts/fast-dds-domain-bridge.md
+    sha256: db220717ce53ed012bf078eedfecb3e11652c5d8fa7ac1f5d40265129542a183
+  reviewer_required: true
+  submitted_at: '2026-08-13T10:12:19Z'
