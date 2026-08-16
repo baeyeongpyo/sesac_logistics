@@ -1,0 +1,66 @@
+# Domain Bridge는 wildcard를 사용하지 않는다. 실제 차량 topic이 다르면 명시적으로 추가한다.
+topics:
+  /robot_1/odom:
+    type: nav_msgs/msg/Odometry
+    from_domain: ${ROBOT_1_DOMAIN_ID}
+    to_domain: ${CENTRAL_DOMAIN_ID}
+  /robot_1/odom_raw:
+    type: nav_msgs/msg/Odometry
+    from_domain: ${ROBOT_1_DOMAIN_ID}
+    to_domain: ${CENTRAL_DOMAIN_ID}
+  /robot_1/scan:
+    type: sensor_msgs/msg/LaserScan
+    from_domain: ${ROBOT_1_DOMAIN_ID}
+    to_domain: ${CENTRAL_DOMAIN_ID}
+  /robot_1/scan_raw:
+    type: sensor_msgs/msg/LaserScan
+    from_domain: ${ROBOT_1_DOMAIN_ID}
+    to_domain: ${CENTRAL_DOMAIN_ID}
+  /robot_1/imu:
+    type: sensor_msgs/msg/Imu
+    from_domain: ${ROBOT_1_DOMAIN_ID}
+    to_domain: ${CENTRAL_DOMAIN_ID}
+  /robot_1/ros_robot_controller/imu:
+    type: sensor_msgs/msg/Imu
+    from_domain: ${ROBOT_1_DOMAIN_ID}
+    to_domain: ${CENTRAL_DOMAIN_ID}
+  /robot_1/tf:
+    type: tf2_msgs/msg/TFMessage
+    from_domain: ${ROBOT_1_DOMAIN_ID}
+    to_domain: ${CENTRAL_DOMAIN_ID}
+  /robot_1/tf_static:
+    type: tf2_msgs/msg/TFMessage
+    from_domain: ${ROBOT_1_DOMAIN_ID}
+    to_domain: ${CENTRAL_DOMAIN_ID}
+  /robot_2/odom:
+    type: nav_msgs/msg/Odometry
+    from_domain: ${ROBOT_2_DOMAIN_ID}
+    to_domain: ${CENTRAL_DOMAIN_ID}
+  /robot_2/odom_raw:
+    type: nav_msgs/msg/Odometry
+    from_domain: ${ROBOT_2_DOMAIN_ID}
+    to_domain: ${CENTRAL_DOMAIN_ID}
+  /robot_2/scan:
+    type: sensor_msgs/msg/LaserScan
+    from_domain: ${ROBOT_2_DOMAIN_ID}
+    to_domain: ${CENTRAL_DOMAIN_ID}
+  /robot_2/scan_raw:
+    type: sensor_msgs/msg/LaserScan
+    from_domain: ${ROBOT_2_DOMAIN_ID}
+    to_domain: ${CENTRAL_DOMAIN_ID}
+  /robot_2/imu:
+    type: sensor_msgs/msg/Imu
+    from_domain: ${ROBOT_2_DOMAIN_ID}
+    to_domain: ${CENTRAL_DOMAIN_ID}
+  /robot_2/ros_robot_controller/imu:
+    type: sensor_msgs/msg/Imu
+    from_domain: ${ROBOT_2_DOMAIN_ID}
+    to_domain: ${CENTRAL_DOMAIN_ID}
+  /robot_2/tf:
+    type: tf2_msgs/msg/TFMessage
+    from_domain: ${ROBOT_2_DOMAIN_ID}
+    to_domain: ${CENTRAL_DOMAIN_ID}
+  /robot_2/tf_static:
+    type: tf2_msgs/msg/TFMessage
+    from_domain: ${ROBOT_2_DOMAIN_ID}
+    to_domain: ${CENTRAL_DOMAIN_ID}

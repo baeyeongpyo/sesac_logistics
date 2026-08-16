@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: dds-observe <topics|echo|hz> [topic]
+
+Optional environment:
+  DDS_OBSERVE_DOMAIN_ID=<0..232>  Inspect this source Domain instead of central Domain.
+
+`topics` is a Discovery Server-wide graph query. `echo` and `hz` create a
+normal DDS subscription in the selected Domain.
+EOF
+}
+
+validate_domain_id() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9]+$ ]] && ((10#$value <= 232))
+}
+
+command_name="${1:-topics}"
+if [[ "$command_name" == help || "$command_name" == --help || "$command_name" == -h ]]; then
+  usage
+  exit 0
+fi
+
+if [[ -n "${DDS_OBSERVE_DOMAIN_ID:-}" ]]; then
+  if ! validate_domain_id "$DDS_OBSERVE_DOMAIN_ID"; then
+    printf 'dds-observe config_error=invalid_domain_id value=%s\n' \
+      "$DDS_OBSERVE_DOMAIN_ID" >&2
+    exit 64
+  fi
+  export ROS_DOMAIN_ID="$DDS_OBSERVE_DOMAIN_ID"
+fi
+
+: "${DDS_DISCOVERY_HOST:?DDS_DISCOVERY_HOST is required}"
+source /opt/ros/humble/setup.bash
+set -u
+
+case "$command_name" in
+  topics)
+    [[ "$#" == 1 || "$#" == 0 ]] || { usage >&2; exit 64; }
+    export DDS_SUPER_CLIENT=1
+    source /usr/local/bin/dds-domain-bridge-env
+    trap 'rm -f -- "${DDS_SUPER_CLIENT_PROFILE:-}"' EXIT
+    printf 'dds-observe notice=global_discovery_graph domain_filter=not_applied\n' >&2
+    ros2 topic list --no-daemon
+    ;;
+  echo|hz)
+    [[ "$#" == 2 && "$2" == /* ]] || { usage >&2; exit 64; }
+    export DDS_SUPER_CLIENT=0
+    unset FASTRTPS_DEFAULT_PROFILES_FILE FASTDDS_DEFAULT_PROFILES_FILE
+    source /usr/local/bin/dds-domain-bridge-env
+    if [[ "$command_name" == echo ]]; then
+      ros2 topic echo "$2" --once
+    else
+      ros2 topic hz "$2"
+    fi
+    ;;
+  *)
+    usage >&2
+    exit 64
+    ;;
+esac
