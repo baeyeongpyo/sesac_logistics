@@ -1,0 +1,44 @@
+name: mentorpi-dds-observation
+
+# 실차 관측 전용 구성이다. 모든 participant는 ROS Domain 215에서 multicast
+# discovery를 사용하며, Gazebo·DDS Discovery Server·DDS Domain Bridge에는 의존하지 않는다.
+services:
+  foxglove-bridge:
+    build:
+      context: .
+    image: "${DDS_OBSERVATION_IMAGE:-mentorpi-dds-observation:humble}"
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      SERVICE_NAME: foxglove-bridge
+      ROS_DOMAIN_ID: "215"
+      ROBOT_IDS: robot_1,robot_2
+    command:
+      [ros2, launch, foxglove_bridge, foxglove_bridge_launch.xml,
+       "address:=${FOXGLOVE_BIND_ADDRESS:-0.0.0.0}",
+       "port:=${FOXGLOVE_PORT:-8765}"]
+
+  rosbag-recorder:
+    build:
+      context: .
+    image: "${DDS_OBSERVATION_IMAGE:-mentorpi-dds-observation:humble}"
+    network_mode: host
+    # Docker named volume은 처음 생성될 때 root 소유이므로, 시작 래퍼가
+    # /rosbag의 소유권만 초기화한 뒤 ros 사용자로 recorder를 실행한다.
+    user: "0:0"
+    restart: unless-stopped
+    environment:
+      SERVICE_NAME: rosbag-recorder
+      ROS_DOMAIN_ID: "215"
+      ROBOT_IDS: robot_1,robot_2
+      ROSBAG_ROOT: /rosbag
+      ROSBAG_SESSION_ID: "${ROSBAG_SESSION_ID:-}"
+    volumes:
+      - type: volume
+        source: rosbag-data
+        target: /rosbag
+    command: [/usr/local/bin/mentorpi-rosbag-recorder-bootstrap]
+
+volumes:
+  rosbag-data:
+    name: "${ROSBAG_VOLUME_NAME:-mentorpi-rosbag-data}"
