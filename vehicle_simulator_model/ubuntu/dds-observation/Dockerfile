@@ -14,10 +14,10 @@ RUN apt-get update \
 
 RUN useradd --create-home --uid 1000 --user-group --shell /bin/bash ros
 
-COPY rosbag_recorder.sh /usr/local/bin/mentorpi-rosbag-recorder
-COPY rosbag_recorder_bootstrap.sh /usr/local/bin/mentorpi-rosbag-recorder-bootstrap
-COPY map_server.sh /usr/local/bin/mentorpi-map-server
-COPY map_server_bootstrap.sh /usr/local/bin/mentorpi-map-server-bootstrap
+COPY rosbag-recorder/rosbag_recorder.sh /usr/local/bin/mentorpi-rosbag-recorder
+COPY rosbag-recorder/rosbag_recorder_bootstrap.sh /usr/local/bin/mentorpi-rosbag-recorder-bootstrap
+COPY map-server/map_server.sh /usr/local/bin/mentorpi-map-server
+COPY map-server/map_server_bootstrap.sh /usr/local/bin/mentorpi-map-server-bootstrap
 RUN chmod +x /usr/local/bin/mentorpi-rosbag-recorder \
     /usr/local/bin/mentorpi-rosbag-recorder-bootstrap \
     /usr/local/bin/mentorpi-map-server \
