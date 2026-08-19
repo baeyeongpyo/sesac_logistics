@@ -8,6 +8,9 @@ services:
       context: .
     image: "${DDS_OBSERVATION_IMAGE:-mentorpi-dds-observation:humble}"
     network_mode: host
+    # network_mode: host와 함께 Fast DDS SHM transport가 컨테이너 간에도
+    # 동작하려면 host IPC namespace를 공유해야 한다.
+    ipc: host
     restart: unless-stopped
     environment:
       SERVICE_NAME: foxglove-bridge
@@ -17,6 +20,40 @@ services:
       [ros2, launch, foxglove_bridge, foxglove_bridge_launch.xml,
        "address:=${FOXGLOVE_BIND_ADDRESS:-0.0.0.0}",
        "port:=${FOXGLOVE_PORT:-8765}"]
+
+  map-server:
+    build:
+      context: .
+    image: "${DDS_OBSERVATION_IMAGE:-mentorpi-dds-observation:humble}"
+    network_mode: host
+    # map-server와 foxglove-bridge가 동일한 Fast DDS SHM space를 사용한다.
+    ipc: host
+    # Named overlay는 최초 생성 시 root 소유이므로, bootstrap이 소유권을
+    # 초기화한 뒤 ros 사용자로 빌드·실행한다.
+    user: "0:0"
+    restart: unless-stopped
+    environment:
+      SERVICE_NAME: map-server
+      ROS_DOMAIN_ID: "215"
+      MAP_YAML: /maps/map.yaml
+      MAP_USE_SIM_TIME: "${MAP_USE_SIM_TIME:-false}"
+    volumes:
+      - type: volume
+        source: map-server-overlay
+        target: /ws
+      - type: bind
+        source: ../ros2_ws/src/mentorpi_map_server
+        target: /ws/src/mentorpi_map_server
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MAP_DIRECTORY:?MAP_DIRECTORY is required}
+        target: /maps
+        read_only: true
+        bind:
+          create_host_path: false
+    command: [/usr/local/bin/mentorpi-map-server-bootstrap]
 
   rosbag-recorder:
     build:
@@ -40,5 +77,7 @@ services:
     command: [/usr/local/bin/mentorpi-rosbag-recorder-bootstrap]
 
 volumes:
+  map-server-overlay:
+    name: "${MAP_SERVER_OVERLAY_VOLUME:-mentorpi-map-server-overlay}"
   rosbag-data:
     name: "${ROSBAG_VOLUME_NAME:-mentorpi-rosbag-data}"
