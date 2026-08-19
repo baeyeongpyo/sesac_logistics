@@ -76,6 +76,17 @@ validate_command_arity() {
         return 2
       fi
       ;;
+    map-import)
+      if [[ "${#RUN_COMMAND[@]}" -ne 2 ]]; then
+        echo 'map-import requires exactly one map ID' >&2
+        return 2
+      fi
+      if [[ ! "${RUN_COMMAND[1]}" =~ ^[A-Za-z0-9._-]+$ \
+        || "${RUN_COMMAND[1]}" == '.' || "${RUN_COMMAND[1]}" == '..' ]]; then
+        echo 'map ID may contain only A-Z, a-z, 0-9, period, underscore, and hyphen, but not . or ..' >&2
+        return 2
+      fi
+      ;;
     nav-up)
       if [[ "${#RUN_COMMAND[@]}" -gt 3 ]]; then
         echo 'nav-up accepts auto and one optional mapping session ID' >&2
@@ -309,6 +320,7 @@ Commands:
   mapping-up <id>     Start a one-shot SLAM mapping session.
   mapping-stop        Send SIGINT and wait for safe SLAM finalization.
   mapping-status <id> Verify a published mapping session's checksums.
+  map-import <id>    Import /map-import/<id>/map.pgm and map.yaml as a verified map session.
   nav-up auto [id]    Start Nav2 with a verified map ID or SLAM fallback.
   nav-down             Stop Nav2 without stopping the simulation.
   nav-status           Show Nav2 topic-endpoint and selected-mode diagnostics.
@@ -373,6 +385,7 @@ case "${RUN_COMMAND[0]}" in
     printf 'mentorpi test stage=host-static\n'
     python3 "$BUNDLE_DIR/test/test_bundle.py" -v
     python3 "$BUNDLE_DIR/test/test_navigation_bundle.py" -v
+    python3 "$BUNDLE_DIR/test/test_map_import_bundle.py" -v
     python3 "$BUNDLE_DIR/test/test_foxglove_scene_bundle.py" -v
     python3 "$BUNDLE_DIR/test/test_runtime_env_config.py" -v
     python3 "$BUNDLE_DIR/test/test_observation_bundle.py" -v
@@ -437,6 +450,10 @@ case "${RUN_COMMAND[0]}" in
       export NAV_SESSION_ID="${RUN_COMMAND[2]}"
     fi
     "${COMPOSE[@]}" --profile navigation up -d --wait navigation
+    ;;
+  map-import)
+    export MAP_IMPORT_ID="${RUN_COMMAND[1]}"
+    "${COMPOSE[@]}" --profile map-import run --rm map-importer
     ;;
   nav-down)
     "${COMPOSE[@]}" --profile navigation stop navigation

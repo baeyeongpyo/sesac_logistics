@@ -1,16 +1,16 @@
-control_domain: 215
+control_domain: 225
 profiles:
   - mentorpi
 vehicles:
   - id: robot_1
     kind: physical
-    domain_id: 1
+    domain_id: 215
     namespace: /robot_1
     profile: mentorpi
     enabled: true
   - id: robot_2
     kind: physical
-    domain_id: 2
+    domain_id: 216
     namespace: /robot_2
     profile: mentorpi
     enabled: true

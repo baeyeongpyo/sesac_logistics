@@ -25,7 +25,8 @@ class FleetManagerNode:
         self._last_registry_mtime: int | None = None
         self._subscriptions = {}
         self._presence = FleetPresence(timeout_seconds)
-        self._workers = BridgeWorkerManager(215, runtime_dir)
+        self._workers: BridgeWorkerManager | None = None
+        self._control_domain: int | None = None
         self._odom_type = Odometry
         self._status_publisher = self._node.create_publisher(String, '/fleet/status', 10)
         self._string_type = String
@@ -49,9 +50,14 @@ class FleetManagerNode:
         except RegistryValidationError as error:
             self._node.get_logger().error(f'fleet registry rejected; keeping current workers: {error}')
             return
-        if registry.control_domain != 215:
-            self._node.get_logger().error('fleet registry control_domain must be 215; keeping current workers')
+        if self._control_domain is not None and registry.control_domain != self._control_domain:
+            self._node.get_logger().error(
+                'fleet registry control_domain changed at runtime; keeping current workers'
+            )
             return
+        if self._workers is None:
+            self._control_domain = registry.control_domain
+            self._workers = BridgeWorkerManager(registry.control_domain, self._runtime_dir)
         vehicles = enabled_vehicles(registry, kind='physical')
         self._workers.reconcile(vehicles)
         self._presence.reconcile(vehicles, kind='physical')
@@ -79,7 +85,8 @@ class FleetManagerNode:
         self._status_publisher.publish(message)
 
     def shutdown(self) -> None:
-        self._workers.stop_all()
+        if self._workers is not None:
+            self._workers.stop_all()
         self._node.destroy_node()
 
 

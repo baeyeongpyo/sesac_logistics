@@ -13,9 +13,201 @@ import yaml
 BUNDLE = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = BUNDLE.parents[1]
 GAZEBO_CMAKE = BUNDLE / 'ros2_ws/src/mentorpi_gz_sim/CMakeLists.txt'
+OBSERVATION_BUNDLE = BUNDLE / 'dds-observation'
+OBSERVATION_COMPOSE = OBSERVATION_BUNDLE / 'docker-compose.yaml'
+ROSBAG_RECORDER = OBSERVATION_BUNDLE / 'rosbag-recorder/rosbag_recorder.sh'
+ROSBAG_BOOTSTRAP = OBSERVATION_BUNDLE / 'rosbag-recorder/rosbag_recorder_bootstrap.sh'
 
 
 class DeployOnlyBundleTest(unittest.TestCase):
+    def test_physical_observation_map_server_mounts_the_live_package_and_map_data(self):
+        """Map updates must be deployed from host mounts without rebuilding Foxglove."""
+        with TemporaryDirectory() as directory:
+            map_directory = Path(directory)
+            environment = os.environ.copy()
+            environment.update({
+                'DDS_OBSERVATION_IMAGE': 'mentorpi-dds-observation:test',
+                'MAP_DIRECTORY': str(map_directory),
+                'MAP_SERVER_OVERLAY_VOLUME': 'mentorpi-map-server-overlay-test',
+            })
+            result = subprocess.run(
+                [
+                    'docker', 'compose',
+                    '--env-file', str(OBSERVATION_BUNDLE / '.env.example'),
+                    '-f', str(OBSERVATION_COMPOSE),
+                    'config', '--format', 'json',
+                ],
+                text=True,
+                capture_output=True,
+                env=environment,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        services = json.loads(result.stdout)['services']
+        self.assertIn('map-server', services)
+        map_server = services['map-server']
+        self.assertEqual(map_server['network_mode'], 'host')
+        self.assertEqual(map_server['user'], '0:0')
+        self.assertEqual(map_server['environment']['ROS_DOMAIN_ID'], '225')
+        self.assertEqual(map_server['environment']['MAP_YAML'], '/maps/map.yaml')
+        self.assertEqual(
+            map_server['command'],
+            ['/usr/local/bin/mentorpi-map-server-bootstrap'],
+        )
+
+        mounts = {mount['target']: mount for mount in map_server['volumes']}
+        self.assertEqual(mounts['/ws']['type'], 'volume')
+        self.assertEqual(mounts['/ws/src/mentorpi_map_server']['type'], 'bind')
+        self.assertTrue(mounts['/ws/src/mentorpi_map_server']['read_only'])
+        self.assertEqual(mounts['/maps']['type'], 'bind')
+        self.assertEqual(mounts['/maps']['source'], str(map_directory))
+        self.assertTrue(mounts['/maps']['read_only'])
+
+    def test_physical_observation_exposes_foxglove_on_all_interfaces_with_configured_port(self):
+        """A trusted LAN client must be able to use the configured Foxglove port."""
+        environment = os.environ.copy()
+        environment.update({
+            'DDS_OBSERVATION_IMAGE': 'mentorpi-dds-observation:test',
+            'FOXGLOVE_PORT': '9234',
+        })
+        result = subprocess.run(
+            [
+                'docker', 'compose',
+                '--env-file', str(OBSERVATION_BUNDLE / '.env.example'),
+                '-f', str(OBSERVATION_COMPOSE),
+                'config', '--format', 'json',
+            ],
+            text=True,
+            capture_output=True,
+            env=environment,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        bridge = json.loads(result.stdout)['services']['foxglove-bridge']
+        self.assertEqual(
+            bridge['command'],
+            [
+                'ros2', 'launch', 'foxglove_bridge', 'foxglove_bridge_launch.xml',
+                'address:=0.0.0.0', 'port:=9234',
+            ],
+        )
+
+    def test_physical_observation_compose_uses_the_central_control_domain(self):
+        """The observer must consume only telemetry bridged into Domain 225."""
+        self.assertTrue((OBSERVATION_BUNDLE / 'Dockerfile').is_file())
+        self.assertTrue((OBSERVATION_BUNDLE / 'README.md').is_file())
+        compose = yaml.safe_load(OBSERVATION_COMPOSE.read_text())
+        services = compose['services']
+
+        self.assertEqual(
+            set(services),
+            {'foxglove-bridge', 'map-server', 'rosbag-recorder'},
+        )
+        for name in services:
+            with self.subTest(service=name):
+                service = services[name]
+                self.assertEqual(service['network_mode'], 'host')
+                self.assertEqual(service['environment']['ROS_DOMAIN_ID'], '225')
+                self.assertNotIn('DDS_DISCOVERY_HOST', service['environment'])
+                self.assertNotIn('DDS_DISCOVERY_PORT', service['environment'])
+                self.assertNotIn('DDS_SUPER_CLIENT', service['environment'])
+                self.assertNotIn('depends_on', service)
+
+        self.assertEqual(
+            services['rosbag-recorder']['command'],
+            ['/usr/local/bin/mentorpi-rosbag-recorder-bootstrap'],
+        )
+        self.assertEqual(services['rosbag-recorder']['user'], '0:0')
+        self.assertTrue(ROSBAG_BOOTSTRAP.is_file())
+        bootstrap = ROSBAG_BOOTSTRAP.read_text()
+        self.assertIn('chown ros:ros "$rosbag_root"', bootstrap)
+        self.assertIn('runuser -u ros --preserve-environment --', bootstrap)
+        self.assertFalse((BUNDLE / 'compose.observation.yaml').exists())
+        self.assertFalse((BUNDLE / 'rosbag_recorder.sh').exists())
+
+    def test_rosbag_recorder_creates_a_session_with_both_vehicle_telemetry_topics(self):
+        """A recorder restart must create an independent bag for the two live vehicles."""
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            bin_dir = root / 'bin'
+            bin_dir.mkdir()
+            invocation = root / 'ros2-invocation'
+            fake_ros2 = bin_dir / 'ros2'
+            fake_ros2.write_text(textwrap.dedent('''\
+                #!/usr/bin/env bash
+                printf '%s\\n' "$@" > "$ROSBAG_INVOCATION"
+            '''))
+            fake_ros2.chmod(0o755)
+            environment = os.environ.copy()
+            environment.update({
+                'PATH': f'{bin_dir}{os.pathsep}{environment["PATH"]}',
+                'ROSBAG_INVOCATION': str(invocation),
+                'ROSBAG_ROOT': str(root / 'bags'),
+                'ROSBAG_SESSION_ID': 'live-20260816-01',
+            })
+
+            result = subprocess.run(
+                ['bash', str(ROSBAG_RECORDER)],
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                invocation.read_text().splitlines(),
+                [
+                    'bag', 'record', '--output', str(root / 'bags/live-20260816-01'),
+                    '/tf', '/tf_static', '/fleet/status', '/controller_server/map',
+                    '/robot_1/odom', '/robot_1/scan_raw', '/robot_1/imu/data_raw',
+                    '/robot_1/depth/image_raw', '/robot_1/depth/camera_info',
+                    '/robot_1/cmd_vel_nav', '/robot_1/controller/cmd_vel',
+                    '/robot_1/navigation/status',
+                    '/robot_2/odom', '/robot_2/scan_raw', '/robot_2/imu/data_raw',
+                    '/robot_2/depth/image_raw', '/robot_2/depth/camera_info',
+                    '/robot_2/cmd_vel_nav', '/robot_2/controller/cmd_vel',
+                    '/robot_2/navigation/status',
+                ],
+            )
+
+    def test_rosbag_recorder_suffixes_an_automatic_session_that_already_exists(self):
+        """A quick recorder restart must retain the previous bag instead of overwriting it."""
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            bin_dir = root / 'bin'
+            bin_dir.mkdir()
+            bag_root = root / 'bags'
+            (bag_root / '20260816T120000Z').mkdir(parents=True)
+            invocation = root / 'ros2-invocation'
+            fake_date = bin_dir / 'date'
+            fake_date.write_text('#!/usr/bin/env bash\nprintf "20260816T120000Z\\n"\n')
+            fake_date.chmod(0o755)
+            fake_ros2 = bin_dir / 'ros2'
+            fake_ros2.write_text(textwrap.dedent('''\
+                #!/usr/bin/env bash
+                printf '%s\\n' "$@" > "$ROSBAG_INVOCATION"
+            '''))
+            fake_ros2.chmod(0o755)
+            environment = os.environ.copy()
+            environment.pop('ROSBAG_SESSION_ID', None)
+            environment.update({
+                'PATH': f'{bin_dir}{os.pathsep}{environment["PATH"]}',
+                'ROSBAG_INVOCATION': str(invocation),
+                'ROSBAG_ROOT': str(bag_root),
+            })
+
+            result = subprocess.run(
+                ['bash', str(ROSBAG_RECORDER)],
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(str(bag_root / '20260816T120000Z-01'), invocation.read_text())
+
     def test_odom_and_launch_contracts_are_registered_with_ctest(self):
         cmake = GAZEBO_CMAKE.read_text()
         for name, path in (

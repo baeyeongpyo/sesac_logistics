@@ -131,6 +131,7 @@ cd vehicle_simulator_model/ubuntu
 | mapper 로그 | `docker compose --profile mapping logs -f slam-mapper` | `Ctrl+C`는 log follow만 종료 |
 | mapper 안전 종료 | `./run.sh --env dev mapping-stop` | 지도 저장과 atomic publish 수행 |
 | 지도 검증 | `./run.sh --env dev mapping-status <session-id>` | named volume을 read-only로 검사 |
+| 외부 지도 등록 | `./run.sh --env dev map-import <map-id>` | 원본 map volume에서 검증된 세션으로 복사 |
 | 자율주행 시작 | `./run.sh --env dev nav-up auto [session-id]` | 저장 지도가 있으면 AMCL, 없으면 SLAM으로 기동 |
 | 자율주행 상태 | `./run.sh --env dev nav-status` | 선택 모드와 Nav2 토픽 endpoint 확인 |
 | 자율주행 종료 | `./run.sh --env dev nav-down` | Nav2·목표점 bridge·속도 relay만 정지 |
@@ -138,6 +139,41 @@ cd vehicle_simulator_model/ubuntu
 `sim-up`은 `sim-adapter`를 시작하지 않는다. simulation 차량이 필요한 경우 반드시
 `./run.sh --env <profile> sim-adapter-up`을 호출한다. `sim-adapter-down`은 SIGTERM으로 manager에
 정상 제거를 요청하므로 Gazebo, Foxglove, 실제 차량 worker는 계속 실행된다.
+
+### 실차 SLAM 지도 등록
+
+실차에서 생성한 `map.pgm`과 `map.yaml`은 실행용 `mentorpi-slam-data` volume에 직접 넣지 않는다.
+원본 전용 named volume `mentorpi-map-import`에 지도 ID별 폴더로 추가한다.
+
+```text
+mentorpi-map-import:/map-import
+  ├─ warehouse-real-v1/
+  │  ├─ map.pgm
+  │  └─ map.yaml
+  └─ warehouse-real-v2/
+     ├─ map.pgm
+     └─ map.yaml
+```
+
+원본 volume은 importer에 read-only로만 mount된다. `map-import <map-id>`는 해당 폴더가 존재하고
+두 파일이 비어 있지 않은지 확인한 뒤, manifest와 SHA-256 checksum을 생성하여
+`mentorpi-slam-data:/slam-data/<map-id>`에 atomic publish한다. 동일 ID를 다시 등록하면 기존
+Nav2 지도 세션을 덮어쓰지 않고 실패한다. importer 실행 전에는 `map-data-init`이 실행용 volume의
+root만 `ros:ros`(UID/GID 1000)로 초기화하므로, 기존 지도 세션은 변경하지 않는다.
+
+```bash
+# 최초 한 번 named volume을 만든다.
+docker volume create mentorpi-map-import
+
+# named volume은 처음에는 root 소유이므로 root container로 원본을 추가한다.
+docker run --rm -v mentorpi-map-import:/map-import alpine sh -c '\
+  mkdir -p /map-import/warehouse-real-v1'
+# /map-import/warehouse-real-v1/ 아래에 map.pgm, map.yaml을 넣은 뒤 등록한다.
+./run.sh --env dev map-import warehouse-real-v1
+
+# 명시적으로 선택한 지도 세션으로 localization/Nav2를 시작한다.
+./run.sh --env dev nav-up auto warehouse-real-v1
+```
 
 ### Fleet registry와 ROS Domain
 

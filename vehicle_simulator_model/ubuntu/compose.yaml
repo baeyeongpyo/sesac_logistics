@@ -13,7 +13,7 @@ x-dds-client-environment: &dds-client-environment
 
 x-central-environment: &central-environment
   <<: *dds-client-environment
-  ROS_DOMAIN_ID: "215"
+  ROS_DOMAIN_ID: "225"
 
 x-runtime: &runtime
   image: "${MENTORPI_IMAGE-mentorpi-sim:harmonic}"
@@ -154,7 +154,7 @@ services:
     restart: "no"
     stop_grace_period: 30s
     environment:
-      <<: *dds-client-environment
+      <<: *central-environment
       SERVICE_NAME: slam-mapper
       SESSION_ID: "${SESSION_ID-none}"
       SLAM_DATA_ROOT: /slam-data
@@ -189,11 +189,44 @@ services:
         target: /slam-data
         read_only: true
 
+  map-data-init:
+    <<: *runtime-networked
+    profiles: [map-import]
+    restart: "no"
+    user: "0:0"
+    environment:
+      <<: *runtime-environment
+      SERVICE_NAME: map-data-init
+    command: chown 1000:1000 /slam-data
+    volumes:
+      - slam-data:/slam-data
+
+  map-importer:
+    <<: *runtime-networked
+    profiles: [map-import]
+    restart: "no"
+    environment:
+      <<: *runtime-environment
+      SERVICE_NAME: map-importer
+      MAP_IMPORT_ID: "${MAP_IMPORT_ID-}"
+    command: /opt/mentorpi_ws/install/mentorpi_nav/lib/mentorpi_nav/map_import.py
+    depends_on:
+      map-data-init:
+        condition: service_completed_successfully
+    volumes:
+      - type: volume
+        source: map-import
+        target: /map-import
+        read_only: true
+      - type: volume
+        source: slam-data
+        target: /slam-data
+
   navigation:
     <<: *runtime-networked
     profiles: [navigation]
     environment:
-      <<: *dds-client-environment
+      <<: *central-environment
       SERVICE_NAME: navigation
       SLAM_DATA_ROOT: /slam-data
       NAV_SESSION_ID: "${NAV_SESSION_ID-}"
@@ -219,3 +252,5 @@ networks:
 volumes:
   slam-data:
     name: "${SLAM_VOLUME_NAME-mentorpi-slam-data}"
+  map-import:
+    name: "${MAP_IMPORT_VOLUME_NAME-mentorpi-map-import}"

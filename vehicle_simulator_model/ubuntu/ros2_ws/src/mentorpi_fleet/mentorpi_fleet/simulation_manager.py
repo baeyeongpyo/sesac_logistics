@@ -147,7 +147,7 @@ def main(argv=None) -> int:
         type=Path,
     )
     args = parser.parse_args(argv)
-    manager = SimulationManager(215, args.runtime_dir, args.bridge_template)
+    manager = SimulationManager(225, args.runtime_dir, args.bridge_template)
     stopping = False
 
     def stop(signum, frame):
@@ -163,8 +163,8 @@ def main(argv=None) -> int:
                 mtime = args.registry.stat().st_mtime_ns
                 if mtime != last_mtime:
                     registry = load_registry(args.registry)
-                    if registry.control_domain != 215:
-                        raise ValueError('control_domain must be 215')
+                    if registry.control_domain != 225:
+                        raise ValueError('control_domain must be 225')
                     manager.reconcile(list(registry.vehicles))
                     last_mtime = mtime
             except Exception as error:

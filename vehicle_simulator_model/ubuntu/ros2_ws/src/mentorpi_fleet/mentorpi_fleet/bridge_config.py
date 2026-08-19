@@ -13,14 +13,17 @@ TELEMETRY_TOPICS = {
     'tf': 'tf2_msgs/msg/TFMessage',
     'tf_static': 'tf2_msgs/msg/TFMessage',
     'scan': 'sensor_msgs/msg/LaserScan',
+    'scan_raw': 'sensor_msgs/msg/LaserScan',
     'imu': 'sensor_msgs/msg/Imu',
+    'imu/data_raw': 'sensor_msgs/msg/Imu',
+    'depth/image_raw': 'sensor_msgs/msg/Image',
+    'depth/camera_info': 'sensor_msgs/msg/CameraInfo',
+    'controller/cmd_vel': 'geometry_msgs/msg/Twist',
     'ground_truth/pose': 'geometry_msgs/msg/PoseStamped',
-    'navigation/status': 'action_msgs/msg/GoalStatusArray',
 }
 COMMAND_TOPICS = {
     'manual/cmd_vel': 'geometry_msgs/msg/Twist',
-    'move_base_simple/goal': 'geometry_msgs/msg/PoseStamped',
-    'navigation/cancel': 'std_msgs/msg/Empty',
+    'cmd_vel_nav': 'geometry_msgs/msg/Twist',
     'safety/stop': 'std_msgs/msg/Empty',
 }
 

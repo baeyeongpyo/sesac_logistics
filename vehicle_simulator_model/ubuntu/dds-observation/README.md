@@ -1,23 +1,23 @@
 # Standalone DDS Observation Bundle
 
-동일한 `ROS_DOMAIN_ID=215`를 사용하는 실차 `robot_1`, `robot_2`의 telemetry를 관제 PC에서
-한곳으로 모으는 독립 Docker bundle이다. `foxglove-bridge`는 Foxglove Studio에 WebSocket을
-제공하고, `map-server`는 관제용 정적 지도를 `/controller_server/map`으로 발행하며,
-`rosbag-recorder`는 두 차량의 핵심 주행 telemetry를 누적 저장한다.
+차량 Domain `215`의 `robot_1`과 Domain `216`의 `robot_2`에서 Domain Bridge로 전달된
+telemetry를 중앙 관제 Domain `225`에서 소비하는 독립 Docker bundle이다. `foxglove-bridge`는
+Foxglove Studio에 WebSocket을 제공하고, `map-server`는 관제용 정적 지도를
+`/controller_server/map`으로 발행하며, `rosbag-recorder`는 두 차량의 telemetry를 누적 저장한다.
 
 `foxglove-bridge`와 `map-server`는 `network_mode: host`와 `ipc: host`를 함께 사용한다.
 이는 Fast DDS가 같은 호스트의 두 컨테이너 사이에서 Shared Memory transport로 실제 메시지를
 전달할 수 있게 하기 위한 설정이다.
 
 ```text
-robot_1 (/robot_1/*, Domain 215) ─┐
-                                  ├─ 관제 PC: foxglove-bridge → Foxglove Studio
-robot_2 (/robot_2/*, Domain 215) ─┘          rosbag-recorder → persistent rosbag
-관제 지도 (map.yaml + map.pgm) ──── map-server → /controller_server/map
+robot_1 (/robot_1/*, Domain 215) ─ bridge ─┐
+                                             ├─ 관제 PC (Domain 225): foxglove-bridge → Foxglove Studio
+robot_2 (/robot_2/*, Domain 216) ─ bridge ─┘                     rosbag-recorder → persistent rosbag
+관제 지도 (map.yaml + map.pgm) ────────────── map-server → /controller_server/map
 ```
 
-이 bundle은 동일 Domain의 기본 DDS multicast discovery를 사용한다. 따라서
-`dds-discovery`, `dds-domain-bridge`, Gazebo에는 의존하지 않는다. Linux Docker host에서만
+이 bundle은 Domain Bridge를 직접 실행하지 않는다. 중앙 서버의 `fleet-manager`가 차량별 bridge
+worker를 먼저 실행해 Domain `225`에 telemetry를 전달해야 한다. Linux Docker host에서만
 운영한다. Docker Desktop의 host network는 실차 운영 검증 환경이 아니다.
 
 ## 시작
@@ -61,8 +61,9 @@ docker compose up -d --force-recreate map-server
 docker compose logs -f map-server
 ```
 
-`rosbag-recorder`는 `/tf`, `/tf_static`, `/fleet/status`와 두 차량의 `odom`, `scan_raw`,
-`imu/data_raw`를 named volume에 기록한다. Depth camera topic은 포함하지 않는다. 재시작 시
+`rosbag-recorder`는 `/tf`, `/tf_static`, `/fleet/status`, `/controller_server/map`, 두 차량의
+`odom`, `scan_raw`, `imu/data_raw`, depth image/camera info, Nav2 속도 명령, 실제 적용 속도 명령과
+navigation status를 기록한다. 원본 depth 영상은 저장 공간과 Wi-Fi 대역폭을 크게 사용한다. 재시작 시
 UTC timestamp 이름의 새 bag을 만들며, 같은 초에 재시작되면 `-01`, `-02` suffix로 기존 bag을
 보존한다.
 

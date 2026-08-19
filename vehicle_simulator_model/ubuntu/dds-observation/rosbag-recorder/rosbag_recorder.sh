@@ -29,6 +29,12 @@ fi
 printf 'rosbag-recorder session_id=%s output=%s\n' "$session_id" "$output_path"
 
 exec ros2 bag record --output "$output_path" \
-  /tf /tf_static /fleet/status \
+  /tf /tf_static /fleet/status /controller_server/map \
   /robot_1/odom /robot_1/scan_raw /robot_1/imu/data_raw \
-  /robot_2/odom /robot_2/scan_raw /robot_2/imu/data_raw
+  /robot_1/depth/image_raw /robot_1/depth/camera_info \
+  /robot_1/cmd_vel_nav /robot_1/controller/cmd_vel \
+  /robot_1/navigation/status \
+  /robot_2/odom /robot_2/scan_raw /robot_2/imu/data_raw \
+  /robot_2/depth/image_raw /robot_2/depth/camera_info \
+  /robot_2/cmd_vel_nav /robot_2/controller/cmd_vel \
+  /robot_2/navigation/status

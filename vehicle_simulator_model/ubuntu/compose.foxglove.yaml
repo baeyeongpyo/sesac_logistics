@@ -6,7 +6,7 @@ services:
     networks: [mentorpi]
     environment:
       GZ_PARTITION: mentorpi-sim
-      ROS_DOMAIN_ID: "215"
+      ROS_DOMAIN_ID: "225"
       DDS_DISCOVERY_HOST: dds-discovery
       DDS_DISCOVERY_PORT: "11811"
       FASTDDS_BUILTIN_TRANSPORTS: "UDPv4"

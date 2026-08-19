@@ -14,7 +14,7 @@ services:
     restart: unless-stopped
     environment:
       SERVICE_NAME: foxglove-bridge
-      ROS_DOMAIN_ID: "215"
+      ROS_DOMAIN_ID: "225"
       ROBOT_IDS: robot_1,robot_2
     command:
       [ros2, launch, foxglove_bridge, foxglove_bridge_launch.xml,
@@ -34,7 +34,7 @@ services:
     restart: unless-stopped
     environment:
       SERVICE_NAME: map-server
-      ROS_DOMAIN_ID: "215"
+      ROS_DOMAIN_ID: "225"
       MAP_YAML: /maps/map.yaml
       MAP_USE_SIM_TIME: "${MAP_USE_SIM_TIME:-false}"
     volumes:
@@ -66,18 +66,18 @@ services:
     restart: unless-stopped
     environment:
       SERVICE_NAME: rosbag-recorder
-      ROS_DOMAIN_ID: "215"
+      ROS_DOMAIN_ID: "225"
       ROBOT_IDS: robot_1,robot_2
       ROSBAG_ROOT: /rosbag
       ROSBAG_SESSION_ID: "${ROSBAG_SESSION_ID:-}"
     volumes:
-      - type: volume
-        source: rosbag-data
+      - type: bind
+        source: ${ROSBAG_HOST_DIRECTORY:?ROSBAG_HOST_DIRECTORY is required}
         target: /rosbag
+        bind:
+          create_host_path: false
     command: [/usr/local/bin/mentorpi-rosbag-recorder-bootstrap]
 
 volumes:
   map-server-overlay:
     name: "${MAP_SERVER_OVERLAY_VOLUME:-mentorpi-map-server-overlay}"
-  rosbag-data:
-    name: "${ROSBAG_VOLUME_NAME:-mentorpi-rosbag-data}"
