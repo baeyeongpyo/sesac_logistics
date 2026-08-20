@@ -28,7 +28,7 @@ def compose_config(filename):
 
 
 class VehicleComposeContractTest(unittest.TestCase):
-    def test_vehicle_bridges_share_host_network_ipc_and_local_dds(self):
+    def test_vehicle_raw_bridge_uses_host_network_ipc_and_cmd_vel_policy(self):
         services = compose_config('docker-compose.vehicle.yaml')['services']
         fleet = services['foxglove-fleet']
 
@@ -36,6 +36,7 @@ class VehicleComposeContractTest(unittest.TestCase):
         self.assertEqual(fleet['ipc'], 'host')
         self.assertEqual(fleet['environment']['ROS_LOCALHOST_ONLY'], '1')
         self.assertEqual(fleet['environment']['RMW_IMPLEMENTATION'], 'rmw_fastrtps_cpp')
+        self.assertEqual(fleet['environment']['FOXGLOVE_MODE'], 'raw')
         self.assertEqual(fleet['environment']['FOXGLOVE_PORT'], '8766')
         self.assertEqual(fleet['stop_signal'], 'SIGINT')
         self.assertNotIn('ports', fleet)
@@ -89,6 +90,26 @@ class ServerComposeContractTest(unittest.TestCase):
         config_mount = next(
             mount for mount in bridge['volumes']
             if mount['target'] == '/config/server_foxglove.yaml'
+        )
+        self.assertTrue(config_mount['read_only'])
+
+    def test_command_api_uses_vehicle_uri_and_configured_swagger_port(self):
+        api = compose_config('docker-compose.server.yaml')['services']['command-api']
+
+        self.assertEqual(api['network_mode'], 'host')
+        self.assertEqual(api['environment']['COMMAND_API_HOST'], '127.0.0.1')
+        self.assertEqual(api['environment']['COMMAND_API_PORT'], '8080')
+        self.assertEqual(
+            api['environment']['ROBOT_1_FOXGLOVE_URI'],
+            'ws://192.168.10.215:8766',
+        )
+        self.assertEqual(
+            api['command'],
+            ['ros2', 'run', 'foxglove_ros_worker', 'fleet_command_api'],
+        )
+        config_mount = next(
+            mount for mount in api['volumes']
+            if mount['target'] == '/config/fleet.yaml'
         )
         self.assertTrue(config_mount['read_only'])
 

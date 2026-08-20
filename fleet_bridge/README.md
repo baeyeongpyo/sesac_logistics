@@ -1,25 +1,26 @@
 # Fleet Foxglove Bridge
 
 차량의 ROS 2 telemetry를 DDS Domain 사이에서 직접 중계하지 않고 Foxglove
-WebSocket으로 서버에 전달하는 배포 번들이다. 차량 명령은 기존 Fleet Manager의
-REST API 경로를 그대로 사용한다. 이 번들은 상태 수집과 관제만 담당하며,
-Foxglove client publish·service·parameter 기능은 비활성화한다.
+WebSocket으로 서버에 전달하는 배포 번들이다. 서버 worker는 차량의 원본 topic을
+받아 Domain 225에서 차량별 `/{robot_id}/*` namespace로 재발행한다. 서버에는
+`cmd_vel`과 `stop`만 시험하는 REST API 및 Swagger UI를 포함한다.
 
 ```text
 robot_1 / Humble / Domain 215                         server / Humble / Domain 225
-ROS nodes -> filter -> Foxglove :8766 -> worker-robot-1 -> /robot_1/*
+ROS nodes -> Foxglove :8766 -> worker-robot-1 -> /robot_1/*
+                    ^                        |
+                    | clientPublish           +-> Foxglove :8765
+                    |                         +-> Command API :8080
 
 robot_2 / Humble / Domain 216
-ROS nodes -> filter -> Foxglove :8766 -> worker-robot-2 -> /robot_2/*
-                                                        |
-                                                        +-> Foxglove :8765
+ROS nodes -> Foxglove :8766 -> worker-robot-2 -> /robot_2/*
 ```
 
 차량과 서버 이미지는 모두 ROS 2 Humble/Jammy를 사용한다. 차량 주행 환경이
 Humble이므로 Foxglove 컨테이너만 Jazzy로 올리지 않는다. 차량 내부 DDS는
 `rmw_fastrtps_cpp`와 Fast DDS 기본 SHM+UDP를 사용하되 `ROS_LOCALHOST_ONLY=1`,
 `network_mode: host`, `ipc: host`로 차량 호스트 안에 한정한다. 차량 간 LAN 구간에는
-DDS discovery가 아니라 WebSocket 한 연결만 사용한다.
+DDS discovery가 아니라 telemetry와 명령용 WebSocket 연결만 사용한다.
 
 ## 포트와 Domain
 
@@ -30,9 +31,13 @@ DDS discovery가 아니라 WebSocket 한 연결만 사용한다.
 | robot_2 | 216 | 8766 | 서버 worker용 제한 telemetry |
 | robot_2 | 216 | 8765 | 필요할 때만 여는 직접 debug |
 | server | 225 | 8765 | 두 차량 통합 Foxglove 관제 |
+| server | 해당 없음 | 8080 | 테스트 REST API 및 Swagger UI |
 
-차량의 기존 주행 컨테이너도 같은 `ROS_DOMAIN_ID`, host network, host IPC를
-사용해야 한다. 가능하면 해당 컨테이너에도 `ROS_LOCALHOST_ONLY=1`을 적용한다.
+차량 Foxglove Bridge는 반드시 주행 컨테이너 내부에서 실행해야 한다. 외부 sidecar는
+주행 컨테이너가 `ipc: private`이거나 shared-memory transport를 사용할 때 원본 `/tf`를
+수신하지 못할 수 있다. 현재 `docker-compose.vehicle.yaml`은 실행 환경을 정의하는
+템플릿이며, 실제 배포에서는 해당 이미지/overlay를 주행 컨테이너 내부에 포함한 뒤
+동일 ROS graph에서 launch한다.
 
 ## 차량 ID, namespace, Domain 설정
 
@@ -43,15 +48,15 @@ ROBOT_ID=robot_1
 ROS_DOMAIN_ID=215
 ```
 
-`ROBOT_ID`는 서버 worker, 상태 로그, 차량 registry를 식별하는 이름이며, telemetry
-namespace는 별도 설정 없이 항상 `/${ROBOT_ID}`로 계산한다. 따라서 위 설정의 차량은
-원본 `/odom`, `/tf`, `/diagnostics`를 각각 `/robot_1/odom`, `/robot_1/tf`,
-`/robot_1/diagnostics`로 재발행한다. `robot_2`는 `ROBOT_ID=robot_2`,
-`ROS_DOMAIN_ID=216`으로만 바꾼다.
+`ROBOT_ID`는 서버 worker, 상태 로그, 차량 registry를 식별하는 이름이다. 차량은
+원본 `/odom`, `/tf`, `/diagnostics`를 Foxglove Bridge에 노출하고, 서버의 해당 worker가
+각각 `/robot_1/odom`, `/robot_1/tf`, `/robot_1/diagnostics`로 재발행한다. `robot_2`는
+`ROBOT_ID=robot_2`, `ROS_DOMAIN_ID=216`으로만 바꾼다.
 
 서버는 `.env.server`의 `SERVER_ROS_DOMAIN_ID=225`를 사용한다. WebSocket 경로에서는
-차량 DDS Domain ID를 사용하지 않으므로, 서버의 `fleet.yaml`에는 차량 ID와 URI만
-등록하며 차량 Domain ID를 중복 기록하지 않는다.
+차량 DDS Domain ID를 사용하지 않으므로, 서버의 `fleet.yaml`에는 차량 ID와 URI,
+`/cmd_vel` command topic과 속도/유지 시간 상한만 등록하며 차량 Domain ID를 중복
+기록하지 않는다.
 
 ## 이미지 빌드
 
@@ -99,7 +104,8 @@ ROS_DOMAIN_ID=216
 
 topic namespace를 별도로 적지 않아도 이 값에서 `/robot_2/*`가 자동으로 만들어진다.
 
-항상 실행하는 제한 telemetry endpoint를 시작한다.
+항상 실행하는 원본 telemetry와 `/cmd_vel` endpoint를 시작한다. 이 명령은 Bridge가
+주행 컨테이너 내부에 설치되어 있을 때 실행한다.
 
 ```bash
 docker compose --env-file fleet_bridge/.env.vehicle \
@@ -126,12 +132,14 @@ docker compose --env-file fleet_bridge/.env.vehicle \
 
 ## 서버 실행과 Foxglove 연결
 
-서버 env의 두 URI를 실제 차량 IP로 변경한다. 포트는 fleet endpoint인 8766이다.
+서버 env의 두 URI를 실제 차량 IP로 변경한다. 포트는 차량 Bridge endpoint인 8766이다.
 
 ```dotenv
 SERVER_ROS_DOMAIN_ID=225
 ROBOT_1_FOXGLOVE_URI=ws://192.168.10.215:8766
 ROBOT_2_FOXGLOVE_URI=ws://192.168.10.216:8766
+COMMAND_API_HOST=127.0.0.1
+COMMAND_API_PORT=8080
 ```
 
 ```bash
@@ -146,34 +154,85 @@ Foxglove 앱에서는 `ws://<server-ip>:8765` 하나에 연결한다. 서버 Bri
 볼 수 있다. 차량 원본을 일시적으로 확인하려면 별도 탭에서
 `ws://<robot-ip>:8765`에 연결하고 차량의 debug profile을 종료한 뒤 탭도 닫는다.
 
-Humble은 빈 string-array parameter를 표현하지 못하므로 Bridge `capabilities`에는
-`none` sentinel을 사용한다. pin된 Bridge가 인식하는 capability 이름과 일치하지
-않아 client publish, service, parameter, asset, connection graph 기능은 활성화되지
-않는다. deny whitelist도 별도로 적용된다.
+서버 관제용 Bridge(`:8765`)는 observation-only이며 client publish를 허용하지 않는다.
+차량 Bridge(`:8766`)만 `clientPublish`를 활성화하고 `client_topic_whitelist`를
+정확히 `/cmd_vel` 하나로 제한한다. 따라서 명령 client는 다른 ROS topic, service,
+parameter를 원격 실행할 수 없다.
 
-현재 구성은 평문 `ws://`이고 인증 기능을 제공하지 않는다. 운영망 방화벽에서
-8765/8766 접근 주체를 제한하고, 외부망을 통과해야 하면 TLS reverse proxy 또는
-VPN을 별도로 둔다.
+현재 구성은 평문 `ws://`이고 인증 기능을 제공하지 않는다. 운영망 방화벽에서 차량
+8766은 서버 IP만, 8765/8080은 승인된 관제망만 접근하도록 제한한다. 외부망을
+통과해야 하면 TLS reverse proxy 또는 VPN을 별도로 둔다.
+
+## 테스트 Command API와 Swagger
+
+서버의 `command-api` 서비스는 FastAPI 기반이며 Swagger UI는
+`http://<server-ip>:8080/docs`에서 연다. 기본 `COMMAND_API_HOST=127.0.0.1`은 서버
+자신의 Fleet Manager만 호출할 수 있게 한다. 다른 장비에서 Swagger를 열어야 한다면
+`COMMAND_API_HOST=0.0.0.0`으로 명시적으로 변경하고 방화벽을 먼저 설정한다.
+
+- `POST /api/v1/robots/{robot_id}/cmd_vel`
+
+  ```json
+  {
+    "linear_x": 0.1,
+    "angular_z": 0.0,
+    "hold_ms": 300
+  }
+  ```
+
+- `POST /api/v1/robots/{robot_id}/stop`
+
+`cmd_vel`은 `config/fleet.yaml`의 선속도·각속도·유지 시간 상한을 검증한다. 지정한
+`hold_ms` 동안만 같은 command를 발행하고, 종료 또는 오류 경로에서 반드시 zero Twist를
+보낸다. `stop`은 즉시 zero Twist를 한 번 전송한다. 차량 URI 연결 실패, Bridge가
+`clientPublish`를 허용하지 않음, CDR 미지원은 HTTP 503으로 반환한다.
+
+예시는 다음과 같다.
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/robots/robot_1/cmd_vel \
+  -H 'content-type: application/json' \
+  -d '{"linear_x":0.1,"angular_z":0.0,"hold_ms":300}'
+
+curl -X POST http://127.0.0.1:8080/api/v1/robots/robot_1/stop
+```
+
+서버에 Docker Compose plugin이 없는 경우에는 이미지로 API만 직접 실행할 수 있다.
+Linux 서버에서는 `--network host`를 사용한다.
+
+```bash
+docker run -d --name fleet-command-api --restart unless-stopped \
+  --network host \
+  -v "$(pwd)/fleet_bridge/config/fleet.yaml:/config/fleet.yaml:ro" \
+  -e ROBOT_1_FOXGLOVE_URI=ws://192.168.10.215:8766 \
+  -e ROBOT_2_FOXGLOVE_URI=ws://192.168.10.216:8766 \
+  -e COMMAND_API_HOST=0.0.0.0 \
+  -e COMMAND_API_PORT=8080 \
+  mentorpi-fleet-bridge-server:humble \
+  ros2 run foxglove_ros_worker fleet_command_api
+```
 
 ## telemetry.yaml 설정
 
 [`config/telemetry.yaml`](config/telemetry.yaml)이 차량 whitelist, 차량 filter,
 서버 worker mapping, 서버 publisher QoS의 단일 설정이다.
 
-- `enabled`: 차량의 8766 fleet endpoint와 서버 worker 구독 여부이다.
+- `enabled`: 차량의 8766 endpoint와 서버 worker 구독 여부이다.
 - `debug`: 차량의 8765 직접 endpoint 노출 여부이다. `enabled: false`인 raw topic도
   debug만 `true`로 둘 수 있다.
 - `source`: 차량 ROS node가 발행하는 원본 topic이다. 현재 MentorPi는 `/odom`처럼
   root namespace를 사용한다.
-- `uplink`: 차량 gateway가 재발행하고 Foxglove Bridge가 노출하는 topic이다.
-  `/{robot}`은 `.env.vehicle`의 `ROBOT_ID`로 치환된다.
-- `target`: worker가 서버 Domain 225에 발행하는 topic이다. uplink와 동일하게
-  `/{robot}` prefix를 사용하므로 서버에서 차량 출처가 섞이지 않는다.
+- `uplink`: 레거시 vehicle filter 모드의 재발행 topic이다. raw mode의 서버 worker는
+  이 값을 구독하지 않는다.
+- `target`: worker가 서버 Domain 225에 발행하는 topic이다. `/{robot}` prefix를
+  사용하므로 서버에서 차량 출처가 섞이지 않는다.
 - `type`: 양쪽에서 검증할 ROS message type이다. 일치하지 않으면 구독하지 않는다.
-- `filter`: 차량에서 WebSocket을 통과하기 전에 적용하는 `passthrough`, `rate`,
-  `on_change` 정책이다.
-- `worker_rate.max_rate_hz`: WebSocket 수신 후 Domain 225에 발행하는 2차 상한이다.
-  LAN 대역폭 절감은 반드시 차량의 `filter`에서 수행한다.
+- `filter`: 레거시 vehicle filter 모드에서 적용하는 `passthrough`, `rate`,
+  `on_change` 정책이다. 현재 raw mode는 차량 원본 topic을 직접 보내므로 이 정책을
+  적용하지 않는다.
+- `worker_rate.max_rate_hz`: WebSocket 수신 후 Domain 225에 발행하는 상한이다.
+  raw mode에서 scan/camera LAN 대역폭을 제한하려면 원본 publisher의 rate를 낮추거나
+  별도의 차량 내부 filter topic을 `source`로 지정한다.
 - `qos`: 서버 publisher의 `reliability`, `durability`, `history`, `depth`이다.
 
 설정 파일은 컨테이너에 read-only로 mount된다. 변경 후 같은 파일을 해당 차량과
