@@ -19,6 +19,21 @@ def filtered_topics(topics: tuple[TopicConfig, ...]) -> tuple[TopicConfig, ...]:
     )
 
 
+def forwarded_topics(topics: tuple[TopicConfig, ...]) -> tuple[TopicConfig, ...]:
+    """Return enabled topics that the gateway must republish locally.
+
+    A passthrough policy controls rate and payload handling, not whether a
+    topic is renamed. Root vehicle topics must still be relayed to their
+    vehicle-specific namespace before Foxglove advertises them to the server.
+    """
+
+    return tuple(
+        topic
+        for topic in topics
+        if topic.enabled and topic.source != topic.uplink
+    )
+
+
 def bridge_parameters(
     topics: tuple[TopicConfig, ...],
     mode: str,

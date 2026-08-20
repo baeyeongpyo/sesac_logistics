@@ -4,7 +4,7 @@ from launch import LaunchDescription
 from launch_ros.actions import Node
 
 from fleet_bridge_config.loader import load_telemetry
-from fleet_telemetry_filter.launch_config import bridge_parameters, filtered_topics
+from fleet_telemetry_filter.launch_config import bridge_parameters, forwarded_topics
 
 
 def _required_environment(name):
@@ -24,7 +24,7 @@ def generate_launch_description():
     parameters = bridge_parameters(topics, mode=mode, port=port)
 
     actions = []
-    if mode == 'fleet' and filtered_topics(topics):
+    if mode == 'fleet' and forwarded_topics(topics):
         actions.append(Node(
             package='fleet_telemetry_filter',
             executable='telemetry_filter',

@@ -12,10 +12,14 @@ class ServerConfig:
 @dataclass(frozen=True)
 class VehicleConfig:
     id: str
-    domain_id: int
     foxglove_uri: str
-    namespace: str
     enabled: bool
+
+    @property
+    def namespace(self) -> str:
+        """Return the canonical telemetry namespace for this vehicle."""
+
+        return f'/{self.id}'
 
 
 @dataclass(frozen=True)
@@ -73,4 +77,3 @@ class TopicConfig:
     worker_rate: RateConfig
     qos: QosConfig
     debug: bool
-

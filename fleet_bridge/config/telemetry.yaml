@@ -2,7 +2,7 @@ version: 1
 topics:
   - id: odom
     enabled: true
-    source: /{robot}/odom
+    source: /odom
     uplink: /{robot}/odom
     target: /{robot}/odom
     type: nav_msgs/msg/Odometry
@@ -18,7 +18,7 @@ topics:
 
   - id: tf
     enabled: true
-    source: /{robot}/tf
+    source: /tf
     uplink: /{robot}/tf
     target: /{robot}/tf
     type: tf2_msgs/msg/TFMessage
@@ -34,7 +34,7 @@ topics:
 
   - id: tf_static
     enabled: true
-    source: /{robot}/tf_static
+    source: /tf_static
     uplink: /{robot}/tf_static
     target: /{robot}/tf_static
     type: tf2_msgs/msg/TFMessage
@@ -48,12 +48,12 @@ topics:
       depth: 1
     debug: true
 
-  - id: navigation_status
+  - id: amcl_pose
     enabled: true
-    source: /{robot}/navigation/status
-    uplink: /{robot}/navigation/status
-    target: /{robot}/navigation/status
-    type: std_msgs/msg/String
+    source: /amcl_pose
+    uplink: /{robot}/amcl_pose
+    target: /{robot}/amcl_pose
+    type: geometry_msgs/msg/PoseWithCovarianceStamped
     filter:
       mode: passthrough
     worker_rate: {}
@@ -65,10 +65,10 @@ topics:
     debug: true
 
   - id: battery
-    enabled: true
-    source: /{robot}/battery_state
-    uplink: /{robot}/fleet_bridge/battery_state
-    target: /{robot}/battery_state
+    enabled: false
+    source: /ros_robot_controller/battery
+    uplink: /{robot}/battery
+    target: /{robot}/battery
     type: sensor_msgs/msg/BatteryState
     filter:
       mode: on_change
@@ -91,7 +91,7 @@ topics:
 
   - id: diagnostics
     enabled: true
-    source: /{robot}/diagnostics
+    source: /diagnostics
     uplink: /{robot}/diagnostics
     target: /{robot}/diagnostics
     type: diagnostic_msgs/msg/DiagnosticArray
@@ -107,9 +107,9 @@ topics:
 
   - id: scan
     enabled: false
-    source: /{robot}/scan
-    uplink: /{robot}/fleet_bridge/scan
-    target: /{robot}/scan
+    source: /scan_filtered
+    uplink: /{robot}/scan_filtered
+    target: /{robot}/scan_filtered
     type: sensor_msgs/msg/LaserScan
     filter:
       mode: rate
@@ -125,7 +125,7 @@ topics:
 
   - id: scan_raw_debug
     enabled: false
-    source: /{robot}/scan_raw
+    source: /scan_raw
     uplink: /{robot}/scan_raw
     target: /{robot}/scan_raw
     type: sensor_msgs/msg/LaserScan
@@ -141,10 +141,10 @@ topics:
 
   - id: camera_compressed_debug
     enabled: false
-    source: /{robot}/camera/image_raw/compressed
-    uplink: /{robot}/camera/image_raw/compressed
-    target: /{robot}/camera/image_raw/compressed
-    type: sensor_msgs/msg/CompressedImage
+    source: /ascamera/camera_publisher/rgb0/image
+    uplink: /{robot}/camera/rgb0/image
+    target: /{robot}/camera/rgb0/image
+    type: sensor_msgs/msg/Image
     filter:
       mode: passthrough
     worker_rate: {}

@@ -2,7 +2,7 @@ import time
 
 from fleet_bridge_config.loader import load_telemetry
 
-from .launch_config import filtered_topics
+from .launch_config import forwarded_topics
 from .policy import ForwardPolicy
 
 
@@ -65,7 +65,7 @@ def create_node():
             self._publishers = []
             self._subscriptions = []
 
-            for topic in filtered_topics(topics):
+            for topic in forwarded_topics(topics):
                 message_type = get_message(topic.message_type)
                 qos = _qos_profile(topic.qos)
                 publisher = self.create_publisher(message_type, topic.uplink, qos)

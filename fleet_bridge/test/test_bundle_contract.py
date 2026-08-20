@@ -72,6 +72,15 @@ class ConfigurationContractTest(unittest.TestCase):
         ):
             self.assertIn(required, content)
 
+    def test_fleet_namespace_is_derived_from_vehicle_id(self):
+        document = yaml.safe_load(
+            (BUNDLE / 'config/fleet.yaml').read_text(encoding='utf-8'),
+        )
+
+        for vehicle in document['vehicles']:
+            self.assertNotIn('namespace', vehicle)
+            self.assertNotIn('domain_id', vehicle)
+
 
 class ReadmeContractTest(unittest.TestCase):
     def test_readme_covers_deployment_tuning_and_network_verification(self):

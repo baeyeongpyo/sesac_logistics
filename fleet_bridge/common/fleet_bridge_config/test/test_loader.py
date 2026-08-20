@@ -19,7 +19,7 @@ VALID_TELEMETRY = {
         {
             'id': 'odom',
             'enabled': True,
-            'source': '/{robot}/odom',
+            'source': '/odom',
             'uplink': '/{robot}/odom',
             'target': '/{robot}/odom',
             'type': 'nav_msgs/msg/Odometry',
@@ -36,7 +36,7 @@ VALID_TELEMETRY = {
         {
             'id': 'scan',
             'enabled': False,
-            'source': '/{robot}/scan',
+            'source': '/scan_filtered',
             'uplink': '/{robot}/fleet_bridge/scan',
             'target': '/{robot}/scan',
             'type': 'sensor_msgs/msg/LaserScan',
@@ -67,7 +67,7 @@ class ConfigLoaderTest(unittest.TestCase):
         path.write_text(yaml.safe_dump(value, sort_keys=False), encoding='utf-8')
         return path
 
-    def test_load_telemetry_expands_robot_and_preserves_filter_and_qos(self):
+    def test_load_telemetry_prefixes_uplink_and_preserves_filter_and_qos(self):
         topics = load_telemetry(
             self.write_yaml('telemetry.yaml', VALID_TELEMETRY),
             'robot_1',
@@ -76,7 +76,7 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertEqual(len(topics), 2)
         scan = topics[1]
         self.assertEqual(scan.id, 'scan')
-        self.assertEqual(scan.source, '/robot_1/scan')
+        self.assertEqual(scan.source, '/scan_filtered')
         self.assertEqual(scan.uplink, '/robot_1/fleet_bridge/scan')
         self.assertEqual(scan.target, '/robot_1/scan')
         self.assertEqual(scan.filter.mode, 'rate')
@@ -87,15 +87,25 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertFalse(scan.enabled)
         self.assertTrue(scan.debug)
 
+    def test_load_telemetry_allows_passthrough_relay_from_root_topic(self):
+        topics = load_telemetry(
+            self.write_yaml('telemetry.yaml', VALID_TELEMETRY),
+            'robot_1',
+        )
+
+        odom = topics[0]
+        self.assertEqual(odom.source, '/odom')
+        self.assertEqual(odom.uplink, '/robot_1/odom')
+        self.assertEqual(odom.target, '/robot_1/odom')
+        self.assertEqual(odom.filter.mode, 'passthrough')
+
     def test_load_fleet_expands_only_declared_environment_values(self):
         fleet = {
             'server': {'domain_id': 225, 'foxglove_port': 8765},
             'vehicles': [
                 {
                     'id': 'robot_1',
-                    'domain_id': 215,
                     'foxglove_uri': '${ROBOT_1_FOXGLOVE_URI}',
-                    'namespace': '/robot_1',
                     'enabled': True,
                 },
             ],
@@ -108,7 +118,7 @@ class ConfigLoaderTest(unittest.TestCase):
 
         self.assertEqual(loaded.server.domain_id, 225)
         self.assertEqual(loaded.vehicles[0].foxglove_uri, 'ws://10.0.0.11:8766')
-        self.assertEqual(loaded.vehicles[0].domain_id, 215)
+        self.assertEqual(loaded.vehicles[0].namespace, '/robot_1')
 
     def test_load_fleet_rejects_missing_environment_value(self):
         fleet = {
@@ -116,9 +126,7 @@ class ConfigLoaderTest(unittest.TestCase):
             'vehicles': [
                 {
                     'id': 'robot_1',
-                    'domain_id': 215,
                     'foxglove_uri': '${ROBOT_1_FOXGLOVE_URI}',
-                    'namespace': '/robot_1',
                     'enabled': True,
                 },
             ],
@@ -187,7 +195,10 @@ class ConfigLoaderTest(unittest.TestCase):
         topics = load_telemetry(BUNDLE / 'config/telemetry.yaml', 'robot_1')
 
         self.assertEqual([vehicle.id for vehicle in fleet.vehicles], ['robot_1', 'robot_2'])
-        self.assertEqual([vehicle.domain_id for vehicle in fleet.vehicles], [215, 216])
+        self.assertEqual(
+            [vehicle.namespace for vehicle in fleet.vehicles],
+            ['/robot_1', '/robot_2'],
+        )
         self.assertEqual(fleet.server.domain_id, 225)
         battery = next(topic for topic in topics if topic.id == 'battery')
         scan = next(topic for topic in topics if topic.id == 'scan')
@@ -196,9 +207,12 @@ class ConfigLoaderTest(unittest.TestCase):
             'percentage': 0.01,
             'voltage': 0.1,
         })
-        self.assertTrue(battery.enabled)
+        self.assertFalse(battery.enabled)
         self.assertFalse(scan.enabled)
         self.assertEqual(scan.filter.max_rate_hz, 2.0)
+        odom = next(topic for topic in topics if topic.id == 'odom')
+        self.assertEqual(odom.source, '/odom')
+        self.assertEqual(odom.uplink, '/robot_1/odom')
 
 
 if __name__ == '__main__':

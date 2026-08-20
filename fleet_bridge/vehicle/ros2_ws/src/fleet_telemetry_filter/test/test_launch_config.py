@@ -9,7 +9,11 @@ COMMON = BUNDLE / 'common/fleet_bridge_config'
 sys.path[:0] = [str(PACKAGE), str(COMMON)]
 
 from fleet_bridge_config.loader import load_telemetry
-from fleet_telemetry_filter.launch_config import bridge_parameters, filtered_topics
+from fleet_telemetry_filter.launch_config import (
+    bridge_parameters,
+    filtered_topics,
+    forwarded_topics,
+)
 
 
 class VehicleLaunchConfigTest(unittest.TestCase):
@@ -27,15 +31,11 @@ class VehicleLaunchConfigTest(unittest.TestCase):
         self.assertEqual(parameters['param_whitelist'], ['(?!)'])
         self.assertEqual(parameters['client_topic_whitelist'], ['(?!)'])
         self.assertIn('^/robot_1/odom$', parameters['topic_whitelist'])
-        self.assertIn(
-            '^/robot_1/fleet_bridge/battery_state$',
-            parameters['topic_whitelist'],
-        )
-        self.assertNotIn('^/robot_1/scan$', parameters['topic_whitelist'])
         self.assertNotIn(
-            '^/robot_1/fleet_bridge/scan$',
+            '^/robot_1/battery$',
             parameters['topic_whitelist'],
         )
+        self.assertNotIn('^/robot_1/scan_filtered$', parameters['topic_whitelist'])
         self.assertIn(
             '^/robot_1/odom$',
             parameters['best_effort_qos_topic_whitelist'],
@@ -44,21 +44,29 @@ class VehicleLaunchConfigTest(unittest.TestCase):
     def test_debug_bridge_exposes_debug_sources_without_fleet_filter_topics(self):
         parameters = bridge_parameters(self.topics, mode='debug', port=8765)
 
-        self.assertIn('^/robot_1/scan$', parameters['topic_whitelist'])
-        self.assertIn('^/robot_1/scan_raw$', parameters['topic_whitelist'])
+        self.assertIn('^/scan_filtered$', parameters['topic_whitelist'])
+        self.assertIn('^/scan_raw$', parameters['topic_whitelist'])
         self.assertIn(
-            '^/robot_1/camera/image_raw/compressed$',
+            '^/ascamera/camera_publisher/rgb0/image$',
             parameters['topic_whitelist'],
         )
         self.assertNotIn(
-            '^/robot_1/fleet_bridge/battery_state$',
+            '^/robot_1/battery$',
             parameters['topic_whitelist'],
         )
 
-    def test_only_enabled_non_passthrough_topics_start_filter_subscriptions(self):
+    def test_safe_default_topics_do_not_apply_rate_or_change_filters(self):
         selected = filtered_topics(self.topics)
 
-        self.assertEqual([topic.id for topic in selected], ['battery'])
+        self.assertEqual([topic.id for topic in selected], [])
+
+    def test_enabled_prefix_rewrites_start_filter_subscriptions(self):
+        selected = forwarded_topics(self.topics)
+
+        self.assertEqual(
+            [topic.id for topic in selected],
+            ['odom', 'tf', 'tf_static', 'amcl_pose', 'diagnostics'],
+        )
 
     def test_bridge_mode_is_strictly_validated(self):
         with self.assertRaisesRegex(ValueError, 'mode'):

@@ -107,13 +107,6 @@ def _topic_name(value: object, location: str, robot_id: str) -> str:
     return topic
 
 
-def _namespace(value: object, location: str) -> str:
-    namespace = _string(value, location)
-    if not namespace.startswith('/') or namespace == '/' or namespace.endswith('/'):
-        raise ConfigError(f'{location} must be an absolute non-root namespace')
-    return namespace
-
-
 def _expand_environment(value: object, environ: Mapping[str, str]) -> object:
     if isinstance(value, str):
         def replace(match: re.Match) -> str:
@@ -148,28 +141,22 @@ def load_fleet(path: Path | str, environ: Mapping[str, str]) -> FleetConfig:
 
     vehicles = []
     ids = set()
-    domains = set()
     for index, raw_value in enumerate(_list(document['vehicles'], 'fleet.vehicles')):
         location = f'fleet.vehicles[{index}]'
         raw = _mapping(raw_value, location)
-        allowed = {'id', 'domain_id', 'foxglove_uri', 'namespace', 'enabled'}
+        allowed = {'id', 'foxglove_uri', 'enabled'}
         _keys(raw, allowed, location)
         _required(raw, allowed, location)
         vehicle = VehicleConfig(
             id=_identifier(raw['id'], f'{location}.id'),
-            domain_id=_integer(raw['domain_id'], f'{location}.domain_id', 0, 232),
             foxglove_uri=_string(raw['foxglove_uri'], f'{location}.foxglove_uri'),
-            namespace=_namespace(raw['namespace'], f'{location}.namespace'),
             enabled=_boolean(raw['enabled'], f'{location}.enabled'),
         )
         if not vehicle.foxglove_uri.startswith(('ws://', 'wss://')):
             raise ConfigError(f'{location}.foxglove_uri must use ws:// or wss://')
         if vehicle.id in ids:
             raise ConfigError(f'duplicate vehicle id: {vehicle.id}')
-        if vehicle.domain_id in domains:
-            raise ConfigError(f'duplicate vehicle domain_id: {vehicle.domain_id}')
         ids.add(vehicle.id)
-        domains.add(vehicle.domain_id)
         vehicles.append(vehicle)
 
     if not vehicles:
@@ -310,8 +297,6 @@ def load_telemetry(path: Path | str, robot_id: str) -> tuple[TopicConfig, ...]:
         if topic.id in ids:
             raise ConfigError(f'duplicate topic id: {topic.id}')
         ids.add(topic.id)
-        if topic.filter.mode == 'passthrough' and topic.source != topic.uplink:
-            raise ConfigError(f'{location}.uplink must equal source for passthrough')
         if topic.filter.mode != 'passthrough' and topic.source == topic.uplink:
             raise ConfigError(f'{location}.uplink must differ from filtered source')
         if topic.enabled:
@@ -326,4 +311,3 @@ def load_telemetry(path: Path | str, robot_id: str) -> tuple[TopicConfig, ...]:
     if not topics:
         raise ConfigError('telemetry.topics must not be empty')
     return tuple(topics)
-

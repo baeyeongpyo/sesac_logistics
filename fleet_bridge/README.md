@@ -34,6 +34,25 @@ DDS discovery가 아니라 WebSocket 한 연결만 사용한다.
 차량의 기존 주행 컨테이너도 같은 `ROS_DOMAIN_ID`, host network, host IPC를
 사용해야 한다. 가능하면 해당 컨테이너에도 `ROS_LOCALHOST_ONLY=1`을 적용한다.
 
+## 차량 ID, namespace, Domain 설정
+
+차량별로 수정할 값은 배포한 `fleet_bridge/.env.vehicle`의 두 항목뿐이다.
+
+```dotenv
+ROBOT_ID=robot_1
+ROS_DOMAIN_ID=215
+```
+
+`ROBOT_ID`는 서버 worker, 상태 로그, 차량 registry를 식별하는 이름이며, telemetry
+namespace는 별도 설정 없이 항상 `/${ROBOT_ID}`로 계산한다. 따라서 위 설정의 차량은
+원본 `/odom`, `/tf`, `/diagnostics`를 각각 `/robot_1/odom`, `/robot_1/tf`,
+`/robot_1/diagnostics`로 재발행한다. `robot_2`는 `ROBOT_ID=robot_2`,
+`ROS_DOMAIN_ID=216`으로만 바꾼다.
+
+서버는 `.env.server`의 `SERVER_ROS_DOMAIN_ID=225`를 사용한다. WebSocket 경로에서는
+차량 DDS Domain ID를 사용하지 않으므로, 서버의 `fleet.yaml`에는 차량 ID와 URI만
+등록하며 차량 Domain ID를 중복 기록하지 않는다.
+
 ## 이미지 빌드
 
 저장소 루트에서 실행한다.
@@ -77,6 +96,8 @@ robot_2에서는 다음처럼 바꾼다.
 ROBOT_ID=robot_2
 ROS_DOMAIN_ID=216
 ```
+
+topic namespace를 별도로 적지 않아도 이 값에서 `/robot_2/*`가 자동으로 만들어진다.
 
 항상 실행하는 제한 telemetry endpoint를 시작한다.
 
@@ -142,9 +163,12 @@ VPN을 별도로 둔다.
 - `enabled`: 차량의 8766 fleet endpoint와 서버 worker 구독 여부이다.
 - `debug`: 차량의 8765 직접 endpoint 노출 여부이다. `enabled: false`인 raw topic도
   debug만 `true`로 둘 수 있다.
-- `source`: 차량 ROS node가 발행하는 원본 topic이다.
-- `uplink`: 차량 Foxglove Bridge가 노출하고 서버 worker가 구독하는 topic이다.
-- `target`: worker가 서버 Domain 225에 발행하는 topic이다.
+- `source`: 차량 ROS node가 발행하는 원본 topic이다. 현재 MentorPi는 `/odom`처럼
+  root namespace를 사용한다.
+- `uplink`: 차량 gateway가 재발행하고 Foxglove Bridge가 노출하는 topic이다.
+  `/{robot}`은 `.env.vehicle`의 `ROBOT_ID`로 치환된다.
+- `target`: worker가 서버 Domain 225에 발행하는 topic이다. uplink와 동일하게
+  `/{robot}` prefix를 사용하므로 서버에서 차량 출처가 섞이지 않는다.
 - `type`: 양쪽에서 검증할 ROS message type이다. 일치하지 않으면 구독하지 않는다.
 - `filter`: 차량에서 WebSocket을 통과하기 전에 적용하는 `passthrough`, `rate`,
   `on_change` 정책이다.
@@ -164,9 +188,9 @@ VPN을 별도로 둔다.
 ```yaml
 - id: scan
   enabled: true
-  source: /{robot}/scan
-  uplink: /{robot}/fleet_bridge/scan
-  target: /{robot}/scan
+  source: /scan_filtered
+  uplink: /{robot}/scan_filtered
+  target: /{robot}/scan_filtered
   type: sensor_msgs/msg/LaserScan
   filter:
     mode: rate
@@ -186,10 +210,19 @@ VPN을 별도로 둔다.
 
 ### battery 정책 변경
 
-기본 battery 정책은 percentage가 1% 또는 voltage가 0.1 V 이상 변할 때만
-전송하고, 변화가 없어도 30초마다 heartbeat를 보낸다. `max_rate_hz: 0.2`는 일반
-sample을 최대 5초에 한 번으로 제한한다. percentage가 20% 이하인 critical
-sample은 `bypass_rate_limit: true`로 즉시 전달한다.
+기본 battery 항목은 `enabled: false`다. 먼저 차량에서 실제 메시지 타입을 확인한
+뒤 `type`을 일치시키고 `enabled: true`로 바꾼다.
+
+```bash
+ros2 topic type /ros_robot_controller/battery
+```
+
+현재 예시는 `sensor_msgs/msg/BatteryState`를 사용한다. 다른 type이 출력되면 그
+type의 ROS package를 차량·서버 이미지 모두에 설치한 뒤 설정을 바꾼다. 활성화 후
+정책은 percentage가 1% 또는 voltage가 0.1 V 이상 변할 때만 전송하고, 변화가 없어도
+30초마다 heartbeat를 보낸다. `max_rate_hz: 0.2`는 일반 sample을 최대 5초에 한
+번으로 제한한다. percentage가 20% 이하인 critical sample은
+`bypass_rate_limit: true`로 즉시 전달한다.
 
 ```yaml
 filter:
@@ -227,7 +260,8 @@ topic이 보이지 않으면 다음 순서로 확인한다.
    같은지 확인한다.
 2. 차량 8766 포트가 LISTEN 상태인지 확인한다.
 3. server worker log에서 WebSocket 연결과 schema/type mismatch를 확인한다.
-4. 차량과 서버에 배포된 `telemetry.yaml`이 동일한지 확인한다.
+4. 차량과 서버에 배포된 `telemetry.yaml`이 동일하고, 차량 `ROBOT_ID`와 서버의
+   해당 worker ID가 일치하는지 확인한다.
 5. TF를 합쳐 볼 경우 차량이 `robot_1/...`, `robot_2/...` frame prefix를 이미
    발행하는지 확인한다. worker는 serialized frame ID를 변경하지 않는다.
 
