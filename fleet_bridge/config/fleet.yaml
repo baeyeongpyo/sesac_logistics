@@ -1,0 +1,15 @@
+server:
+  domain_id: 225
+  foxglove_port: 8765
+vehicles:
+  - id: robot_1
+    domain_id: 215
+    foxglove_uri: ${ROBOT_1_FOXGLOVE_URI}
+    namespace: /robot_1
+    enabled: true
+  - id: robot_2
+    domain_id: 216
+    foxglove_uri: ${ROBOT_2_FOXGLOVE_URI}
+    namespace: /robot_2
+    enabled: true
+

@@ -1,0 +1,156 @@
+version: 1
+topics:
+  - id: odom
+    enabled: true
+    source: /{robot}/odom
+    uplink: /{robot}/odom
+    target: /{robot}/odom
+    type: nav_msgs/msg/Odometry
+    filter:
+      mode: passthrough
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 5
+    debug: true
+
+  - id: tf
+    enabled: true
+    source: /{robot}/tf
+    uplink: /{robot}/tf
+    target: /{robot}/tf
+    type: tf2_msgs/msg/TFMessage
+    filter:
+      mode: passthrough
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 20
+    debug: true
+
+  - id: tf_static
+    enabled: true
+    source: /{robot}/tf_static
+    uplink: /{robot}/tf_static
+    target: /{robot}/tf_static
+    type: tf2_msgs/msg/TFMessage
+    filter:
+      mode: passthrough
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 1
+    debug: true
+
+  - id: navigation_status
+    enabled: true
+    source: /{robot}/navigation/status
+    uplink: /{robot}/navigation/status
+    target: /{robot}/navigation/status
+    type: std_msgs/msg/String
+    filter:
+      mode: passthrough
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+    debug: true
+
+  - id: battery
+    enabled: true
+    source: /{robot}/battery_state
+    uplink: /{robot}/fleet_bridge/battery_state
+    target: /{robot}/battery_state
+    type: sensor_msgs/msg/BatteryState
+    filter:
+      mode: on_change
+      max_rate_hz: 0.2
+      heartbeat_sec: 30
+      thresholds:
+        percentage: 0.01
+        voltage: 0.1
+      critical:
+        field: percentage
+        below: 0.2
+        bypass_rate_limit: true
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 1
+    debug: true
+
+  - id: diagnostics
+    enabled: true
+    source: /{robot}/diagnostics
+    uplink: /{robot}/diagnostics
+    target: /{robot}/diagnostics
+    type: diagnostic_msgs/msg/DiagnosticArray
+    filter:
+      mode: passthrough
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+    debug: true
+
+  - id: scan
+    enabled: false
+    source: /{robot}/scan
+    uplink: /{robot}/fleet_bridge/scan
+    target: /{robot}/scan
+    type: sensor_msgs/msg/LaserScan
+    filter:
+      mode: rate
+      max_rate_hz: 2.0
+    worker_rate:
+      max_rate_hz: 2.0
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+    debug: true
+
+  - id: scan_raw_debug
+    enabled: false
+    source: /{robot}/scan_raw
+    uplink: /{robot}/scan_raw
+    target: /{robot}/scan_raw
+    type: sensor_msgs/msg/LaserScan
+    filter:
+      mode: passthrough
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+    debug: true
+
+  - id: camera_compressed_debug
+    enabled: false
+    source: /{robot}/camera/image_raw/compressed
+    uplink: /{robot}/camera/image_raw/compressed
+    target: /{robot}/camera/image_raw/compressed
+    type: sensor_msgs/msg/CompressedImage
+    filter:
+      mode: passthrough
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+    debug: true
