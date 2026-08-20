@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-yaml \
       ros-humble-ament-index-cpp \
       ros-humble-diagnostic-msgs \
+      ros-humble-geometry-msgs \
       ros-humble-nav-msgs \
       ros-humble-rclcpp-components \
       ros-humble-resource-retriever \
@@ -25,7 +26,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m pip install --no-cache-dir --target /opt/python websockets==10.4
+RUN python3 -m pip install --no-cache-dir --target /opt/python \
+      fastapi==0.115.12 \
+      uvicorn==0.34.0 \
+      websockets==10.4
 
 WORKDIR /opt/fleet_bridge_ws
 RUN git clone https://github.com/foxglove/ros-foxglove-bridge.git src/foxglove_bridge \
@@ -46,6 +50,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libssl3 \
       python3-yaml \
       ros-humble-diagnostic-msgs \
+      ros-humble-geometry-msgs \
       ros-humble-nav-msgs \
       ros-humble-resource-retriever \
       ros-humble-rmw-fastrtps-cpp \

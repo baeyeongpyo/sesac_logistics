@@ -20,6 +20,7 @@ setup(
     entry_points={
         'console_scripts': [
             'foxglove_ros_worker = foxglove_ros_worker.main:main',
+            'fleet_command_api = foxglove_ros_worker.api:main',
         ],
     },
 )
