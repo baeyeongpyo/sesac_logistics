@@ -1,7 +1,7 @@
 # Foxglove Fleet Bridge 설계
 
 **작성일:** 2026-08-20
-**상태:** 사용자 설계 승인 반영, 구현 계획 검토 대기
+**상태:** 사용자 설계 및 설정 기반 운영 승인, 구현 진행
 
 ## 1. 목표
 
@@ -27,8 +27,8 @@
 | 서버 | 225 | 차량 상태 재발행, Fleet Manager/RMF, 통합 Foxglove 관제 |
 
 - ROS 배포판은 Humble, 기반 운영체제는 Ubuntu 22.04로 한다.
-- 차량용 이미지는 `ros:humble-ros-base-jammy`에서
-  `ros-humble-foxglove-bridge`를 설치해 빌드한다.
+- 차량용 이미지는 `ros:humble-ros-base-jammy`에서 pin된 Foxglove Bridge source와
+  프로젝트 ROS package를 multi-stage build한다.
 - Foxglove가 제공하는 사전 빌드 Docker image는 amd64 전용일 수 있으므로 차량
   이미지의 기반으로 사용하지 않는다. 차량 장비의 native `linux/arm64` 빌드를
   지원하고 서버는 `linux/amd64`를 지원한다.
@@ -41,7 +41,7 @@
 robot_1 / Domain 215
   ROS publishers
        |
-       +--> foxglove-fleet :8766 --+
+       +--> telemetry filter --> foxglove-fleet :8766 --+
        |                            |
        +--> foxglove-debug :8765    | Foxglove WebSocket
                                     v
@@ -52,7 +52,7 @@ server / Domain 225          foxglove-worker-robot-1
 robot_2 / Domain 216
   ROS publishers
        |
-       +--> foxglove-fleet :8766 --+
+       +--> telemetry filter --> foxglove-fleet :8766 --+
        |                            |
        +--> foxglove-debug :8765    | Foxglove WebSocket
                                     v
@@ -91,11 +91,29 @@ fleet_bridge/
   config/
     fleet.yaml
     telemetry.yaml
+    server_foxglove.yaml
+  common/
+    fleet_bridge_config/
+      package.xml
+      setup.py
+      fleet_bridge_config/
+        loader.py
+        models.py
   vehicle/
     Dockerfile
     entrypoint.sh
-    launch/
-      vehicle_foxglove.launch.py
+    ros2_ws/
+      src/
+        fleet_telemetry_filter/
+          package.xml
+          setup.py
+          fleet_telemetry_filter/
+            policy.py
+            node.py
+          launch/
+            vehicle_foxglove.launch.py
+          test/
+            test_policy.py
   server/
     Dockerfile
     entrypoint.sh
@@ -130,15 +148,26 @@ fleet_bridge/
 
 차량용 이미지는 다음 패키지만 포함하는 작은 ROS runtime으로 만든다.
 
-- `ros-humble-foxglove-bridge`
+- Foxglove WebSocket v1 호환성을 고정한 `foxglove_bridge` 0.8.5
 - `ros-humble-rmw-fastrtps-cpp`
+- `fleet_telemetry_filter`
 - 상태 토픽 스키마에 필요한 표준 ROS message package
 - launch 파일과 entrypoint
 
+`foxglove_ros_worker`가 구현하는 WebSocket client protocol과 차량 Bridge의
+protocol drift를 방지하기 위해 차량과 서버 이미지 모두
+`foxglove/ros-foxglove-bridge` commit
+`41f96cc6053632a472d9a821989952771b1117f2`(tag `0.8.5`)를 source build한다.
+이 버전은 `foxglove.websocket.v1`을 사용한다. Foxglove SDK 계열 Bridge로의
+업그레이드는 새 protocol fixture와 container integration test가 통과한 뒤 별도
+변경으로 수행한다.
+
 Docker Compose는 `network_mode: host`와 `ipc: host`를 사용한다. 컨테이너의
 `ROS_DOMAIN_ID`는 차량별 `.env`에서 215 또는 216으로 설정한다. 차량 host의 ROS
-graph와 통신하지 못하는 환경을 대비해 Fast DDS UDPv4 전송만 사용하는 설정을
-선택할 수 있게 한다.
+graph 내부 통신은 `FASTDDS_BUILTIN_TRANSPORTS=DEFAULT`로 SHM을 우선 사용한다.
+SHM 권한 또는 IPC 문제가 확인된 경우에만 `.env`에서 UDPv4 전송으로 전환한다.
+차량 ROS 노드가 모두 host network를 공유하면 `ROS_LOCALHOST_ONLY=1`로 DDS가 차량
+외부 네트워크로 전파되지 않게 한다.
 
 ### 5.2 fleet endpoint
 
@@ -148,9 +177,10 @@ graph와 통신하지 못하는 환경을 대비해 Fast DDS UDPv4 전송만 사
 - 읽기 전용으로 구성한다.
 - `clientPublish`, service call, parameter read/write, asset access를 비활성화한다.
 - 운영 allowlist 토픽만 노출한다.
-- `sysinfo`는 기본 비활성화한다.
 - outgoing backlog는 작은 유한 크기로 제한해 느린 서버 연결이 차량 memory를
   지속적으로 증가시키지 못하게 한다.
+- topic whitelist와 Best Effort 강제 목록은 `telemetry.yaml`에서 생성하며 image에
+  하드코딩하지 않는다.
 
 ### 5.3 debug endpoint
 
@@ -170,14 +200,15 @@ graph와 통신하지 못하는 환경을 대비해 Fast DDS UDPv4 전송만 사
 
 서버로 상시 전달하는 기본 토픽은 저대역 운영 상태로 제한한다.
 
-| source topic | target topic | type | QoS |
-| --- | --- | --- | --- |
-| `/{robot}/odom` | `/{robot}/odom` | `nav_msgs/msg/Odometry` | best effort, keep last 5 |
-| `/{robot}/tf` | `/{robot}/tf` | `tf2_msgs/msg/TFMessage` | best effort, keep last 20 |
-| `/{robot}/tf_static` | `/{robot}/tf_static` | `tf2_msgs/msg/TFMessage` | reliable, transient local, keep last 1 |
-| `/{robot}/navigation/status` | `/{robot}/navigation/status` | `std_msgs/msg/String` | reliable, keep last 10 |
-| `/{robot}/battery_state` | `/{robot}/battery_state` | `sensor_msgs/msg/BatteryState` | reliable, keep last 5 |
-| `/{robot}/diagnostics` | `/{robot}/diagnostics` | `diagnostic_msgs/msg/DiagnosticArray` | reliable, keep last 10 |
+| source topic | uplink topic | target topic | type | QoS/제한 |
+| --- | --- | --- | --- | --- |
+| `/{robot}/odom` | `/{robot}/odom` | `/{robot}/odom` | `nav_msgs/msg/Odometry` | best effort, keep last 5 |
+| `/{robot}/tf` | `/{robot}/tf` | `/{robot}/tf` | `tf2_msgs/msg/TFMessage` | best effort, keep last 20 |
+| `/{robot}/tf_static` | `/{robot}/tf_static` | `/{robot}/tf_static` | `tf2_msgs/msg/TFMessage` | reliable, transient local, keep last 1 |
+| `/{robot}/navigation/status` | `/{robot}/navigation/status` | `/{robot}/navigation/status` | `std_msgs/msg/String` | reliable, keep last 10 |
+| `/{robot}/battery_state` | `/{robot}/fleet_bridge/battery_state` | `/{robot}/battery_state` | `sensor_msgs/msg/BatteryState` | reliable, 변경 감지/최대 0.2Hz, 30초 heartbeat |
+| `/{robot}/diagnostics` | `/{robot}/diagnostics` | `/{robot}/diagnostics` | `diagnostic_msgs/msg/DiagnosticArray` | reliable, keep last 10 |
+| `/{robot}/scan` | `/{robot}/fleet_bridge/scan` | `/{robot}/scan` | `sensor_msgs/msg/LaserScan` | best effort, keep last 1, 최대 2Hz, 기본 비활성 |
 
 실차에 아직 존재하지 않는 optional 토픽은 worker 시작 실패의 원인이 되지 않는다.
 Foxglove channel이 advertise될 때 동적으로 구독하고, 연결 후 뒤늦게 advertise되는
@@ -186,13 +217,44 @@ Foxglove channel이 advertise될 때 동적으로 구독하고, 연결 후 뒤�
 다음 토픽은 상시 서버 재발행에서 제외한다.
 
 - raw/compressed camera image
-- `scan_raw`
+- `scan_raw`와 원본 고주기 `scan`
 - PointCloud
 - costmap
 - 고주기 디버깅 중간 결과
 
 이 토픽은 차량 debug endpoint로 직접 관찰한다. 추후 서버에서 필요하면 명시적
 설정과 대역폭 시험을 거쳐 개별 추가한다.
+
+### 6.1 설정 소유권
+
+`config/telemetry.yaml`을 차량과 서버가 함께 읽는 단일 telemetry 정책으로 둔다.
+각 항목은 `enabled`, `source`, `uplink`, `target`, `type`, `filter`, `worker_rate`,
+`qos`, `debug`를 선언한다.
+
+- `source`: 차량의 원본 ROS topic
+- `uplink`: 차량 fleet Foxglove endpoint가 노출하는 topic
+- `target`: worker가 Domain 225에 발행하는 topic
+- `filter.mode`: `passthrough`, `rate`, `on_change` 중 하나
+- `filter.max_rate_hz`: 차량 측 전송 상한이며 네트워크 사용량을 줄인다.
+- `worker_rate.max_rate_hz`: 서버 측 2차 상한이며 Domain 225 부하를 제한한다.
+- `qos`: worker publisher의 reliability, durability, history, depth
+- `debug`: 차량 debug endpoint가 원본 `source`를 노출할지 여부
+
+설정의 `{robot}`은 실행 시 `robot_id`로 치환한다. 알 수 없는 key, 중복 topic ID,
+중복 uplink/target, 잘못된 message type, 0 이하 rate, 허용되지 않은 QoS 값은 시작
+전에 거절한다. 설정 변경은 image rebuild 없이 read-only volume 교체 후 해당
+컨테이너 재시작으로 적용한다. 초기 구현에는 hot reload를 넣지 않는다.
+
+### 6.2 차량 telemetry filter
+
+`passthrough` topic은 원본 topic을 그대로 Foxglove allowlist에 넣는다. `rate` 또는
+`on_change` topic은 차량의 `fleet_telemetry_filter`가 별도 `uplink` topic으로
+재발행하고, fleet endpoint는 원본이 아닌 uplink만 노출한다.
+
+Battery `on_change` 기본 정책은 percentage 0.01 또는 voltage 0.1 이상 변화할 때
+전송하고, 변화가 없어도 30초마다 heartbeat를 전송한다. percentage가 0.20 이하인
+critical sample은 rate limit을 우회한다. Scan은 활성화할 때 차량에서 최대 2Hz로
+제한하고 Best Effort/Keep Last 1을 사용한다.
 
 ## 7. `foxglove_ros_worker`
 
@@ -201,8 +263,7 @@ Foxglove channel이 advertise될 때 동적으로 구독하고, 연결 후 뒤�
 worker는 Foxglove WebSocket protocol의 수신에 필요한 최소 client 기능만
 구현한다.
 
-- `foxglove.sdk.v1`과 호환 endpoint에 연결한다.
-- 호환성을 위해 `foxglove.websocket.v1`도 client subprotocol 후보로 제공한다.
+- pin된 Bridge와 같은 `foxglove.websocket.v1` subprotocol로 연결한다.
 - server info와 channel advertise를 처리한다.
 - allowlist와 type이 일치하는 channel만 subscribe한다.
 - binary message frame에서 subscription ID, timestamp, CDR payload를 분리한다.
@@ -211,9 +272,9 @@ worker는 Foxglove WebSocket protocol의 수신에 필요한 최소 client 기�
 
 공식 Python Foxglove SDK의 WebSocket API는 서버 제공에 집중하므로 worker는
 `python3-websockets`로 최소 client protocol을 구현한다. protocol parser는 ROS와
-분리해 byte fixture 기반 단위 테스트를 수행한다. 실제 설치한
-`ros-humble-foxglove-bridge`와 연결하는 container integration test로 protocol
-호환성을 최종 검증한다.
+분리해 byte fixture 기반 단위 테스트를 수행한다. source build한 pin 버전
+`foxglove_bridge`와 연결하는 container integration test로 protocol 호환성을 최종
+검증한다.
 
 ### 7.2 ROS 재발행
 
@@ -223,6 +284,9 @@ worker는 Domain 225에서 rclpy node로 실행한다.
    Python message type으로 해석한다.
 2. CDR payload를 `rclpy.serialization.deserialize_message()`로 복원한다.
 3. 설정된 target topic과 QoS로 publisher를 만들고 message를 발행한다.
+4. `worker_rate.max_rate_hz`가 있으면 최신 sample 중심으로 2차 제한한다. 이 제한은
+   Domain 225 부하를 줄이지만 이미 WebSocket을 지난 데이터이므로 차량 uplink
+   대역폭 절감 수단으로 사용하지 않는다.
 
 worker가 처리하는 상시 운영 telemetry는 저대역이므로 초기 구현은 Python을
 사용한다. raw image/PointCloud를 서버로 상시 전달하도록 범위가 확대되면 C++
@@ -300,6 +364,10 @@ Git에 저장하지 않는다.
 worker process supervisor는 이번 범위에서 제외하고, 설정 검증과 운영 안정성이
 확인된 후 기존 `mentorpi_fleet` registry와 통합한다.
 
+`server_foxglove.yaml`은 Domain 225 관제 Bridge의 allowlist와 읽기 전용
+capabilities를 설정한다. `fleet.yaml`, `telemetry.yaml`, `server_foxglove.yaml`은
+모두 컨테이너에 read-only로 mount한다.
+
 ## 11. 기존 `mentorpi_fleet`와의 관계
 
 기존 `mentorpi_fleet`의 Domain Bridge worker를 즉시 수정하거나 제거하지 않는다.
@@ -351,6 +419,8 @@ Domain Bridge 컨테이너를 먼저 중지한다.
 - binary data frame parsing과 malformed frame 거절
 - channel schema/type mismatch 거절
 - ROS QoS mapping
+- `{robot}` 치환과 차량/server 설정 일관성
+- rate/on-change/heartbeat/critical bypass filter policy
 - reconnect backoff 상한
 - freshness와 status payload
 
@@ -396,12 +466,14 @@ Domain Bridge 컨테이너를 먼저 중지한다.
 8. 기존 Domain Bridge를 중지한 상태에서 ping이 정상 범위를 유지하는지 실제 LAN
    A/B 시험 결과를 기록한다.
 9. 관련 단위·정적·container integration test가 모두 통과한다.
+10. whitelist, worker mapping, QoS, scan/battery 제한은 config 수정과 서비스
+    재시작만으로 변경할 수 있다.
 
 ## 16. 주요 위험과 완화
 
 | 위험 | 완화 |
 | --- | --- |
-| Foxglove SDK protocol version 차이 | 두 subprotocol 후보, parser fixture, 실제 apt Bridge integration test |
+| Foxglove protocol version 차이 | Bridge 0.8.5 commit pin, WebSocket v1 parser fixture, pin 버전 integration test |
 | raw 센서로 Wi-Fi 재포화 | 상시 allowlist에서 제외, debug endpoint 별도 profile |
 | Python deserialize 부하 | 저대역 telemetry만 처리, raw는 직접 연결, 필요 시 C++ worker로 교체 |
 | TF frame 충돌 | 차량별 frame prefix를 배포 전 필수 검증 |
