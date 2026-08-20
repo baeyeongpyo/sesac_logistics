@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
+from websockets.exceptions import WebSocketException
 
 from fleet_bridge_config.loader import load_fleet
 from fleet_bridge_config.models import FleetConfig, VehicleConfig
@@ -114,7 +115,7 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=str(error),
             ) from error
-        except (ConnectionError, OSError, ProtocolError) as error:
+        except (ConnectionError, OSError, ProtocolError, WebSocketException) as error:
             raise _delivery_error(error) from error
         return CommandAccepted(
             robot_id=robot_id,
@@ -133,7 +134,7 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
         vehicle = _active_vehicle(fleet, robot_id)
         try:
             await command_client.stop(vehicle)
-        except (ConnectionError, OSError, ProtocolError) as error:
+        except (ConnectionError, OSError, ProtocolError, WebSocketException) as error:
             raise _delivery_error(error) from error
         return CommandAccepted(robot_id=robot_id, command='stop')
 

@@ -10,13 +10,13 @@ from fleet_bridge_config.models import VehicleConfig
 from .protocol import (
     ProtocolError,
     ServerInfo,
+    SUPPORTED_SUBPROTOCOLS,
     client_advertise_message,
     client_message_frame,
     parse_server_message,
 )
 
 
-SUBPROTOCOL = 'foxglove.websocket.v1'
 COMMAND_CHANNEL_ID = 1
 
 
@@ -85,7 +85,7 @@ class FoxgloveCommandClient:
             connect_factory = websockets.connect
         return connect_factory(
             vehicle.foxglove_uri,
-            subprotocols=[SUBPROTOCOL],
+            subprotocols=list(SUPPORTED_SUBPROTOCOLS),
             max_size=8 * 1024 * 1024,
             ping_interval=20,
             ping_timeout=20,
@@ -93,9 +93,11 @@ class FoxgloveCommandClient:
         )
 
     async def _prepare(self, websocket: Any, vehicle: VehicleConfig) -> None:
-        if getattr(websocket, 'subprotocol', None) != SUBPROTOCOL:
+        selected_subprotocol = getattr(websocket, 'subprotocol', None)
+        if selected_subprotocol not in SUPPORTED_SUBPROTOCOLS:
             raise ProtocolError(
-                f'Foxglove server did not negotiate {SUBPROTOCOL}',
+                'Foxglove server did not negotiate a supported subprotocol '
+                f'({", ".join(SUPPORTED_SUBPROTOCOLS)})',
             )
         payload = await websocket.recv()
         if not isinstance(payload, str):

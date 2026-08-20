@@ -1,9 +1,15 @@
-"""Minimal Foxglove WebSocket v1 protocol parsing used by the worker."""
+"""Foxglove WebSocket protocol handling shared by supported Bridge versions."""
 
 from dataclasses import dataclass
 import json
 import struct
 from typing import Any, Iterable
+
+
+SUPPORTED_SUBPROTOCOLS = (
+    'foxglove.sdk.v1',
+    'foxglove.websocket.v1',
+)
 
 
 class ProtocolError(ValueError):

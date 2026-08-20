@@ -52,10 +52,11 @@ docker build \
   fleet_bridge
 ```
 
-이미지는 ROS 2 Humble/Jammy와 Foxglove Bridge 0.8.5 commit
-`41f96cc6053632a472d9a821989952771b1117f2`를 사용한다. server worker의
-`foxglove.websocket.v1` protocol과 함께 고정되어 있으므로 commit은 독립적으로
-변경하면 안 된다.
+이미지는 ROS 2 Humble/Jammy와 서버 관제용 Foxglove Bridge 0.8.5 commit
+`41f96cc6053632a472d9a821989952771b1117f2`를 사용한다. 차량에 접속하는 server
+worker와 Command API는 차량 Bridge의 `foxglove.sdk.v1`을 우선 요청하고, 기존
+`foxglove.websocket.v1` Bridge는 fallback으로 유지한다. 따라서 차량 Bridge와
+서버 관제용 Bridge의 protocol 버전은 서로 독립적으로 관리한다.
 
 Docker Compose plugin이 있는 서버에서는 다음을 실행한다.
 
@@ -82,6 +83,35 @@ docker run -d --name fleet-command-api --restart unless-stopped \
 서버 관제에는 Foxglove 앱에서 `ws://<server-ip>:8765` 하나만 연결한다. 이 endpoint는
 `/robot_1/*`, `/robot_2/*`, `/fleet/*`만 제공하며 observation-only이다. 서버에서
 topic publish, service 호출, parameter 변경은 허용하지 않는다.
+
+### 차량 Bridge protocol probe
+
+차량 Bridge의 WebSocket protocol을 확인할 때는 컨테이너 내부에 편집기를 설치하거나
+긴 Python 코드를 붙여 넣을 필요가 없다. 서버 호스트의 probe 스크립트를 표준입력으로
+`command-api` 컨테이너에 전달한다. 아래 명령은 연결 및 `serverInfo`만 확인하며 ROS
+명령을 발행하지 않는다.
+
+```bash
+docker compose -f docker-compose.server.yaml exec -T command-api \
+  python3 - < tools/foxglove_sdk_probe.py
+```
+
+`foxglove.sdk.v1`, `clientPublish`, `json`을 지원하는 Bridge에만 정지 명령을 시험할
+때는 아래처럼 명시적으로 옵션을 준다. 이 명령은 `/cmd_vel`에 zero `Twist` 하나를
+발행하므로 차량이 움직이는 중이라면 정지한다.
+
+```bash
+docker compose -f docker-compose.server.yaml exec -T command-api \
+  python3 - --send-zero-cmd-vel < tools/foxglove_sdk_probe.py
+```
+
+기본 URI는 `command-api` 컨테이너의 `ROBOT_2_FOXGLOVE_URI`다. 다른 endpoint를
+확인하려면 다음처럼 `--uri`를 준다.
+
+```bash
+docker compose -f docker-compose.server.yaml exec -T command-api \
+  python3 - --uri ws://<robot-ip>:<port> < tools/foxglove_sdk_probe.py
+```
 
 ## telemetry mapping
 

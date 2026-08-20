@@ -15,9 +15,8 @@ from foxglove_ros_worker.protocol import ProtocolError
 
 
 class FakeWebSocket:
-    subprotocol = 'foxglove.websocket.v1'
-
-    def __init__(self, server_info):
+    def __init__(self, server_info, subprotocol='foxglove.websocket.v1'):
+        self.subprotocol = subprotocol
         self._messages = [json.dumps(server_info)]
         self.sent = []
 
@@ -108,6 +107,43 @@ class FoxgloveCommandClientTest(unittest.TestCase):
 
         self.assertEqual(len(websocket.sent), 2)
         self.assertEqual(websocket.sent[-1], b'\x01\x01\x00\x00\x000.0:0.0')
+
+    def test_sdk_bridge_is_accepted_and_requested_before_legacy_fallback(self):
+        websocket = FakeWebSocket(
+            server_info(),
+            subprotocol='foxglove.sdk.v1',
+        )
+        connect_calls = []
+
+        def connect(uri, **kwargs):
+            connect_calls.append((uri, kwargs))
+            return FakeConnection(websocket)
+
+        client = FoxgloveCommandClient(
+            connect_factory=connect,
+            serialize_twist=lambda linear_x, angular_z: b'cdr',
+        )
+
+        try:
+            asyncio.run(client.stop(vehicle()))
+        except ProtocolError:
+            delivered = False
+        else:
+            delivered = True
+
+        self.assertTrue(delivered, 'SDK Bridge stop command must be accepted')
+
+        self.assertEqual(connect_calls, [(
+            'ws://10.0.0.11:8766',
+            {
+                'subprotocols': ['foxglove.sdk.v1', 'foxglove.websocket.v1'],
+                'max_size': 8 * 1024 * 1024,
+                'ping_interval': 20,
+                'ping_timeout': 20,
+                'close_timeout': 5,
+            },
+        )])
+        self.assertEqual(len(websocket.sent), 2)
 
 
 async def _completed():

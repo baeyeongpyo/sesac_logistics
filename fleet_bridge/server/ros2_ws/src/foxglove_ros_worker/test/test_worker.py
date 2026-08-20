@@ -136,6 +136,35 @@ class FoxgloveWorkerTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ProtocolError):
             await self.worker.handle_binary(b'bad')
 
+    async def test_connection_prefers_sdk_protocol_and_keeps_legacy_fallback(self):
+        connect_calls = []
+
+        def connect(uri, **kwargs):
+            connect_calls.append((uri, kwargs))
+            return object()
+
+        worker = FoxgloveWorker(
+            robot_id='robot_1',
+            uri='ws://robot-1:8766',
+            topics=(odom_topic(),),
+            republisher=self.republisher,
+            state=self.state,
+            connect_factory=connect,
+        )
+
+        worker._open_connection()
+
+        self.assertEqual(connect_calls, [(
+            'ws://robot-1:8766',
+            {
+                'subprotocols': ['foxglove.sdk.v1', 'foxglove.websocket.v1'],
+                'max_size': 8 * 1024 * 1024,
+                'ping_interval': 20,
+                'ping_timeout': 20,
+                'close_timeout': 5,
+            },
+        )])
+
 
 if __name__ == '__main__':
     unittest.main()
