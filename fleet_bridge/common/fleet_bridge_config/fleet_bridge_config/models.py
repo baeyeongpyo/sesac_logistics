@@ -4,9 +4,26 @@ from typing import Mapping
 
 
 @dataclass(frozen=True)
+class CommandApiConfig:
+    host: str
+    port: int
+
+
+@dataclass(frozen=True)
 class ServerConfig:
     domain_id: int
     foxglove_port: int
+    command_api: CommandApiConfig
+
+
+@dataclass(frozen=True)
+class CommandConfig:
+    topic: str
+    message_type: str
+    max_linear_x: float
+    max_angular_z: float
+    max_hold_ms: int
+    publish_rate_hz: float
 
 
 @dataclass(frozen=True)
@@ -14,6 +31,7 @@ class VehicleConfig:
     id: str
     foxglove_uri: str
     enabled: bool
+    command: CommandConfig
 
     @property
     def namespace(self) -> str:
