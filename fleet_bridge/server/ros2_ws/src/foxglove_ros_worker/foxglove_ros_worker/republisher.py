@@ -37,14 +37,14 @@ class ChannelSelector:
     """Select only explicitly enabled, type-safe CDR telemetry channels."""
 
     def __init__(self, topics: tuple[TopicConfig, ...]) -> None:
-        self._by_uplink = {
-            topic.uplink: topic
+        self._by_source = {
+            topic.source: topic
             for topic in topics
             if topic.enabled
         }
 
     def select(self, channel: Channel) -> TopicConfig | None:
-        topic = self._by_uplink.get(channel.topic)
+        topic = self._by_source.get(channel.topic)
         if topic is None:
             return None
         if channel.encoding != 'cdr' or channel.schema_name != topic.message_type:

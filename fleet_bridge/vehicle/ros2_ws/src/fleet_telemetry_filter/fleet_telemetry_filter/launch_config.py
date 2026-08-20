@@ -1,6 +1,6 @@
 import re
 
-from fleet_bridge_config.models import TopicConfig
+from fleet_bridge_config.models import CommandConfig, TopicConfig
 
 
 def _exact_topic_pattern(topic: str) -> str:
@@ -36,20 +36,30 @@ def forwarded_topics(topics: tuple[TopicConfig, ...]) -> tuple[TopicConfig, ...]
 
 def bridge_parameters(
     topics: tuple[TopicConfig, ...],
+    command: CommandConfig,
     mode: str,
     port: int,
 ) -> dict[str, object]:
-    if mode not in {'fleet', 'debug'}:
-        raise ValueError('mode must be fleet or debug')
+    if mode not in {'raw', 'fleet', 'debug'}:
+        raise ValueError('mode must be raw, fleet, or debug')
     if port < 1 or port > 65535:
         raise ValueError('port must be between 1 and 65535')
 
     if mode == 'fleet':
         selected = tuple(topic for topic in topics if topic.enabled)
         names = [topic.uplink for topic in selected]
+        client_topic_whitelist = ['(?!)']
+        capabilities = ['none']
+    elif mode == 'raw':
+        selected = tuple(topic for topic in topics if topic.enabled)
+        names = [topic.source for topic in selected]
+        client_topic_whitelist = [_exact_topic_pattern(command.topic)]
+        capabilities = ['clientPublish']
     else:
         selected = tuple(topic for topic in topics if topic.debug)
         names = [topic.source for topic in selected]
+        client_topic_whitelist = ['(?!)']
+        capabilities = ['none']
 
     best_effort_names = [
         topic.uplink if mode == 'fleet' else topic.source
@@ -65,11 +75,11 @@ def bridge_parameters(
         ],
         'service_whitelist': ['(?!)'],
         'param_whitelist': ['(?!)'],
-        'client_topic_whitelist': ['(?!)'],
+        'client_topic_whitelist': client_topic_whitelist,
         'asset_uri_allowlist': ['(?!)'],
         # ROS 2 Humble cannot encode an empty string-array override. The pinned
         # bridge enables capabilities only by exact match with known names.
-        'capabilities': ['none'],
+        'capabilities': capabilities,
         'include_hidden': False,
         'min_qos_depth': 1,
         'max_qos_depth': 20,

@@ -32,10 +32,13 @@ class DockerImageContractTest(unittest.TestCase):
                 self.assertIn('/opt/fleet_bridge_ws/install/setup.bash', content)
                 self.assertIn('exec "$@"', content)
 
-    def test_server_pins_python_310_compatible_websockets(self):
+    def test_server_pins_command_api_and_websocket_dependencies(self):
         content = (BUNDLE / 'server/Dockerfile').read_text(encoding='utf-8')
 
         self.assertIn('websockets==10.4', content)
+        self.assertIn('fastapi==0.115.12', content)
+        self.assertIn('uvicorn==0.34.0', content)
+        self.assertIn('ros-humble-geometry-msgs', content)
         self.assertIn('/opt/python', content)
 
 
@@ -69,6 +72,8 @@ class ConfigurationContractTest(unittest.TestCase):
             'ROBOT_2_FOXGLOVE_URI=ws://192.168.10.216:8766',
             'RMW_IMPLEMENTATION=rmw_fastrtps_cpp',
             'FASTDDS_BUILTIN_TRANSPORTS=DEFAULT',
+            'COMMAND_API_HOST=127.0.0.1',
+            'COMMAND_API_PORT=8080',
         ):
             self.assertIn(required, content)
 
@@ -80,6 +85,12 @@ class ConfigurationContractTest(unittest.TestCase):
         for vehicle in document['vehicles']:
             self.assertNotIn('namespace', vehicle)
             self.assertNotIn('domain_id', vehicle)
+            self.assertEqual(vehicle['command']['topic'], '/cmd_vel')
+            self.assertEqual(vehicle['command']['type'], 'geometry_msgs/msg/Twist')
+        self.assertEqual(document['server']['command_api'], {
+            'host': '127.0.0.1',
+            'port': 8080,
+        })
 
 
 class ReadmeContractTest(unittest.TestCase):
@@ -100,6 +111,12 @@ class ReadmeContractTest(unittest.TestCase):
             'Domain Bridge',
             'foxglove-debug',
             'ws://<server-ip>:8765',
+            'http://<server-ip>:8080/docs',
+            'POST /api/v1/robots/{robot_id}/cmd_vel',
+            'POST /api/v1/robots/{robot_id}/stop',
+            'clientPublish',
+            'zero Twist',
+            '주행 컨테이너 내부',
         ):
             with self.subTest(required=required):
                 self.assertIn(required, content)

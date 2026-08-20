@@ -1,10 +1,27 @@
 server:
   domain_id: 225
   foxglove_port: 8765
+  command_api:
+    host: 127.0.0.1
+    port: 8080
 vehicles:
   - id: robot_1
     foxglove_uri: ${ROBOT_1_FOXGLOVE_URI}
     enabled: true
+    command:
+      topic: /cmd_vel
+      type: geometry_msgs/msg/Twist
+      max_linear_x: 0.3
+      max_angular_z: 1.0
+      max_hold_ms: 1000
+      publish_rate_hz: 10
   - id: robot_2
     foxglove_uri: ${ROBOT_2_FOXGLOVE_URI}
     enabled: true
+    command:
+      topic: /cmd_vel
+      type: geometry_msgs/msg/Twist
+      max_linear_x: 0.3
+      max_angular_z: 1.0
+      max_hold_ms: 1000
+      publish_rate_hz: 10

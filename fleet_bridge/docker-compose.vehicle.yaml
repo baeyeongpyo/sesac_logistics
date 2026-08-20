@@ -15,10 +15,15 @@ services:
       ROS_LOCALHOST_ONLY: "1"
       RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
       FASTDDS_BUILTIN_TRANSPORTS: ${FASTDDS_BUILTIN_TRANSPORTS:-DEFAULT}
+      FLEET_CONFIG: /config/fleet.yaml
       TELEMETRY_CONFIG: /config/telemetry.yaml
-      FOXGLOVE_MODE: fleet
+      FOXGLOVE_MODE: raw
       FOXGLOVE_PORT: "8766"
     volumes:
+      - type: bind
+        source: ./config/fleet.yaml
+        target: /config/fleet.yaml
+        read_only: true
       - type: bind
         source: ./config/telemetry.yaml
         target: /config/telemetry.yaml
@@ -42,10 +47,15 @@ services:
       ROS_LOCALHOST_ONLY: "1"
       RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
       FASTDDS_BUILTIN_TRANSPORTS: ${FASTDDS_BUILTIN_TRANSPORTS:-DEFAULT}
+      FLEET_CONFIG: /config/fleet.yaml
       TELEMETRY_CONFIG: /config/telemetry.yaml
       FOXGLOVE_MODE: debug
       FOXGLOVE_PORT: "8765"
     volumes:
+      - type: bind
+        source: ./config/fleet.yaml
+        target: /config/fleet.yaml
+        read_only: true
       - type: bind
         source: ./config/telemetry.yaml
         target: /config/telemetry.yaml

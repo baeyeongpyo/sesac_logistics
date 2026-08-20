@@ -46,6 +46,28 @@ services:
       ROBOT_ID: robot_2
       FOXGLOVE_URI: ${ROBOT_2_FOXGLOVE_URI:?ROBOT_2_FOXGLOVE_URI is required}
 
+  command-api:
+    image: ${SERVER_IMAGE:-mentorpi-fleet-bridge-server:humble}
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    network_mode: host
+    restart: unless-stopped
+    stop_signal: SIGINT
+    stop_grace_period: 10s
+    environment:
+      FLEET_CONFIG: /config/fleet.yaml
+      ROBOT_1_FOXGLOVE_URI: ${ROBOT_1_FOXGLOVE_URI:?ROBOT_1_FOXGLOVE_URI is required}
+      ROBOT_2_FOXGLOVE_URI: ${ROBOT_2_FOXGLOVE_URI:?ROBOT_2_FOXGLOVE_URI is required}
+      COMMAND_API_HOST: ${COMMAND_API_HOST:-127.0.0.1}
+      COMMAND_API_PORT: ${COMMAND_API_PORT:-8080}
+    volumes:
+      - type: bind
+        source: ./config/fleet.yaml
+        target: /config/fleet.yaml
+        read_only: true
+    command: [ros2, run, foxglove_ros_worker, fleet_command_api]
+
   server-foxglove:
     image: ${SERVER_IMAGE:-mentorpi-fleet-bridge-server:humble}
     build:

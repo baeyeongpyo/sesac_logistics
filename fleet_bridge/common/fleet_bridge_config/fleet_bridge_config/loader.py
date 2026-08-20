@@ -1,4 +1,6 @@
 from collections.abc import Mapping
+import ipaddress
+import math
 from pathlib import Path
 import re
 from types import MappingProxyType
@@ -6,6 +8,8 @@ from types import MappingProxyType
 import yaml
 
 from .models import (
+    CommandApiConfig,
+    CommandConfig,
     CriticalConfig,
     FilterConfig,
     FleetConfig,
@@ -74,8 +78,8 @@ def _positive_number(value: object, location: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigError(f'{location} must be a number')
     number = float(value)
-    if number <= 0:
-        raise ConfigError(f'{location} must be greater than zero')
+    if not math.isfinite(number) or number <= 0:
+        raise ConfigError(f'{location} must be a finite value greater than zero')
     return number
 
 
@@ -107,6 +111,17 @@ def _topic_name(value: object, location: str, robot_id: str) -> str:
     return topic
 
 
+def _bind_host(value: object, location: str) -> str:
+    host = _string(value, location)
+    if host == 'localhost':
+        return host
+    try:
+        ipaddress.ip_address(host)
+    except ValueError as error:
+        raise ConfigError(f'{location} must be localhost or an IP address') from error
+    return host
+
+
 def _expand_environment(value: object, environ: Mapping[str, str]) -> object:
     if isinstance(value, str):
         def replace(match: re.Match) -> str:
@@ -132,11 +147,18 @@ def load_fleet(path: Path | str, environ: Mapping[str, str]) -> FleetConfig:
     _required(document, {'server', 'vehicles'}, 'fleet')
 
     raw_server = _mapping(document['server'], 'fleet.server')
-    _keys(raw_server, {'domain_id', 'foxglove_port'}, 'fleet.server')
-    _required(raw_server, {'domain_id', 'foxglove_port'}, 'fleet.server')
+    _keys(raw_server, {'domain_id', 'foxglove_port', 'command_api'}, 'fleet.server')
+    _required(raw_server, {'domain_id', 'foxglove_port', 'command_api'}, 'fleet.server')
+    raw_command_api = _mapping(raw_server['command_api'], 'fleet.server.command_api')
+    _keys(raw_command_api, {'host', 'port'}, 'fleet.server.command_api')
+    _required(raw_command_api, {'host', 'port'}, 'fleet.server.command_api')
     server = ServerConfig(
         domain_id=_integer(raw_server['domain_id'], 'server.domain_id', 0, 232),
         foxglove_port=_integer(raw_server['foxglove_port'], 'server.foxglove_port', 1, 65535),
+        command_api=CommandApiConfig(
+            host=_bind_host(raw_command_api['host'], 'server.command_api.host'),
+            port=_integer(raw_command_api['port'], 'server.command_api.port', 1, 65535),
+        ),
     )
 
     vehicles = []
@@ -144,14 +166,67 @@ def load_fleet(path: Path | str, environ: Mapping[str, str]) -> FleetConfig:
     for index, raw_value in enumerate(_list(document['vehicles'], 'fleet.vehicles')):
         location = f'fleet.vehicles[{index}]'
         raw = _mapping(raw_value, location)
-        allowed = {'id', 'foxglove_uri', 'enabled'}
+        allowed = {'id', 'foxglove_uri', 'enabled', 'command'}
         _keys(raw, allowed, location)
         _required(raw, allowed, location)
+        robot_id = _identifier(raw['id'], f'{location}.id')
+        raw_command = _mapping(raw['command'], f'{location}.command')
+        _keys(
+            raw_command,
+            {
+                'topic', 'type', 'max_linear_x', 'max_angular_z',
+                'max_hold_ms', 'publish_rate_hz',
+            },
+            f'{location}.command',
+        )
+        _required(
+            raw_command,
+            {
+                'topic', 'type', 'max_linear_x', 'max_angular_z',
+                'max_hold_ms', 'publish_rate_hz',
+            },
+            f'{location}.command',
+        )
+        command_type = _string(raw_command['type'], f'{location}.command.type')
+        if command_type != 'geometry_msgs/msg/Twist':
+            raise ConfigError(
+                f'{location}.command.type must be geometry_msgs/msg/Twist',
+            )
         vehicle = VehicleConfig(
-            id=_identifier(raw['id'], f'{location}.id'),
+            id=robot_id,
             foxglove_uri=_string(raw['foxglove_uri'], f'{location}.foxglove_uri'),
             enabled=_boolean(raw['enabled'], f'{location}.enabled'),
+            command=CommandConfig(
+                topic=_topic_name(
+                    raw_command['topic'],
+                    f'{location}.command.topic',
+                    robot_id,
+                ),
+                message_type=command_type,
+                max_linear_x=_positive_number(
+                    raw_command['max_linear_x'],
+                    f'{location}.command.max_linear_x',
+                ),
+                max_angular_z=_positive_number(
+                    raw_command['max_angular_z'],
+                    f'{location}.command.max_angular_z',
+                ),
+                max_hold_ms=_integer(
+                    raw_command['max_hold_ms'],
+                    f'{location}.command.max_hold_ms',
+                    1,
+                    60000,
+                ),
+                publish_rate_hz=_positive_number(
+                    raw_command['publish_rate_hz'],
+                    f'{location}.command.publish_rate_hz',
+                ),
+            ),
         )
+        if vehicle.command.publish_rate_hz > 100:
+            raise ConfigError(
+                f'{location}.command.publish_rate_hz must be at most 100',
+            )
         if not vehicle.foxglove_uri.startswith(('ws://', 'wss://')):
             raise ConfigError(f'{location}.foxglove_uri must use ws:// or wss://')
         if vehicle.id in ids:

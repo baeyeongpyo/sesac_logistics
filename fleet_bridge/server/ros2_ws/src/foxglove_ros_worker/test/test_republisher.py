@@ -33,7 +33,7 @@ def topic(
     return TopicConfig(
         id='odom',
         enabled=enabled,
-        source='/robot_1/odom',
+        source='/odom',
         uplink='/robot_1/odom',
         target='/robot_1/odom',
         message_type='nav_msgs/msg/Odometry',
@@ -49,10 +49,15 @@ def topic(
     )
 
 
-def channel(*, encoding='cdr', schema_name='nav_msgs/msg/Odometry'):
+def channel(
+    *,
+    topic_name='/odom',
+    encoding='cdr',
+    schema_name='nav_msgs/msg/Odometry',
+):
     return Channel(
         id=3,
-        topic='/robot_1/odom',
+        topic=topic_name,
         encoding=encoding,
         schema_name=schema_name,
         schema='schema body',
@@ -65,6 +70,7 @@ class ChannelSelectorTest(unittest.TestCase):
         selector = ChannelSelector((topic(),))
 
         self.assertEqual(selector.select(channel()).id, 'odom')
+        self.assertIsNone(selector.select(channel(topic_name='/robot_1/odom')))
         self.assertIsNone(selector.select(channel(encoding='json')))
         self.assertIsNone(selector.select(channel(schema_name='std_msgs/msg/String')))
         self.assertIsNone(ChannelSelector((topic(enabled=False),)).select(channel()))
