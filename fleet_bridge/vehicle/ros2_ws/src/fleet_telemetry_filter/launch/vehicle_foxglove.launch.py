@@ -38,9 +38,7 @@ def generate_launch_description():
     actions.append(Node(
         package='foxglove_bridge',
         executable='foxglove_bridge',
-        name=f'foxglove_{mode}_bridge',
         output='screen',
         parameters=[parameters],
     ))
     return LaunchDescription(actions)
-

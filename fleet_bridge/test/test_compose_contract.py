@@ -37,6 +37,7 @@ class VehicleComposeContractTest(unittest.TestCase):
         self.assertEqual(fleet['environment']['ROS_LOCALHOST_ONLY'], '1')
         self.assertEqual(fleet['environment']['RMW_IMPLEMENTATION'], 'rmw_fastrtps_cpp')
         self.assertEqual(fleet['environment']['FOXGLOVE_PORT'], '8766')
+        self.assertEqual(fleet['stop_signal'], 'SIGINT')
         self.assertNotIn('ports', fleet)
 
     def test_vehicle_debug_endpoint_is_opt_in_and_uses_port_8765(self):
@@ -48,6 +49,7 @@ class VehicleComposeContractTest(unittest.TestCase):
         self.assertEqual(debug['environment']['FOXGLOVE_PORT'], '8765')
         self.assertEqual(debug['network_mode'], 'host')
         self.assertEqual(debug['ipc'], 'host')
+        self.assertEqual(debug['stop_signal'], 'SIGINT')
 
     def test_vehicle_config_mount_is_read_only(self):
         fleet = compose_config('docker-compose.vehicle.yaml')['services']['foxglove-fleet']
@@ -74,6 +76,7 @@ class ServerComposeContractTest(unittest.TestCase):
                 self.assertEqual(worker['environment']['ROS_LOCALHOST_ONLY'], '1')
                 self.assertEqual(worker['network_mode'], 'host')
                 self.assertEqual(worker['ipc'], 'host')
+                self.assertEqual(worker['stop_signal'], 'SIGINT')
 
     def test_server_bridge_exposes_only_host_port_and_read_only_config(self):
         bridge = compose_config('docker-compose.server.yaml')['services']['server-foxglove']
@@ -81,6 +84,7 @@ class ServerComposeContractTest(unittest.TestCase):
         self.assertEqual(bridge['network_mode'], 'host')
         self.assertEqual(bridge['ipc'], 'host')
         self.assertEqual(bridge['environment']['ROS_DOMAIN_ID'], '225')
+        self.assertEqual(bridge['stop_signal'], 'SIGINT')
         self.assertNotIn('ports', bridge)
         config_mount = next(
             mount for mount in bridge['volumes']

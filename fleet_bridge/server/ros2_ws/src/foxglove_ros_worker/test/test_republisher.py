@@ -15,7 +15,12 @@ from fleet_bridge_config.models import (
     TopicConfig,
 )
 from foxglove_ros_worker.protocol import Channel
-from foxglove_ros_worker.republisher import ChannelSelector, RateGate, qos_kwargs
+from foxglove_ros_worker.republisher import (
+    ChannelSelector,
+    RateGate,
+    initialize_rclpy,
+    qos_kwargs,
+)
 
 
 def topic(
@@ -93,6 +98,30 @@ class RateGateTest(unittest.TestCase):
 
         self.assertTrue(gate.allow(unlimited, now_ns=1))
         self.assertTrue(gate.allow(unlimited, now_ns=1))
+
+
+class RosInitializationTest(unittest.TestCase):
+    def test_background_executor_disables_rclpy_process_signal_handlers(self):
+        class FakeRclpy:
+            def __init__(self):
+                self.init_calls = []
+
+            def ok(self):
+                return False
+
+            def init(self, **kwargs):
+                self.init_calls.append(kwargs)
+
+        rclpy = FakeRclpy()
+        no_signal_handlers = object()
+
+        owns_rclpy = initialize_rclpy(rclpy, no_signal_handlers)
+
+        self.assertTrue(owns_rclpy)
+        self.assertEqual(rclpy.init_calls, [{
+            'args': None,
+            'signal_handler_options': no_signal_handlers,
+        }])
 
 
 if __name__ == '__main__':

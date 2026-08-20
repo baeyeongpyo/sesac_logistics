@@ -1,10 +1,18 @@
 import time
 
 from fleet_bridge_config.loader import load_telemetry
-from rosidl_runtime_py.utilities import get_message
 
 from .launch_config import filtered_topics
 from .policy import ForwardPolicy
+
+
+def cleanup_rclpy(node, rclpy_module, interrupted):
+    """Avoid double-destroying waitables already interrupted by rclpy."""
+
+    if not interrupted:
+        node.destroy_node()
+    if rclpy_module.ok():
+        rclpy_module.shutdown()
 
 
 def _qos_profile(config):
@@ -42,11 +50,12 @@ def _callback(publisher, policy):
 def create_node():
     import rclpy
     from rclpy.node import Node
+    from rosidl_runtime_py.utilities import get_message
 
     class TelemetryFilterNode(Node):
         def __init__(self):
             super().__init__('fleet_telemetry_filter')
-            self.declare_parameter('robot_id')
+            self.declare_parameter('robot_id', '')
             self.declare_parameter('telemetry_config', '/config/telemetry.yaml')
             robot_id = self.get_parameter('robot_id').value
             config_path = self.get_parameter('telemetry_config').value
@@ -81,13 +90,14 @@ def main(args=None):
 
     rclpy.init(args=args)
     node = create_node()
+    interrupted = False
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        interrupted = True
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        cleanup_rclpy(node, rclpy, interrupted)
 
 
 if __name__ == '__main__':
     main()
-

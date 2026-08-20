@@ -22,7 +22,7 @@ class VehicleLaunchConfigTest(unittest.TestCase):
 
         self.assertEqual(parameters['port'], 8766)
         self.assertEqual(parameters['address'], '0.0.0.0')
-        self.assertEqual(parameters['capabilities'], [])
+        self.assertEqual(parameters['capabilities'], ['none'])
         self.assertEqual(parameters['service_whitelist'], ['(?!)'])
         self.assertEqual(parameters['param_whitelist'], ['(?!)'])
         self.assertEqual(parameters['client_topic_whitelist'], ['(?!)'])
@@ -63,7 +63,6 @@ class VehicleLaunchConfigTest(unittest.TestCase):
     def test_bridge_mode_is_strictly_validated(self):
         with self.assertRaisesRegex(ValueError, 'mode'):
             bridge_parameters(self.topics, mode='all', port=8765)
-
 
 if __name__ == '__main__':
     unittest.main()

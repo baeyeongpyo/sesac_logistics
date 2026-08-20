@@ -52,11 +52,12 @@ def bridge_parameters(
         'param_whitelist': ['(?!)'],
         'client_topic_whitelist': ['(?!)'],
         'asset_uri_allowlist': ['(?!)'],
-        'capabilities': [],
+        # ROS 2 Humble cannot encode an empty string-array override. The pinned
+        # bridge enables capabilities only by exact match with known names.
+        'capabilities': ['none'],
         'include_hidden': False,
         'min_qos_depth': 1,
         'max_qos_depth': 20,
         'send_buffer_limit': 4 * 1024 * 1024,
         'use_compression': False,
     }
-

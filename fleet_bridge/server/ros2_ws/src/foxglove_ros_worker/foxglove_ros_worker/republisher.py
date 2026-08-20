@@ -21,6 +21,18 @@ def qos_kwargs(config: QosConfig) -> dict[str, object]:
     }
 
 
+def initialize_rclpy(rclpy_module, no_signal_handlers) -> bool:
+    """Initialize a background ROS context without owning process signals."""
+
+    owns_rclpy = not rclpy_module.ok()
+    if owns_rclpy:
+        rclpy_module.init(
+            args=None,
+            signal_handler_options=no_signal_handlers,
+        )
+    return owns_rclpy
+
+
 class ChannelSelector:
     """Select only explicitly enabled, type-safe CDR telemetry channels."""
 
@@ -91,6 +103,7 @@ class RosRepublisher:
         from rclpy.executors import SingleThreadedExecutor
         from rclpy.node import Node
         from rclpy.serialization import deserialize_message
+        from rclpy.signals import SignalHandlerOptions
         from rosidl_runtime_py.utilities import get_message
         from std_msgs.msg import String
 
@@ -98,9 +111,10 @@ class RosRepublisher:
         self._deserialize_message = deserialize_message
         self._string_type = String
         self._state = state
-        self._owns_rclpy = not rclpy.ok()
-        if self._owns_rclpy:
-            rclpy.init(args=None)
+        self._owns_rclpy = initialize_rclpy(
+            rclpy,
+            SignalHandlerOptions.NO,
+        )
 
         self._node = Node(f'foxglove_ros_worker_{robot_id}')
         self._publishers = {}

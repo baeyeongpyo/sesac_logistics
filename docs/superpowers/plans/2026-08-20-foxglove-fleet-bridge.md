@@ -126,7 +126,7 @@ Expected: FAIL because `ForwardPolicy` and `bridge_parameters` do not exist.
 
 - [ ] **Step 3: 순수 policy와 Bridge parameter 생성 구현**
 
-`ForwardPolicy`는 monotonic nanoseconds를 사용하고 `rate`, `on_change`, heartbeat, numeric field threshold, critical-lower-than 우회를 구현한다. `bridge_parameters`는 fleet mode에서 enabled topic의 `uplink`, debug mode에서 `debug=true`인 `source`를 exact regex로 만들고, service/param/client topic whitelist는 `(?!)`, capabilities는 빈 배열로 설정한다.
+`ForwardPolicy`는 monotonic nanoseconds를 사용하고 `rate`, `on_change`, heartbeat, numeric field threshold, critical-lower-than 우회를 구현한다. `bridge_parameters`는 fleet mode에서 enabled topic의 `uplink`, debug mode에서 `debug=true`인 `source`를 exact regex로 만들고, service/param/client topic whitelist는 `(?!)`로 설정한다. Humble이 빈 string array override를 처리하지 못하므로 capabilities는 pin된 Bridge의 어떤 알려진 기능과도 일치하지 않는 `none` sentinel 하나를 사용한다.
 
 - [ ] **Step 4: rclpy 동적 filter node와 launch 구현**
 

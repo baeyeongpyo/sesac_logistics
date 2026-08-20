@@ -1,7 +1,7 @@
 # Foxglove Fleet Bridge 설계
 
 **작성일:** 2026-08-20
-**상태:** 사용자 설계 및 설정 기반 운영 승인, 구현 진행
+**상태:** 구현 및 ARM64 Humble 컨테이너 검증 완료, 실차 LAN A/B 측정 대기
 
 ## 1. 목표
 
@@ -368,6 +368,12 @@ worker process supervisor는 이번 범위에서 제외하고, 설정 검증과 
 capabilities를 설정한다. `fleet.yaml`, `telemetry.yaml`, `server_foxglove.yaml`은
 모두 컨테이너에 read-only로 mount한다.
 
+ROS 2 Humble parameter file은 빈 string array override를 값 없음으로 처리하므로
+`capabilities`에는 pin된 Bridge가 인식하지 않는 sentinel `none` 하나를 넣는다.
+0.8.5 소스는 알려진 capability 이름과의 완전 일치로만 기능을 활성화하므로
+`clientPublish`, `services`, `parameters`, `assets`, `connectionGraph`는 모두
+비활성 상태다.
+
 ## 11. 기존 `mentorpi_fleet`와의 관계
 
 기존 `mentorpi_fleet`의 Domain Bridge worker를 즉시 수정하거나 제거하지 않는다.
@@ -378,7 +384,7 @@ capabilities를 설정한다. `fleet.yaml`, `telemetry.yaml`, `server_foxglove.y
   ros2 run domain_bridge ...
 
 후속 교체
-  ros2 run foxglove_ros_worker worker ...
+  ros2 run foxglove_ros_worker foxglove_ros_worker ...
 ```
 
 Domain Bridge와 Foxglove worker가 동시에 같은 target topic을 Domain 225에

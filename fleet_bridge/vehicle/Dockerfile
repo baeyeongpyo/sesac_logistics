@@ -46,6 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-humble-diagnostic-msgs \
       ros-humble-launch-ros \
       ros-humble-nav-msgs \
+      ros-humble-resource-retriever \
       ros-humble-rmw-fastrtps-cpp \
       ros-humble-rosgraph-msgs \
       ros-humble-rosx-introspection \
