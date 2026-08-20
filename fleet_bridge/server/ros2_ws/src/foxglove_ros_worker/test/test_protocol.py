@@ -14,6 +14,8 @@ from foxglove_ros_worker.protocol import (
     ProtocolError,
     ServerInfo,
     Unadvertise,
+    client_advertise_message,
+    client_message_frame,
     parse_message_frame,
     parse_server_message,
     subscribe_message,
@@ -21,6 +23,25 @@ from foxglove_ros_worker.protocol import (
 
 
 class FoxgloveProtocolTest(unittest.TestCase):
+    def test_builds_client_advertise_and_message_data_frames(self):
+        advertise = json.loads(client_advertise_message(
+            channel_id=1,
+            topic='/cmd_vel',
+            schema_name='geometry_msgs/msg/Twist',
+        ))
+        frame = client_message_frame(1, b'cdr-payload')
+
+        self.assertEqual(advertise, {
+            'op': 'advertise',
+            'channels': [{
+                'id': 1,
+                'topic': '/cmd_vel',
+                'encoding': 'cdr',
+                'schemaName': 'geometry_msgs/msg/Twist',
+            }],
+        })
+        self.assertEqual(frame, b'\x01' + struct.pack('<I', 1) + b'cdr-payload')
+
     def test_parses_server_info_and_advertised_cdr_channels(self):
         server_info = parse_server_message(json.dumps({
             'op': 'serverInfo',
@@ -105,4 +126,5 @@ class FoxgloveProtocolTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
+    client_advertise_message,
+    client_message_frame,

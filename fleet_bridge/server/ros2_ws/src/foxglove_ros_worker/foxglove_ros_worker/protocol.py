@@ -159,6 +159,35 @@ def subscribe_message(subscriptions: Iterable[tuple[int, int]]) -> str:
     )
 
 
+def client_advertise_message(
+    channel_id: int,
+    topic: str,
+    schema_name: str,
+) -> str:
+    """Build a client channel advertisement for Foxglove client publishing."""
+
+    return json.dumps(
+        {
+            'op': 'advertise',
+            'channels': [{
+                'id': _require_int(channel_id, 'channel id'),
+                'topic': _require_string(topic, 'topic'),
+                'encoding': 'cdr',
+                'schemaName': _require_string(schema_name, 'schema name'),
+            }],
+        },
+        separators=(',', ':'),
+    )
+
+
+def client_message_frame(channel_id: int, payload: bytes) -> bytes:
+    """Build a client message-data binary frame (opcode 1)."""
+
+    if not isinstance(payload, bytes):
+        raise ProtocolError('client message payload must be bytes')
+    return b'\x01' + struct.pack('<I', _require_int(channel_id, 'channel id')) + payload
+
+
 def parse_message_frame(payload: bytes) -> MessageFrame:
     """Parse a Foxglove message-data binary frame (opcode 1)."""
 
