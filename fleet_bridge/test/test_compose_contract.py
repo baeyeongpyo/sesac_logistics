@@ -27,40 +27,6 @@ def compose_config(filename):
     return json.loads(result.stdout)
 
 
-class VehicleComposeContractTest(unittest.TestCase):
-    def test_vehicle_raw_bridge_uses_host_network_ipc_and_cmd_vel_policy(self):
-        services = compose_config('docker-compose.vehicle.yaml')['services']
-        fleet = services['foxglove-fleet']
-
-        self.assertEqual(fleet['network_mode'], 'host')
-        self.assertEqual(fleet['ipc'], 'host')
-        self.assertEqual(fleet['environment']['ROS_LOCALHOST_ONLY'], '1')
-        self.assertEqual(fleet['environment']['RMW_IMPLEMENTATION'], 'rmw_fastrtps_cpp')
-        self.assertEqual(fleet['environment']['FOXGLOVE_MODE'], 'raw')
-        self.assertEqual(fleet['environment']['FOXGLOVE_PORT'], '8766')
-        self.assertEqual(fleet['stop_signal'], 'SIGINT')
-        self.assertNotIn('ports', fleet)
-
-    def test_vehicle_debug_endpoint_is_opt_in_and_uses_port_8765(self):
-        services = compose_config('docker-compose.vehicle.yaml')['services']
-        debug = services['foxglove-debug']
-
-        self.assertEqual(debug['profiles'], ['debug'])
-        self.assertEqual(debug['environment']['FOXGLOVE_MODE'], 'debug')
-        self.assertEqual(debug['environment']['FOXGLOVE_PORT'], '8765')
-        self.assertEqual(debug['network_mode'], 'host')
-        self.assertEqual(debug['ipc'], 'host')
-        self.assertEqual(debug['stop_signal'], 'SIGINT')
-
-    def test_vehicle_config_mount_is_read_only(self):
-        fleet = compose_config('docker-compose.vehicle.yaml')['services']['foxglove-fleet']
-        telemetry_mount = next(
-            mount for mount in fleet['volumes']
-            if mount['target'] == '/config/telemetry.yaml'
-        )
-        self.assertTrue(telemetry_mount['read_only'])
-
-
 class ServerComposeContractTest(unittest.TestCase):
     def test_workers_are_isolated_per_vehicle_on_server_domain(self):
         services = compose_config('docker-compose.server.yaml')['services']

@@ -3,15 +3,12 @@ import ipaddress
 import math
 from pathlib import Path
 import re
-from types import MappingProxyType
 
 import yaml
 
 from .models import (
     CommandApiConfig,
     CommandConfig,
-    CriticalConfig,
-    FilterConfig,
     FleetConfig,
     QosConfig,
     RateConfig,
@@ -271,68 +268,6 @@ def _load_rate(raw_value: object, location: str) -> RateConfig:
     )
 
 
-def _load_filter(raw_value: object, location: str) -> FilterConfig:
-    raw = _mapping(raw_value, location)
-    allowed = {'mode', 'max_rate_hz', 'heartbeat_sec', 'thresholds', 'critical'}
-    _keys(raw, allowed, location)
-    _required(raw, {'mode'}, location)
-    mode = _string(raw['mode'], f'{location}.mode')
-    if mode not in {'passthrough', 'rate', 'on_change'}:
-        raise ConfigError(f'{location}.mode is invalid')
-
-    max_rate_hz = None
-    if 'max_rate_hz' in raw:
-        max_rate_hz = _positive_number(raw['max_rate_hz'], f'{location}.max_rate_hz')
-    if mode in {'rate', 'on_change'} and max_rate_hz is None:
-        raise ConfigError(f'{location}.max_rate_hz is required for {mode}')
-
-    heartbeat_sec = None
-    if 'heartbeat_sec' in raw:
-        heartbeat_sec = _positive_number(raw['heartbeat_sec'], f'{location}.heartbeat_sec')
-
-    raw_thresholds = _mapping(raw.get('thresholds', {}), f'{location}.thresholds')
-    thresholds = {}
-    for name, value in raw_thresholds.items():
-        field_name = _string(name, f'{location}.thresholds field')
-        thresholds[field_name] = _positive_number(
-            value,
-            f'{location}.thresholds.{field_name}',
-        )
-    if mode == 'on_change' and not thresholds:
-        raise ConfigError(f'{location}.thresholds is required for on_change')
-
-    raw_critical = _mapping(raw.get('critical', {}), f'{location}.critical')
-    _keys(raw_critical, {'field', 'below', 'bypass_rate_limit'}, f'{location}.critical')
-    critical = CriticalConfig()
-    if raw_critical:
-        _required(
-            raw_critical,
-            {'field', 'below', 'bypass_rate_limit'},
-            f'{location}.critical',
-        )
-        below = raw_critical['below']
-        if isinstance(below, bool) or not isinstance(below, (int, float)):
-            raise ConfigError(f'{location}.critical.below must be a number')
-        critical = CriticalConfig(
-            field=_string(raw_critical['field'], f'{location}.critical.field'),
-            below=float(below),
-            bypass_rate_limit=_boolean(
-                raw_critical['bypass_rate_limit'],
-                f'{location}.critical.bypass_rate_limit',
-            ),
-        )
-
-    if mode == 'passthrough' and set(raw) != {'mode'}:
-        raise ConfigError(f'{location} passthrough does not accept filter options')
-    return FilterConfig(
-        mode=mode,
-        max_rate_hz=max_rate_hz,
-        heartbeat_sec=heartbeat_sec,
-        thresholds=MappingProxyType(thresholds),
-        critical=critical,
-    )
-
-
 def load_telemetry(path: Path | str, robot_id: str) -> tuple[TopicConfig, ...]:
     robot_id = _identifier(robot_id, 'robot_id')
     document = _mapping(_read_yaml(path), 'telemetry')
@@ -343,14 +278,13 @@ def load_telemetry(path: Path | str, robot_id: str) -> tuple[TopicConfig, ...]:
 
     topics = []
     ids = set()
-    active_uplinks = set()
+    active_sources = set()
     active_targets = set()
     for index, raw_value in enumerate(_list(document['topics'], 'telemetry.topics')):
         location = f'telemetry.topics[{index}]'
         raw = _mapping(raw_value, location)
         allowed = {
-            'id', 'enabled', 'source', 'uplink', 'target', 'type',
-            'filter', 'worker_rate', 'qos', 'debug',
+            'id', 'enabled', 'source', 'target', 'type', 'worker_rate', 'qos',
         }
         _keys(raw, allowed, location)
         _required(raw, allowed, location)
@@ -361,25 +295,20 @@ def load_telemetry(path: Path | str, robot_id: str) -> tuple[TopicConfig, ...]:
             id=_identifier(raw['id'], f'{location}.id'),
             enabled=_boolean(raw['enabled'], f'{location}.enabled'),
             source=_topic_name(raw['source'], f'{location}.source', robot_id),
-            uplink=_topic_name(raw['uplink'], f'{location}.uplink', robot_id),
             target=_topic_name(raw['target'], f'{location}.target', robot_id),
             message_type=message_type,
-            filter=_load_filter(raw['filter'], f'{location}.filter'),
             worker_rate=_load_rate(raw['worker_rate'], f'{location}.worker_rate'),
             qos=_load_qos(raw['qos'], f'{location}.qos'),
-            debug=_boolean(raw['debug'], f'{location}.debug'),
         )
         if topic.id in ids:
             raise ConfigError(f'duplicate topic id: {topic.id}')
         ids.add(topic.id)
-        if topic.filter.mode != 'passthrough' and topic.source == topic.uplink:
-            raise ConfigError(f'{location}.uplink must differ from filtered source')
         if topic.enabled:
-            if topic.uplink in active_uplinks:
-                raise ConfigError(f'duplicate uplink: {topic.uplink}')
+            if topic.source in active_sources:
+                raise ConfigError(f'duplicate source: {topic.source}')
             if topic.target in active_targets:
                 raise ConfigError(f'duplicate target: {topic.target}')
-            active_uplinks.add(topic.uplink)
+            active_sources.add(topic.source)
             active_targets.add(topic.target)
         topics.append(topic)
 

@@ -1,7 +1,5 @@
 from .loader import ConfigError, load_fleet, load_telemetry
 from .models import (
-    CriticalConfig,
-    FilterConfig,
     FleetConfig,
     QosConfig,
     RateConfig,
@@ -12,8 +10,6 @@ from .models import (
 
 __all__ = [
     'ConfigError',
-    'CriticalConfig',
-    'FilterConfig',
     'FleetConfig',
     'QosConfig',
     'RateConfig',
@@ -23,4 +19,3 @@ __all__ = [
     'load_fleet',
     'load_telemetry',
 ]
-

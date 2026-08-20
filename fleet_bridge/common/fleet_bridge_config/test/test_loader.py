@@ -20,10 +20,8 @@ VALID_TELEMETRY = {
             'id': 'odom',
             'enabled': True,
             'source': '/odom',
-            'uplink': '/{robot}/odom',
             'target': '/{robot}/odom',
             'type': 'nav_msgs/msg/Odometry',
-            'filter': {'mode': 'passthrough'},
             'worker_rate': {},
             'qos': {
                 'reliability': 'best_effort',
@@ -31,16 +29,13 @@ VALID_TELEMETRY = {
                 'history': 'keep_last',
                 'depth': 5,
             },
-            'debug': True,
         },
         {
             'id': 'scan',
             'enabled': False,
             'source': '/scan_filtered',
-            'uplink': '/{robot}/fleet_bridge/scan',
             'target': '/{robot}/scan',
             'type': 'sensor_msgs/msg/LaserScan',
-            'filter': {'mode': 'rate', 'max_rate_hz': 2.0},
             'worker_rate': {'max_rate_hz': 2.0},
             'qos': {
                 'reliability': 'best_effort',
@@ -48,7 +43,6 @@ VALID_TELEMETRY = {
                 'history': 'keep_last',
                 'depth': 1,
             },
-            'debug': True,
         },
     ],
 }
@@ -67,7 +61,7 @@ class ConfigLoaderTest(unittest.TestCase):
         path.write_text(yaml.safe_dump(value, sort_keys=False), encoding='utf-8')
         return path
 
-    def test_load_telemetry_prefixes_uplink_and_preserves_filter_and_qos(self):
+    def test_load_telemetry_maps_source_to_namespaced_target_and_preserves_qos(self):
         topics = load_telemetry(
             self.write_yaml('telemetry.yaml', VALID_TELEMETRY),
             'robot_1',
@@ -77,17 +71,13 @@ class ConfigLoaderTest(unittest.TestCase):
         scan = topics[1]
         self.assertEqual(scan.id, 'scan')
         self.assertEqual(scan.source, '/scan_filtered')
-        self.assertEqual(scan.uplink, '/robot_1/fleet_bridge/scan')
         self.assertEqual(scan.target, '/robot_1/scan')
-        self.assertEqual(scan.filter.mode, 'rate')
-        self.assertEqual(scan.filter.max_rate_hz, 2.0)
         self.assertEqual(scan.worker_rate.max_rate_hz, 2.0)
         self.assertEqual(scan.qos.reliability, 'best_effort')
         self.assertEqual(scan.qos.depth, 1)
         self.assertFalse(scan.enabled)
-        self.assertTrue(scan.debug)
 
-    def test_load_telemetry_allows_passthrough_relay_from_root_topic(self):
+    def test_load_telemetry_keeps_root_source_for_remote_bridge_matching(self):
         topics = load_telemetry(
             self.write_yaml('telemetry.yaml', VALID_TELEMETRY),
             'robot_1',
@@ -95,9 +85,26 @@ class ConfigLoaderTest(unittest.TestCase):
 
         odom = topics[0]
         self.assertEqual(odom.source, '/odom')
-        self.assertEqual(odom.uplink, '/robot_1/odom')
         self.assertEqual(odom.target, '/robot_1/odom')
-        self.assertEqual(odom.filter.mode, 'passthrough')
+
+    def test_load_telemetry_has_no_vehicle_relay_fields(self):
+        topics = load_telemetry(
+            self.write_yaml('telemetry.yaml', VALID_TELEMETRY),
+            'robot_1',
+        )
+
+        self.assertFalse(hasattr(topics[0], 'uplink'))
+        self.assertFalse(hasattr(topics[0], 'filter'))
+        self.assertFalse(hasattr(topics[0], 'debug'))
+
+    def test_load_telemetry_rejects_removed_vehicle_relay_keys(self):
+        legacy = yaml.safe_load(yaml.safe_dump(VALID_TELEMETRY))
+        legacy['topics'][0]['uplink'] = '/{robot}/odom'
+        with self.assertRaisesRegex(ConfigError, 'unknown keys'):
+            load_telemetry(
+                self.write_yaml('telemetry.yaml', legacy),
+                'robot_1',
+            )
 
     def test_load_fleet_expands_only_declared_environment_values(self):
         fleet = {
@@ -200,12 +207,20 @@ class ConfigLoaderTest(unittest.TestCase):
                 with self.assertRaisesRegex(ConfigError, field):
                     load_fleet(self.write_yaml(f'{field}.yaml', invalid), {})
 
-    def test_load_telemetry_rejects_duplicate_uplink(self):
+    def test_load_telemetry_rejects_duplicate_target(self):
         duplicated = yaml.safe_load(yaml.safe_dump(VALID_TELEMETRY))
         duplicated['topics'][1]['enabled'] = True
-        duplicated['topics'][1]['uplink'] = '/{robot}/odom'
+        duplicated['topics'][1]['target'] = '/{robot}/odom'
 
-        with self.assertRaisesRegex(ConfigError, 'duplicate uplink'):
+        with self.assertRaisesRegex(ConfigError, 'duplicate target'):
+            load_telemetry(self.write_yaml('telemetry.yaml', duplicated), 'robot_1')
+
+    def test_load_telemetry_rejects_duplicate_source(self):
+        duplicated = yaml.safe_load(yaml.safe_dump(VALID_TELEMETRY))
+        duplicated['topics'][1]['enabled'] = True
+        duplicated['topics'][1]['source'] = '/odom'
+
+        with self.assertRaisesRegex(ConfigError, 'duplicate source'):
             load_telemetry(self.write_yaml('telemetry.yaml', duplicated), 'robot_1')
 
     def test_load_telemetry_rejects_unknown_keys_and_invalid_values(self):
@@ -216,7 +231,7 @@ class ConfigLoaderTest(unittest.TestCase):
         cases.append((unknown, 'unknown keys'))
 
         invalid_rate = yaml.safe_load(yaml.safe_dump(VALID_TELEMETRY))
-        invalid_rate['topics'][1]['filter']['max_rate_hz'] = 0
+        invalid_rate['topics'][1]['worker_rate']['max_rate_hz'] = 0
         cases.append((invalid_rate, 'max_rate_hz'))
 
         invalid_qos = yaml.safe_load(yaml.safe_dump(VALID_TELEMETRY))
@@ -269,17 +284,13 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertEqual(fleet.vehicles[0].command.topic, '/cmd_vel')
         battery = next(topic for topic in topics if topic.id == 'battery')
         scan = next(topic for topic in topics if topic.id == 'scan')
-        self.assertEqual(battery.filter.mode, 'on_change')
-        self.assertEqual(dict(battery.filter.thresholds), {
-            'percentage': 0.01,
-            'voltage': 0.1,
-        })
         self.assertFalse(battery.enabled)
+        self.assertEqual(battery.worker_rate.max_rate_hz, 0.2)
         self.assertFalse(scan.enabled)
-        self.assertEqual(scan.filter.max_rate_hz, 2.0)
+        self.assertEqual(scan.worker_rate.max_rate_hz, 2.0)
         odom = next(topic for topic in topics if topic.id == 'odom')
         self.assertEqual(odom.source, '/odom')
-        self.assertEqual(odom.uplink, '/robot_1/odom')
+        self.assertEqual(odom.target, '/robot_1/odom')
 
 
 if __name__ == '__main__':

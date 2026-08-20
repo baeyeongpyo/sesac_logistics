@@ -9,7 +9,6 @@ sys.path.insert(0, str(COMMON))
 sys.path.insert(0, str(PACKAGE))
 
 from fleet_bridge_config.models import (
-    FilterConfig,
     QosConfig,
     RateConfig,
     TopicConfig,
@@ -34,10 +33,8 @@ def topic(
         id='odom',
         enabled=enabled,
         source='/odom',
-        uplink='/robot_1/odom',
         target='/robot_1/odom',
         message_type='nav_msgs/msg/Odometry',
-        filter=FilterConfig(mode='passthrough'),
         worker_rate=RateConfig(max_rate_hz=worker_rate),
         qos=QosConfig(
             reliability=reliability,
@@ -45,7 +42,6 @@ def topic(
             history='keep_last',
             depth=5,
         ),
-        debug=True,
     )
 
 

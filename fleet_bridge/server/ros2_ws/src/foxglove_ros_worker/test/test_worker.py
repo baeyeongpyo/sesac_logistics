@@ -11,7 +11,6 @@ sys.path.insert(0, str(COMMON))
 sys.path.insert(0, str(PACKAGE))
 
 from fleet_bridge_config.models import (
-    FilterConfig,
     QosConfig,
     RateConfig,
     TopicConfig,
@@ -25,14 +24,11 @@ def odom_topic(worker_rate=None):
     return TopicConfig(
         id='odom',
         enabled=True,
-        source='/robot_1/odom',
-        uplink='/robot_1/odom',
+        source='/odom',
         target='/robot_1/odom',
         message_type='nav_msgs/msg/Odometry',
-        filter=FilterConfig(mode='passthrough'),
         worker_rate=RateConfig(max_rate_hz=worker_rate),
         qos=QosConfig('best_effort', 'volatile', 'keep_last', 5),
-        debug=True,
     )
 
 
@@ -73,7 +69,7 @@ class FoxgloveWorkerTest(unittest.IsolatedAsyncioTestCase):
             'op': 'advertise',
             'channels': [{
                 'id': 3,
-                'topic': '/robot_1/odom',
+                'topic': '/odom',
                 'encoding': 'cdr',
                 'schemaName': 'nav_msgs/msg/Odometry',
                 'schema': 'schema body',
@@ -97,7 +93,7 @@ class FoxgloveWorkerTest(unittest.IsolatedAsyncioTestCase):
             'op': 'advertise',
             'channels': [{
                 'id': 4,
-                'topic': '/robot_1/odom',
+                'topic': '/odom',
                 'encoding': 'cdr',
                 'schemaName': 'std_msgs/msg/String',
                 'schema': 'schema body',
