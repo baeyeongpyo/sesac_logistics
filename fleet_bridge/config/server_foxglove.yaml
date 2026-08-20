@@ -1,0 +1,25 @@
+foxglove_bridge:
+  ros__parameters:
+    address: 0.0.0.0
+    port: 8765
+    topic_whitelist:
+      - ^/robot_1/.*$
+      - ^/robot_2/.*$
+      - ^/fleet/.*$
+    best_effort_qos_topic_whitelist:
+      - ^/robot_1/(odom|tf|scan)$
+      - ^/robot_2/(odom|tf|scan)$
+    service_whitelist:
+      - '(?!)'
+    param_whitelist:
+      - '(?!)'
+    client_topic_whitelist:
+      - '(?!)'
+    asset_uri_allowlist:
+      - '(?!)'
+    capabilities: []
+    include_hidden: false
+    min_qos_depth: 1
+    max_qos_depth: 20
+    send_buffer_limit: 4194304
+    use_compression: false
