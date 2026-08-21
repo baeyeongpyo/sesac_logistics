@@ -188,8 +188,7 @@ def terminal_loop(stdscr, window, app, key_timeout):
             if window.arc_active or window.target_search_active:
                 window.arc_label.setText("주행 또는 탐색 중에는 설정 파일을 열 수 없음")
                 continue
-            default_editor = "nano" if shutil.which("nano") else "vi"
-            editor = shlex.split(os.environ.get("EDITOR", default_editor))
+            editor = shlex.split(os.environ.get("EDITOR", "gedit"))
             try:
                 curses.def_prog_mode()
                 curses.endwin()
