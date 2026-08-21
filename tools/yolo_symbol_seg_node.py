@@ -274,11 +274,9 @@ class YoloSymbolSeg(Node):
         self.result_pub = self.create_publisher(String, str(self.get_parameter("result_topic").value), 10)
         self.cmd_pub = self.create_publisher(Twist, str(self.get_parameter("cmd_vel_topic").value), 10)
         self.fork_pub = self.create_publisher(String, str(self.get_parameter("fork_command_topic").value), 10)
-        self.image_topic = str(self.get_parameter("image_topic").value)
-        self.camera_qos = camera_qos
-        self.image_sub = None
-        self.inference_paused = False
-        self.set_inference_paused(False)
+        self.create_subscription(
+            Image, str(self.get_parameter("image_topic").value), self.on_image, camera_qos
+        )
         self.create_subscription(
             CameraInfo, str(self.get_parameter("camera_info_topic").value),
             self.on_camera_info, camera_qos,
@@ -350,10 +348,6 @@ class YoloSymbolSeg(Node):
                         self.start_telemetry(str(command.get("session", "teleop")))
                     elif command.get("action") == "stop":
                         self.stop_telemetry(str(command.get("session", "")))
-                elif command.get("type") == "inference":
-                    action = str(command.get("action", "")).lower()
-                    if action in ("pause", "resume"):
-                        self.set_inference_paused(action == "pause")
                 elif command.get("type") == "telemetry_event":
                     event_type = re.sub(
                         r"[^A-Za-z0-9_.-]", "_", str(command.get("event_type", "gui"))
@@ -368,26 +362,6 @@ class YoloSymbolSeg(Node):
                     drive_active = False
             except (OSError, ValueError, TypeError, UnicodeDecodeError):
                 continue
-
-    def set_inference_paused(self, paused):
-        """Stop/start the RGB subscription while retaining the loaded model."""
-        paused = bool(paused)
-        if paused == self.inference_paused and (paused or self.image_sub is not None):
-            return
-        self.inference_paused = paused
-        with self.lock:
-            self.latest = None
-            self.processed_sequence = self.sequence
-        if paused:
-            if self.image_sub is not None:
-                self.destroy_subscription(self.image_sub)
-                self.image_sub = None
-            self.get_logger().info("YOLO inference paused; RGB subscription removed")
-        else:
-            self.image_sub = self.create_subscription(
-                Image, self.image_topic, self.on_image, self.camera_qos
-            )
-            self.get_logger().info("YOLO inference resumed; RGB subscription active")
 
     def start_web_server(self, port):
         node = self

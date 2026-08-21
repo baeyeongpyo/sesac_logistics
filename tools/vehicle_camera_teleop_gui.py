@@ -273,13 +273,6 @@ class TeleopNode(Node):
         payload = {"type": "target", "top_left": top_left, "top_right": top_right}
         self.control_socket.sendto(json.dumps(payload).encode("utf-8"), self.control_address)
 
-    def set_inference_paused(self, paused):
-        payload = {
-            "type": "inference",
-            "action": "pause" if paused else "resume",
-        }
-        self.control_socket.sendto(json.dumps(payload).encode("utf-8"), self.control_address)
-
     def update_pose_config(
         self, camera_pitch_deg, distance_scale, distance_offset, yaw_bias_deg
     ):
@@ -695,7 +688,6 @@ class TeleopWindow(QMainWindow):
         self.arc_cycle_advance_m = 0.10
         self.arc_cycle_replan_due_at = None
         self.target_search_active = False
-        self.yolo_paused = False
         self.target_search_linear_m_s = 0.08
         self.target_search_angular_rad_s = 0.12
         self.arc_forward_anchor_position = None
@@ -2758,7 +2750,6 @@ class TeleopWindow(QMainWindow):
         return target_x, target_y, target_yaw
 
     def begin_arc_manual_correction(self, result):
-        self.set_yolo_paused(False, "자동 주행 완료")
         self.last_arc_result = json.loads(json.dumps(result))
         self.arc_correction_started_at = time.monotonic()
         self.arc_correction_start_integrals = (
@@ -3137,8 +3128,6 @@ class TeleopWindow(QMainWindow):
             self.arc_cycle_index = 1
             self.arc_cycle_replan_due_at = None
         self.arc_active = True
-        if self.arc_plan.get("controller_mode") == "visual_alternating_dock":
-            self.set_yolo_paused(True, "odom 기반 횡이동·회전")
         self.arc_execute_button.setText("주행 실행")
         self.arc_execute_button.setEnabled(False)
         self.arc_label.setText("ARC 실행 중 | Space 또는 취소로 정지")
@@ -3260,20 +3249,6 @@ class TeleopWindow(QMainWindow):
             if index >= 0:
                 self.run_mode.setCurrentIndex(index)
 
-    def set_yolo_paused(self, paused, reason):
-        """Pause RGB transport only during odom-only automatic motion."""
-        if not hasattr(self.node, "set_inference_paused"):
-            return
-        paused = bool(paused)
-        if getattr(self, "yolo_paused", False) == paused:
-            return
-        self.node.set_inference_paused(paused)
-        self.yolo_paused = paused
-        self.node.log_telemetry_event("yolo_inference", {
-            "state": "paused" if paused else "resumed",
-            "reason": reason,
-        })
-
     def run_selected_mode(self):
         """Start the automatic mode selected in the ARC panel."""
         if (
@@ -3295,7 +3270,6 @@ class TeleopWindow(QMainWindow):
     def start_target_search(self):
         self.cancel_arc_approach("원형 목표 탐색 시작")
         self.set_selected_run_mode("search")
-        self.set_yolo_paused(False, "목표 탐색")
         self.target_search_active = True
         self.node.stop(repeats=3)
         radius = self.target_search_linear_m_s / self.target_search_angular_rad_s
@@ -3356,7 +3330,6 @@ class TeleopWindow(QMainWindow):
         self.arc_forward_anchor_position = None
         self.arc_forward_anchor_yaw = None
         self.arc_forward_anchor_remaining_m = None
-        self.set_yolo_paused(False, f"주행 취소: {reason}")
         self.node.stop(repeats=3)
         self.arc_execute_button.setText("주행 실행")
         if was_active:
@@ -3396,7 +3369,6 @@ class TeleopWindow(QMainWindow):
         })
         self.arc_execute_button.setText("직선 삽입 계속")
         self.arc_execute_button.setEnabled(True)
-        self.set_yolo_paused(True, "odom 기반 직선 삽입 대기")
         self.arc_label.setText(
             f"yaw 재확인 {verified_yaw_deg:+.1f}° | 직선 삽입 전 정지"
         )
@@ -3414,7 +3386,6 @@ class TeleopWindow(QMainWindow):
         self.arc_forward_anchor_yaw = self.node.odom_yaw_unwrapped
         self.arc_execute_button.setText("주행 실행")
         self.arc_execute_button.setEnabled(False)
-        self.set_yolo_paused(True, "odom 기반 직선 삽입")
         self.node.log_telemetry_event("arc_insertion_resume", {
             "automatic_pass": self.arc_auto_pass,
             "remaining_cm": self.arc_forward_anchor_remaining_m * 100.0,
@@ -3499,7 +3470,6 @@ class TeleopWindow(QMainWindow):
                 "lateral_once" if abs(lateral_target) > 0.01 else "rotate_once"
             )
             self.arc_phase_started_at = now
-            self.set_yolo_paused(True, "근거리 계획 후 odom 정렬")
             self.node.log_telemetry_event("arc_near_center_replan", {
                 "target_forward_cm": target_x * 100.0,
                 "target_lateral_left_cm": target_y * 100.0,
@@ -3607,7 +3577,6 @@ class TeleopWindow(QMainWindow):
                 self.node.stop(repeats=3)
                 self.arc_dock_phase = "verify_yaw"
                 self.arc_phase_started_at = now
-                self.set_yolo_paused(False, "회전 후 yaw 재확인")
                 self.arc_dock_yaw_verify_samples = []
                 self.arc_phase_last_detection_id = (
                     self.node.latest_detection or {}
@@ -3698,7 +3667,6 @@ class TeleopWindow(QMainWindow):
                         self.arc_forward_anchor_position = self.node.odom_position
                         self.arc_forward_anchor_yaw = self.node.odom_yaw_unwrapped
                         self.arc_forward_anchor_remaining_m = advance_m
-                        self.set_yolo_paused(True, "odom 기반 다음 사이클 전진")
                         self.arc_label.setText(
                             f"yaw {visual_yaw_deg:+.1f}° | "
                             f"다음 사이클 전 {advance_m*100:.1f}cm 전진"
@@ -3761,7 +3729,6 @@ class TeleopWindow(QMainWindow):
                     self.node.stop(repeats=5)
                     self.arc_dock_phase = "near_center_recheck"
                     self.arc_phase_started_at = now
-                    self.set_yolo_paused(False, "근거리 중심·yaw 재검출")
                     self.arc_phase_last_detection_id = (
                         self.node.latest_detection or {}
                     ).get("source_stamp_ns")
@@ -4219,7 +4186,6 @@ class TeleopWindow(QMainWindow):
         self.arc_auto_internal_start = False
         self.arc_auto_replan_due_at = None
         self.arc_cycle_replan_due_at = None
-        self.set_yolo_paused(False, "비상 정지")
         self.pressed.clear()
         self.node.stop(repeats=5)
         self.node.publish_fork("STOP")
