@@ -5,6 +5,7 @@ import argparse
 import curses
 import os
 import shlex
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -95,7 +96,7 @@ def draw(stdscr, window, movement_name, fork_name):
         mode_text = "단일 (계산·주행 1회 후 삽입 전 정지)"
     lines = [
         f"control_ui 차량 {window.args.vehicle}  WASD: 전후/횡이동  Q/E: 회전  ↑/↓: 리프트  SPACE: 정지",
-        ".: 주행계산  ENTER: 탐색/주행실행  M: 모드 선택  Z: 취소",
+        ".: 주행계산  ENTER: 탐색/주행실행  M: 모드 선택  O: 공통 설정 JSON  Z: 취소",
         f"목표: {window.target_left.currentData()} / {window.target_right.currentData()}",
         f"중심선 보정: {window.centerline_offset_cm:+.1f} cm (+왼쪽/-오른쪽)",
         f"추가 주행보정: 횡이동 {window.lateral_overrun_cm:.1f} cm / "
@@ -182,6 +183,21 @@ def terminal_loop(stdscr, window, app, key_timeout):
         elif key in (ord("z"), ord("Z")):
             window.cancel_arc_approach("터미널 사용자 취소")
             movement_name = ""
+        elif key in (ord("o"), ord("O")):
+            if window.arc_active or window.target_search_active:
+                window.arc_label.setText("주행 또는 탐색 중에는 설정 파일을 열 수 없음")
+                continue
+            editor = shlex.split(os.environ.get("EDITOR", "nano"))
+            try:
+                curses.def_prog_mode()
+                curses.endwin()
+                subprocess.run([*editor, str(window.rotation_calibration_path())], check=False)
+                curses.reset_prog_mode()
+                stdscr.refresh()
+                window.load_rotation_calibration()
+                window.arc_label.setText("공통 설정 JSON을 다시 읽음")
+            except OSError as exc:
+                window.arc_label.setText(f"설정 편집기 실행 실패: {exc}")
         elif key in (ord("m"), ord("M")):
             if (
                 window.arc_active

@@ -1066,6 +1066,9 @@ class TeleopWindow(QMainWindow):
         self.open_calibration_button = QPushButton("Calibration 창 열기")
         self.open_calibration_button.clicked.connect(self.open_calibration_window)
         control_layout.addWidget(self.open_calibration_button)
+        self.open_pose_config_button = QPushButton("공통 설정 JSON 열기")
+        self.open_pose_config_button.clicked.connect(self.open_pose_config_editor)
+        control_layout.addWidget(self.open_pose_config_button)
         self.log_filter = QComboBox()
         for label, value in (
             ("전체", "all"), ("녹화", "recording"), ("캡처", "capture"),
@@ -1151,6 +1154,49 @@ class TeleopWindow(QMainWindow):
         self.calibration_window.show()
         self.calibration_window.raise_()
         self.calibration_window.activateWindow()
+
+    def open_pose_config_editor(self):
+        path = self.rotation_calibration_path()
+        try:
+            content = path.read_text(encoding="utf-8") if path.exists() else "{}\n"
+        except OSError as exc:
+            QMessageBox.warning(self, "설정 JSON", f"파일을 열 수 없습니다: {exc}")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"공통 설정 JSON — {path}")
+        dialog.resize(760, 620)
+        editor = QPlainTextEdit()
+        editor.setPlainText(content)
+        status = QLabel("수정 후 저장하면 GUI와 control_ui가 같은 값을 사용합니다.")
+        save_button = QPushButton("저장 후 다시 읽기")
+        close_button = QPushButton("닫기")
+
+        def save_config():
+            try:
+                data = json.loads(editor.toPlainText())
+                if not isinstance(data, dict):
+                    raise ValueError("최상위 값은 JSON 객체여야 합니다")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                self.load_rotation_calibration()
+                status.setText("저장 완료: 현재 GUI 설정을 다시 읽었습니다.")
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                status.setText(f"저장 실패: {exc}")
+
+        save_button.clicked.connect(save_config)
+        close_button.clicked.connect(dialog.accept)
+        buttons = QHBoxLayout()
+        buttons.addWidget(save_button)
+        buttons.addWidget(close_button)
+        layout = QVBoxLayout()
+        layout.addWidget(editor, 1)
+        layout.addWidget(status)
+        layout.addLayout(buttons)
+        dialog.setLayout(layout)
+        dialog.exec_()
 
     def open_log_window(self):
         self.refresh_log_records()
