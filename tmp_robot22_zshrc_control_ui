@@ -1,0 +1,95 @@
+setopt no_nomatch
+
+if [[ -r "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh" ]]; then
+  source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
+fi
+
+source $HOME/ros2_ws/.zshrc
+source /opt/ros/humble/setup.zsh
+source ~/ros2_ws/install/setup.zsh
+
+export ROS_DOMAIN_ID=216
+export ROS_LOCALHOST_ONLY=0
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+unset ROS_DISCOVERY_SERVER
+unset CYCLONEDDS_URI
+
+control_gui() {
+  source /opt/ros/humble/setup.zsh
+  source "$HOME/ros2_ws/install/setup.zsh"
+  export ROS_DOMAIN_ID=216
+
+  if ! curl --fail --silent --max-time 1 http://127.0.0.1:8090/ >/dev/null 2>&1; then
+    pkill -f "[v]ehicle_http_bridge.py" 2>/dev/null || true
+    pkill -f "[y]olo_symbol_seg_node.py" 2>/dev/null || true
+    nohup python3 /shared/yolo_symbol_seg_node.py \
+      --ros-args \
+      -p model:=/shared/best_ncnn_model \
+      -p image_topic:=/ascamera/camera_publisher/rgb0/image \
+      -p camera_info_topic:=/ascamera/camera_publisher/rgb0/camera_info \
+      -p result_topic:=/robot_2/symbol_seg/detections \
+      -p pose_config:=/shared/vehicle_pose_config.json \
+      -p camera_yaw_deg:=0.0 \
+      -p yaw_bias_deg:=13.2 \
+      >/tmp/yolo_symbol_ncnn.log 2>&1 &
+    local ready=0
+    local attempt
+    for attempt in {1..50}; do
+      if curl --fail --silent --max-time 1 http://127.0.0.1:8090/ >/dev/null 2>&1; then
+        ready=1
+        break
+      fi
+      sleep 0.1
+    done
+    if [[ "$ready" -ne 1 ]]; then
+      echo "NCNN inference failed to start:" >&2
+      tail -30 /tmp/yolo_symbol_ncnn.log >&2
+      return 1
+    fi
+  fi
+  python3 /home/ubuntu/ros2_ws/tools/vehicle_camera_teleop_gui.py \
+    --vehicle 2 \
+    --ros-domain-id 216 \
+    --primary-video-url http://127.0.0.1:8090/stream \
+    --control-host 127.0.0.1 \
+    --disable-external-webcams \
+    --scan-topic /scan_raw \
+    --odom-topic /odom_raw \
+    --pose-config /shared/vehicle_pose_config.json \
+    --detection-topic /robot_2/symbol_seg/detections \
+    --cmd-vel-topic /controller/cmd_vel \
+    --output-dir /home/ubuntu/recordings/vehicle2 \
+    --linear-speed 0.12 --angular-speed 0.35 \
+    --stop-distance 0.20 --safety-min-valid-range 0.25
+}
+
+control_ui() {
+  source /opt/ros/humble/setup.zsh
+  source "$HOME/ros2_ws/install/setup.zsh"
+  export ROS_DOMAIN_ID=216
+
+  if ! pgrep -f "[y]olo_symbol_seg_node.py" >/dev/null 2>&1; then
+    nohup python3 /shared/yolo_symbol_seg_node.py \
+      --ros-args \
+      -p model:=/shared/best_ncnn_model \
+      -p image_topic:=/ascamera/camera_publisher/rgb0/image \
+      -p camera_info_topic:=/ascamera/camera_publisher/rgb0/camera_info \
+      -p result_topic:=/robot_2/symbol_seg/detections \
+      -p pose_config:=/shared/vehicle_pose_config.json \
+      -p camera_yaw_deg:=0.0 \
+      -p yaw_bias_deg:=13.2 \
+      >/tmp/yolo_symbol_ncnn.log 2>&1 &
+    sleep 1
+  fi
+
+  python3 /home/ubuntu/ros2_ws/tools/control_ui.py \
+    --vehicle 2 --ros-domain-id 216 "$@"
+}
+
+if ! pgrep -f "_ros2_daemon.*ros-domain-id $ROS_DOMAIN_ID" >/dev/null; then
+  nohup /opt/ros/humble/bin/_ros2_daemon \
+    --rmw-implementation "$RMW_IMPLEMENTATION" \
+    --ros-domain-id "$ROS_DOMAIN_ID" \
+    >/dev/null 2>&1 &
+fi
