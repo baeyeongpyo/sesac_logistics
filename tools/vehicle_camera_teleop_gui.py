@@ -936,6 +936,14 @@ class TeleopWindow(QMainWindow):
         self.arc_execute_button = QPushButton("주행 실행")
         self.arc_execute_button.clicked.connect(self.start_arc_approach)
         self.arc_execute_button.setEnabled(False)
+        self.run_mode = QComboBox()
+        self.run_mode.addItem("원형 탐색 → 자동주행", "search")
+        self.run_mode.addItem("무제한 자동주행 → 자동 삽입", "auto")
+        self.run_mode.addItem("단일 정렬 (삽입 전 정지)", "single")
+        self.run_mode.addItem("3회 정렬 (삽입 전 정지)", "cycle3")
+        self.run_mode.setCurrentIndex(self.run_mode.findData("search"))
+        self.run_mode_button = QPushButton("선택 모드 실행")
+        self.run_mode_button.clicked.connect(self.run_selected_mode)
         self.arc_cancel_button = QPushButton("취소")
         self.arc_cancel_button.clicked.connect(
             lambda: self.cancel_arc_approach("사용자 취소")
@@ -964,13 +972,16 @@ class TeleopWindow(QMainWindow):
         arc_layout.addWidget(self.arc_insertion_distance, 1, 1)
         arc_layout.addWidget(QLabel("주행 방식"), 1, 2)
         arc_layout.addWidget(self.approach_mode, 1, 3, 1, 2)
-        arc_layout.addWidget(self.arc_label, 2, 0, 1, 5)
-        arc_layout.addWidget(QLabel("전후차 (+덜 감)"), 3, 0)
-        arc_layout.addWidget(self.arc_forward_error, 3, 1)
-        arc_layout.addWidget(QLabel("좌우차 (+왼쪽)"), 3, 2)
-        arc_layout.addWidget(self.arc_lateral_error, 3, 3)
-        arc_layout.addWidget(self.arc_sample_save, 3, 4)
-        arc_layout.addWidget(self.arc_sample_label, 4, 0, 1, 5)
+        arc_layout.addWidget(QLabel("자동 모드"), 2, 0)
+        arc_layout.addWidget(self.run_mode, 2, 1, 1, 3)
+        arc_layout.addWidget(self.run_mode_button, 2, 4)
+        arc_layout.addWidget(self.arc_label, 3, 0, 1, 5)
+        arc_layout.addWidget(QLabel("전후차 (+덜 감)"), 4, 0)
+        arc_layout.addWidget(self.arc_forward_error, 4, 1)
+        arc_layout.addWidget(QLabel("좌우차 (+왼쪽)"), 4, 2)
+        arc_layout.addWidget(self.arc_lateral_error, 4, 3)
+        arc_layout.addWidget(self.arc_sample_save, 4, 4)
+        arc_layout.addWidget(self.arc_sample_label, 5, 0, 1, 5)
 
         self.memo = QPlainTextEdit()
         self.memo.setPlaceholderText("캡처 메모 (이미지와 별도 JSON으로 저장)")
@@ -3221,8 +3232,44 @@ class TeleopWindow(QMainWindow):
                 f"사이클 {self.arc_cycle_index}/{limit_text} 실행"
             )
 
+    def set_selected_run_mode(self, mode):
+        """Apply the terminal UI's automatic-run settings to the GUI action."""
+        settings = {
+            "search": (0, True),
+            "auto": (0, True),
+            "single": (1, False),
+            "cycle3": (3, False),
+        }
+        cycle_limit, auto_insert = settings[mode]
+        self.terminal_run_mode = mode
+        self.arc_cycle_limit = cycle_limit
+        self.arc_auto_insert_after_verify = auto_insert
+        if hasattr(self, "run_mode"):
+            index = self.run_mode.findData(mode)
+            if index >= 0:
+                self.run_mode.setCurrentIndex(index)
+
+    def run_selected_mode(self):
+        """Start the automatic mode selected in the ARC panel."""
+        if (
+            self.arc_active
+            or self.target_search_active
+            or self.arc_cycle_replan_due_at is not None
+        ):
+            self.arc_label.setText("주행 또는 탐색 중에는 모드 변경 불가")
+            return
+        mode = self.run_mode.currentData()
+        self.set_selected_run_mode(mode)
+        if mode == "search":
+            self.start_target_search()
+            return
+        if not self.plan_arc_approach():
+            return
+        self.start_arc_approach()
+
     def start_target_search(self):
         self.cancel_arc_approach("원형 목표 탐색 시작")
+        self.set_selected_run_mode("search")
         self.target_search_active = True
         self.node.stop(repeats=3)
         radius = self.target_search_linear_m_s / self.target_search_angular_rad_s
@@ -3235,9 +3282,7 @@ class TeleopWindow(QMainWindow):
         if reason is None and candidate is not None:
             self.target_search_active = False
             self.node.stop(repeats=5)
-            self.terminal_run_mode = "auto"
-            self.arc_cycle_limit = 0
-            self.arc_auto_insert_after_verify = True
+            self.set_selected_run_mode("auto")
             if self.plan_arc_approach():
                 self.start_arc_approach()
                 self.arc_label.setText("목표 발견 | 무제한 자동모드 전환")
