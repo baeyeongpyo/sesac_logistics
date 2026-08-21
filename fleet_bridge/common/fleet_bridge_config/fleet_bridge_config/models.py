@@ -72,3 +72,10 @@ class TopicConfig:
     message_type: str
     worker_rate: RateConfig
     qos: QosConfig
+
+
+@dataclass(frozen=True)
+class CentralTopicConfig:
+    id: str
+    enabled: bool
+    topic: str

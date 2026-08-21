@@ -1,0 +1,5 @@
+version: 1
+topics:
+  - id: controller_map
+    enabled: true
+    topic: /controller_server/map

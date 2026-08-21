@@ -10,7 +10,12 @@ PACKAGE = Path(__file__).resolve().parents[1]
 BUNDLE = PACKAGE.parents[1]
 sys.path.insert(0, str(PACKAGE))
 
-from fleet_bridge_config.loader import ConfigError, load_fleet, load_telemetry
+from fleet_bridge_config.loader import (
+    ConfigError,
+    load_central_topics,
+    load_fleet,
+    load_telemetry,
+)
 
 
 VALID_TELEMETRY = {
@@ -263,6 +268,45 @@ class ConfigLoaderTest(unittest.TestCase):
         )
 
         self.assertEqual(len(loaded), 3)
+
+    def test_load_central_topics_validates_enabled_entries(self):
+        document = {
+            'version': 1,
+            'topics': [
+                {
+                    'id': 'controller_map',
+                    'enabled': True,
+                    'topic': '/controller_server/map',
+                },
+                {
+                    'id': 'disabled_copy',
+                    'enabled': False,
+                    'topic': '/controller_server/map',
+                },
+            ],
+        }
+
+        topics = load_central_topics(self.write_yaml('central.yaml', document))
+
+        self.assertEqual(
+            [(topic.id, topic.enabled, topic.topic) for topic in topics],
+            [
+                ('controller_map', True, '/controller_server/map'),
+                ('disabled_copy', False, '/controller_server/map'),
+            ],
+        )
+
+    def test_load_central_topics_rejects_duplicate_active_path(self):
+        document = {
+            'version': 1,
+            'topics': [
+                {'id': 'first', 'enabled': True, 'topic': '/controller_server/map'},
+                {'id': 'second', 'enabled': True, 'topic': '/controller_server/map'},
+            ],
+        }
+
+        with self.assertRaisesRegex(ConfigError, 'duplicate central topic'):
+            load_central_topics(self.write_yaml('duplicate.yaml', document))
 
     def test_repository_configs_define_two_vehicles_and_safe_default_telemetry(self):
         fleet = load_fleet(

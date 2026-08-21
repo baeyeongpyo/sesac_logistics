@@ -1,5 +1,6 @@
-from .loader import ConfigError, load_fleet, load_telemetry
+from .loader import ConfigError, load_central_topics, load_fleet, load_telemetry
 from .models import (
+    CentralTopicConfig,
     FleetConfig,
     QosConfig,
     RateConfig,
@@ -10,12 +11,14 @@ from .models import (
 
 __all__ = [
     'ConfigError',
+    'CentralTopicConfig',
     'FleetConfig',
     'QosConfig',
     'RateConfig',
     'ServerConfig',
     'TopicConfig',
     'VehicleConfig',
+    'load_central_topics',
     'load_fleet',
     'load_telemetry',
 ]

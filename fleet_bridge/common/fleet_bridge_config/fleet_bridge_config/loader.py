@@ -7,6 +7,7 @@ import re
 import yaml
 
 from .models import (
+    CentralTopicConfig,
     CommandApiConfig,
     CommandConfig,
     FleetConfig,
@@ -314,4 +315,41 @@ def load_telemetry(path: Path | str, robot_id: str) -> tuple[TopicConfig, ...]:
 
     if not topics:
         raise ConfigError('telemetry.topics must not be empty')
+    return tuple(topics)
+
+
+def load_central_topics(path: Path | str) -> tuple[CentralTopicConfig, ...]:
+    document = _mapping(_read_yaml(path), 'central_topics')
+    _keys(document, {'version', 'topics'}, 'central_topics')
+    _required(document, {'version', 'topics'}, 'central_topics')
+    if document['version'] != 1:
+        raise ConfigError('central_topics.version must be 1')
+
+    topics = []
+    ids = set()
+    active_topics = set()
+    for index, raw_value in enumerate(_list(document['topics'], 'central_topics.topics')):
+        location = f'central_topics.topics[{index}]'
+        raw = _mapping(raw_value, location)
+        _keys(raw, {'id', 'enabled', 'topic'}, location)
+        _required(raw, {'id', 'enabled', 'topic'}, location)
+        raw_topic = _string(raw['topic'], f'{location}.topic')
+        if '{' in raw_topic or '}' in raw_topic:
+            raise ConfigError(f'{location}.topic contains an unsupported template')
+        topic = CentralTopicConfig(
+            id=_identifier(raw['id'], f'{location}.id'),
+            enabled=_boolean(raw['enabled'], f'{location}.enabled'),
+            topic=_topic_name(raw_topic, f'{location}.topic', 'central'),
+        )
+        if topic.id in ids:
+            raise ConfigError(f'duplicate central topic id: {topic.id}')
+        ids.add(topic.id)
+        if topic.enabled:
+            if topic.topic in active_topics:
+                raise ConfigError(f'duplicate central topic: {topic.topic}')
+            active_topics.add(topic.topic)
+        topics.append(topic)
+
+    if not topics:
+        raise ConfigError('central_topics.topics must not be empty')
     return tuple(topics)
