@@ -187,6 +187,7 @@ class YoloSymbolSeg(Node):
     def __init__(self):
         super().__init__("yolo_symbol_seg")
         self.declare_parameter("image_topic", "/ascamera/camera_publisher/rgb0/image")
+        self.declare_parameter("depth_image_topic", "/ascamera/camera_publisher/depth0/image_raw")
         self.declare_parameter("camera_info_topic", "/ascamera/camera_publisher/rgb0/camera_info")
         self.declare_parameter("result_topic", "/robot_1/symbol_seg/detections")
         self.declare_parameter("annotated_topic", "/robot_1/symbol_seg/annotated")
@@ -254,6 +255,8 @@ class YoloSymbolSeg(Node):
         self.processed_sequence = 0
         self.latest_jpeg = None
         self.latest_jpeg_sequence = 0
+        self.latest_depth = None
+        self.latest_depth_stamp_ns = 0
         self.candidate_center = None
         self.candidate_streak = 0
         self.camera_matrix = None
@@ -280,6 +283,9 @@ class YoloSymbolSeg(Node):
         self.fork_pub = self.create_publisher(String, str(self.get_parameter("fork_command_topic").value), 10)
         self.create_subscription(
             Image, str(self.get_parameter("image_topic").value), self.on_image, camera_qos
+        )
+        self.create_subscription(
+            Image, str(self.get_parameter("depth_image_topic").value), self.on_depth, camera_qos
         )
         self.create_subscription(
             CameraInfo, str(self.get_parameter("camera_info_topic").value),
@@ -428,6 +434,20 @@ class YoloSymbolSeg(Node):
             self.latest = message
             self.sequence += 1
 
+    def on_depth(self, message):
+        if message.encoding not in ("16UC1", "32FC1"):
+            return
+        try:
+            depth = self.bridge.imgmsg_to_cv2(message, desired_encoding="passthrough")
+        except Exception:
+            return
+        with self.lock:
+            self.latest_depth = depth.copy()
+            self.latest_depth_stamp_ns = (
+                int(message.header.stamp.sec) * 1_000_000_000
+                + int(message.header.stamp.nanosec)
+            )
+
     def on_camera_info(self, message):
         matrix = np.asarray(message.k, dtype=np.float64).reshape(3, 3)
         if matrix[0, 0] <= 0.0 or matrix[1, 1] <= 0.0:
@@ -568,6 +588,51 @@ class YoloSymbolSeg(Node):
             "right_tag": best[3],
             "bearing_error_deg": math.degrees(best[0]),
             "age_sec": now - best[1]["seen_at"],
+        }
+
+    def depth_yaw_from_pair(self, left_tag, right_tag, rgb_stamp_ns):
+        """Estimate pallet-face yaw from registered depth at the top tag centers."""
+        with self.lock:
+            depth = None if self.latest_depth is None else self.latest_depth.copy()
+            depth_stamp_ns = self.latest_depth_stamp_ns
+            matrix = None if self.camera_matrix is None else self.camera_matrix.copy()
+        if (
+            depth is None or matrix is None or depth_stamp_ns <= 0
+            or abs(depth_stamp_ns - rgb_stamp_ns) > 150_000_000
+        ):
+            return None
+
+        def median_depth_m(tag):
+            u, v = (round(value) for value in detection_center(tag))
+            y0, y1 = max(0, v - 2), min(depth.shape[0], v + 3)
+            x0, x1 = max(0, u - 2), min(depth.shape[1], u + 3)
+            if y0 >= y1 or x0 >= x1:
+                return None
+            values = depth[y0:y1, x0:x1].astype(np.float32).reshape(-1)
+            if depth.dtype == np.uint16:
+                values *= 0.001  # ASCamera 16UC1 is millimetres.
+            values = values[np.isfinite(values) & (values >= 0.15) & (values <= 6.0)]
+            return None if values.size < 5 else float(np.median(values))
+
+        left_depth = median_depth_m(left_tag)
+        right_depth = median_depth_m(right_tag)
+        if left_depth is None or right_depth is None:
+            return None
+        left_u, _ = detection_center(left_tag)
+        right_u, _ = detection_center(right_tag)
+        fx, cx = matrix[0, 0], matrix[0, 2]
+        left_x = (left_u - cx) * left_depth / fx
+        right_x = (right_u - cx) * right_depth / fx
+        baseline = math.hypot(right_x - left_x, right_depth - left_depth)
+        if baseline < 0.03:
+            return None
+        return {
+            "yaw_deg": math.degrees(math.atan2(
+                right_depth - left_depth, right_x - left_x
+            )),
+            "left_depth_m": left_depth,
+            "right_depth_m": right_depth,
+            "baseline_m": baseline,
         }
 
     def start_telemetry(self, session):
@@ -740,6 +805,10 @@ class YoloSymbolSeg(Node):
 
     def infer(self, message):
         started = time.perf_counter()
+        source_stamp_ns = (
+            int(message.header.stamp.sec) * 1_000_000_000
+            + int(message.header.stamp.nanosec)
+        )
         frame = self.bridge.imgmsg_to_cv2(message, desired_encoding="bgr8")
         tensor, scale, left, top, _resized_width, _resized_height = letterbox(frame, self.input_size)
         with self.net.create_extractor() as extractor:
@@ -822,6 +891,9 @@ class YoloSymbolSeg(Node):
             else:
                 left_center = detection_center(tracked_partial["left_tag"])
                 right_center = detection_center(tracked_partial["right_tag"])
+                tracked_partial["depth_yaw"] = self.depth_yaw_from_pair(
+                    tracked_partial["left_tag"], tracked_partial["right_tag"], source_stamp_ns
+                )
                 cv2.line(
                     annotated, tuple(map(round, left_center)), tuple(map(round, right_center)),
                     (255, 100, 0), 2,
@@ -832,6 +904,8 @@ class YoloSymbolSeg(Node):
                     f"tracked entity #{tracked_partial['entity_id']} | "
                     f"upper pair | map err {tracked_partial['bearing_error_deg']:.1f} deg"
                 )
+                if tracked_partial["depth_yaw"] is not None:
+                    status_text += f" | depth yaw {tracked_partial['depth_yaw']['yaw_deg']:+.1f} deg"
         else:
             next_center = entity_center(candidate)
             px1, py1, px2, py2 = candidate["pallet"]["box"]
@@ -853,6 +927,9 @@ class YoloSymbolSeg(Node):
             bottom_row_error = candidate["bottom_row_error"]
             overlap_angle = candidate["overlap_angle"]
             pnp_pose = self.estimate_target_pose(candidate)
+            depth_yaw = self.depth_yaw_from_pair(
+                candidate["ordered_tags"][0], candidate["ordered_tags"][1], source_stamp_ns
+            )
             entity_id = self.remember_complete_entity(candidate, pnp_pose)
             cv2.rectangle(annotated, (px1, py1), (px2, py2), (0, 255, 255), 3)
             for point in candidate["tag_centers"]:
@@ -886,6 +963,7 @@ class YoloSymbolSeg(Node):
                 "pallet_box": candidate["pallet"]["box"],
                 "matrix": [item["class"] for item in candidate["ordered_tags"]],
                 "entity_id": entity_id,
+                "depth_yaw": depth_yaw,
             }
         elapsed = time.perf_counter() - started
         cv2.putText(annotated, f"YOLO11n-detect {self.input_size} | {elapsed * 1000:.0f} ms | conf {self.confidence:.2f}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2)
@@ -893,10 +971,7 @@ class YoloSymbolSeg(Node):
         cv2.putText(annotated, status_text, (10, frame.shape[0] - 11), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
         result_payload = {
             "inference_sec": elapsed,
-            "source_stamp_ns": (
-                int(message.header.stamp.sec) * 1_000_000_000
-                + int(message.header.stamp.nanosec)
-            ),
+            "source_stamp_ns": source_stamp_ns,
             "target_top": list(self.target_top),
             "pose_config": {
                 "camera_pitch_deg": self.camera_pitch_deg,
@@ -912,6 +987,7 @@ class YoloSymbolSeg(Node):
                     "entity_id": tracked_partial["entity_id"],
                     "bearing_error_deg": tracked_partial["bearing_error_deg"],
                     "age_sec": tracked_partial["age_sec"],
+                    "depth_yaw": tracked_partial.get("depth_yaw"),
                 }
             ),
         }
