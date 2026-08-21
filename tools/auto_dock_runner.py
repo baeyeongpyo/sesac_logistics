@@ -130,6 +130,7 @@ class AutoDockRunner:
             if self.started_at is not None:
                 self.publish_status("rejected", "already_running")
                 return
+            self.window.load_rotation_calibration()
             left = command.get("left", self.default_target[0])
             right = command.get("right", self.default_target[1])
             if left not in SYMBOLS or right not in SYMBOLS:
