@@ -21,6 +21,7 @@ setup(
         'console_scripts': [
             'foxglove_ros_worker = foxglove_ros_worker.main:main',
             'fleet_command_api = foxglove_ros_worker.api:main',
+            'fleet_rosbag_recorder = foxglove_ros_worker.recording:main',
         ],
     },
 )
