@@ -11,12 +11,20 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
+# rclpy reads ROS_DOMAIN_ID when it initializes, so handle this option before
+# importing any ROS modules (and before the bootstrap re-exec below).
+_bootstrap_parser = argparse.ArgumentParser(add_help=False)
+_bootstrap_parser.add_argument("--ros-domain-id", type=int, default=215)
+_bootstrap_args, _ = _bootstrap_parser.parse_known_args()
+
+
 if not os.environ.get("VEHICLE_GUI_ROS_READY"):
     setup = Path("/opt/ros/humble/setup.bash")
     workspace = Path("/home/ubuntu/ros2_ws/install/setup.bash")
     environment = os.environ.copy()
     environment["VEHICLE_GUI_ROS_READY"] = "1"
     environment["QT_QPA_PLATFORM"] = "offscreen"
+    environment["ROS_DOMAIN_ID"] = str(_bootstrap_args.ros_domain_id)
     os.execve(
         "/bin/bash",
         [
@@ -30,7 +38,7 @@ if not os.environ.get("VEHICLE_GUI_ROS_READY"):
     )
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("ROS_DOMAIN_ID", "215")
+os.environ["ROS_DOMAIN_ID"] = str(_bootstrap_args.ros_domain_id)
 os.environ.setdefault("ROS_LOCALHOST_ONLY", "0")
 os.environ["RMW_IMPLEMENTATION"] = "rmw_fastrtps_cpp"
 os.environ["FASTDDS_BUILTIN_TRANSPORTS"] = "UDPv4"
@@ -49,16 +57,16 @@ SYMBOLS = ("star", "diamond", "spade", "clover", "heart")
 
 def runtime_args(cli):
     return SimpleNamespace(
-        vehicle=1, ros_domain_id=215, webcam_ip="", image_topic="",
+        vehicle=cli.vehicle, ros_domain_id=cli.ros_domain_id, webcam_ip="", image_topic="",
         secondary_image_topic="", secondary_video_url="", primary_video_url="",
         primary_video_command="", control_host="127.0.0.1", control_port=8091,
         control_url="", control_command="", webcam_1_video_url="",
         webcam_2_video_url="", scan_topic="/scan_raw", odom_topic="/odom_raw",
         motor_command_topic="/ros_robot_controller/set_motor",
         battery_topic="/ros_robot_controller/battery",
-        detection_topic="/robot_1/symbol_seg/detections",
+        detection_topic=f"/robot_{cli.vehicle}/symbol_seg/detections",
         cmd_vel_topic="/controller/cmd_vel", fork_command_topic="/fork/command",
-        output_dir="/home/ubuntu/recordings/vehicle1", linear_speed=cli.speed,
+        output_dir=f"/home/ubuntu/recordings/vehicle{cli.vehicle}", linear_speed=cli.speed,
         angular_speed=cli.angular_speed, camera_pitch_deg=0.0,
         friction_coefficient=1.0, pose_config=cli.pose_config,
         stop_distance=0.20, safety_min_valid_range=0.25, record_fps=15.0,
@@ -86,7 +94,7 @@ def draw(stdscr, window, movement_name, fork_name):
     else:
         mode_text = "단일 (계산·주행 1회 후 삽입 전 정지)"
     lines = [
-        "control_ui  WASD: 전후/횡이동  Q/E: 회전  ↑/↓: 리프트  SPACE: 정지",
+        f"control_ui 차량 {window.args.vehicle}  WASD: 전후/횡이동  Q/E: 회전  ↑/↓: 리프트  SPACE: 정지",
         ".: 주행계산  ENTER: 탐색/주행실행  M: 모드 선택  Z: 취소",
         f"목표: {window.target_left.currentData()} / {window.target_right.currentData()}",
         f"중심선 보정: {window.centerline_offset_cm:+.1f} cm (+왼쪽/-오른쪽)",
@@ -218,6 +226,8 @@ def terminal_loop(stdscr, window, app, key_timeout):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--vehicle", type=int, choices=(1, 2), default=1)
+    parser.add_argument("--ros-domain-id", type=int, default=_bootstrap_args.ros_domain_id)
     parser.add_argument("--left", choices=SYMBOLS, default="spade")
     parser.add_argument("--right", choices=SYMBOLS, default="spade")
     parser.add_argument("--speed", type=float, default=0.12)
