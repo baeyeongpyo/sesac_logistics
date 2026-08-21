@@ -276,12 +276,30 @@ class ConfigLoaderTest(unittest.TestCase):
                 {
                     'id': 'controller_map',
                     'enabled': True,
-                    'topic': '/controller_server/map',
+                    'source': '/controller_server/map',
+                    'target': '/fleet/map',
+                    'type': 'nav_msgs/msg/OccupancyGrid',
+                    'replay_rate_hz': 1.0,
+                    'qos': {
+                        'reliability': 'reliable',
+                        'durability': 'transient_local',
+                        'history': 'keep_last',
+                        'depth': 1,
+                    },
                 },
                 {
                     'id': 'disabled_copy',
                     'enabled': False,
-                    'topic': '/controller_server/map',
+                    'source': '/controller_server/map',
+                    'target': '/fleet/map_copy',
+                    'type': 'nav_msgs/msg/OccupancyGrid',
+                    'replay_rate_hz': 1.0,
+                    'qos': {
+                        'reliability': 'reliable',
+                        'durability': 'transient_local',
+                        'history': 'keep_last',
+                        'depth': 1,
+                    },
                 },
             ],
         }
@@ -289,10 +307,31 @@ class ConfigLoaderTest(unittest.TestCase):
         topics = load_central_topics(self.write_yaml('central.yaml', document))
 
         self.assertEqual(
-            [(topic.id, topic.enabled, topic.topic) for topic in topics],
             [
-                ('controller_map', True, '/controller_server/map'),
-                ('disabled_copy', False, '/controller_server/map'),
+                (
+                    topic.id,
+                    topic.enabled,
+                    topic.source,
+                    topic.target,
+                    topic.replay_rate_hz,
+                )
+                for topic in topics
+            ],
+            [
+                (
+                    'controller_map',
+                    True,
+                    '/controller_server/map',
+                    '/fleet/map',
+                    1.0,
+                ),
+                (
+                    'disabled_copy',
+                    False,
+                    '/controller_server/map',
+                    '/fleet/map_copy',
+                    1.0,
+                ),
             ],
         )
 
@@ -300,13 +339,87 @@ class ConfigLoaderTest(unittest.TestCase):
         document = {
             'version': 1,
             'topics': [
-                {'id': 'first', 'enabled': True, 'topic': '/controller_server/map'},
-                {'id': 'second', 'enabled': True, 'topic': '/controller_server/map'},
+                {
+                    'id': 'first',
+                    'enabled': True,
+                    'source': '/controller_server/map',
+                    'target': '/fleet/map',
+                    'type': 'nav_msgs/msg/OccupancyGrid',
+                    'replay_rate_hz': 1.0,
+                    'qos': {
+                        'reliability': 'reliable',
+                        'durability': 'transient_local',
+                        'history': 'keep_last',
+                        'depth': 1,
+                    },
+                },
+                {
+                    'id': 'second',
+                    'enabled': True,
+                    'source': '/controller_server/map',
+                    'target': '/fleet/map_copy',
+                    'type': 'nav_msgs/msg/OccupancyGrid',
+                    'replay_rate_hz': 1.0,
+                    'qos': {
+                        'reliability': 'reliable',
+                        'durability': 'transient_local',
+                        'history': 'keep_last',
+                        'depth': 1,
+                    },
+                },
             ],
         }
 
         with self.assertRaisesRegex(ConfigError, 'duplicate central topic'):
             load_central_topics(self.write_yaml('duplicate.yaml', document))
+
+    def test_load_telemetry_preserves_camera_pair_and_replay_rate(self):
+        document = {
+            'version': 1,
+            'topics': [
+                {
+                    'id': 'rgb_image_raw',
+                    'enabled': True,
+                    'source': '/ascamera/camera_publisher/rgb0/image',
+                    'target': '/{robot}/rgb/image_raw',
+                    'type': 'sensor_msgs/msg/Image',
+                    'paired_with': 'rgb_camera_info',
+                    'worker_rate': {},
+                    'qos': {
+                        'reliability': 'best_effort',
+                        'durability': 'volatile',
+                        'history': 'keep_last',
+                        'depth': 1,
+                    },
+                },
+                {
+                    'id': 'rgb_camera_info',
+                    'enabled': True,
+                    'source': '/ascamera/camera_publisher/rgb0/camera_info',
+                    'target': '/{robot}/rgb/camera_info',
+                    'type': 'sensor_msgs/msg/CameraInfo',
+                    'paired_with': 'rgb_image_raw',
+                    'replay_rate_hz': 1.0,
+                    'worker_rate': {},
+                    'qos': {
+                        'reliability': 'reliable',
+                        'durability': 'transient_local',
+                        'history': 'keep_last',
+                        'depth': 1,
+                    },
+                },
+            ],
+        }
+
+        image, camera_info = load_telemetry(
+            self.write_yaml('camera-pair.yaml', document),
+            'robot_1',
+        )
+
+        self.assertEqual(image.paired_with, 'rgb_camera_info')
+        self.assertEqual(camera_info.paired_with, 'rgb_image_raw')
+        self.assertEqual(camera_info.replay_rate_hz, 1.0)
+        self.assertEqual(camera_info.target, '/robot_1/rgb/camera_info')
 
     def test_repository_configs_define_two_vehicles_and_safe_default_telemetry(self):
         fleet = load_fleet(
@@ -317,6 +430,7 @@ class ConfigLoaderTest(unittest.TestCase):
             },
         )
         topics = load_telemetry(BUNDLE / 'config/telemetry.yaml', 'robot_1')
+        central_topics = load_central_topics(BUNDLE / 'config/central_topics.yaml')
 
         self.assertEqual([vehicle.id for vehicle in fleet.vehicles], ['robot_1', 'robot_2'])
         self.assertEqual(
@@ -340,6 +454,7 @@ class ConfigLoaderTest(unittest.TestCase):
                 'battery',
                 'diagnostics',
                 'rgb_image_raw',
+                'rgb_camera_info',
                 'depth_image_raw',
                 'depth_camera_info',
                 'navigation_goal',
@@ -362,6 +477,42 @@ class ConfigLoaderTest(unittest.TestCase):
         scan_filtered = next(topic for topic in topics if topic.id == 'scan_filtered')
         self.assertEqual(battery.worker_rate.max_rate_hz, 0.2)
         self.assertEqual(scan_filtered.worker_rate.max_rate_hz, 2.0)
+        rgb_image = next(topic for topic in topics if topic.id == 'rgb_image_raw')
+        rgb_camera_info = next(
+            topic for topic in topics if topic.id == 'rgb_camera_info'
+        )
+        depth_image = next(topic for topic in topics if topic.id == 'depth_image_raw')
+        depth_camera_info = next(
+            topic for topic in topics if topic.id == 'depth_camera_info'
+        )
+        self.assertEqual(rgb_image.paired_with, 'rgb_camera_info')
+        self.assertEqual(rgb_camera_info.paired_with, 'rgb_image_raw')
+        self.assertEqual(depth_image.paired_with, 'depth_camera_info')
+        self.assertEqual(depth_camera_info.paired_with, 'depth_image_raw')
+        self.assertEqual(rgb_camera_info.replay_rate_hz, 1.0)
+        self.assertEqual(depth_camera_info.replay_rate_hz, 1.0)
+        self.assertEqual(rgb_camera_info.qos.durability, 'transient_local')
+        self.assertEqual(depth_camera_info.qos.durability, 'transient_local')
+        self.assertEqual(
+            [
+                (
+                    topic.source,
+                    topic.target,
+                    topic.message_type,
+                    topic.replay_rate_hz,
+                )
+                for topic in central_topics
+                if topic.enabled
+            ],
+            [
+                (
+                    '/controller_server/map',
+                    '/fleet/map',
+                    'nav_msgs/msg/OccupancyGrid',
+                    1.0,
+                ),
+            ],
+        )
         self.assertFalse(any(
             topic.source == '/map' or topic.target.endswith('/map')
             for topic in topics

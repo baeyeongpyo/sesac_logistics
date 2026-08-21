@@ -38,7 +38,7 @@ def record_topics(
         )
         topics.append(f'/{robot_id}/fleet_bridge/status')
     topics.extend(
-        topic.topic
+        topic.target
         for topic in load_central_topics(central_topics_path)
         if topic.enabled
     )

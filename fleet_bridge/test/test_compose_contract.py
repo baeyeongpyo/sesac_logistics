@@ -118,6 +118,29 @@ class ServerComposeContractTest(unittest.TestCase):
             )
             self.assertTrue(mount['read_only'])
 
+    def test_central_topic_republisher_replays_map_on_server_domain(self):
+        relay = compose_config('docker-compose.server.yaml')['services'][
+            'central-topic-republisher'
+        ]
+
+        self.assertEqual(relay['network_mode'], 'host')
+        self.assertEqual(relay['ipc'], 'host')
+        self.assertEqual(relay['environment']['ROS_DOMAIN_ID'], '225')
+        self.assertEqual(
+            relay['command'],
+            [
+                'ros2',
+                'run',
+                'foxglove_ros_worker',
+                'fleet_central_topic_republisher',
+            ],
+        )
+        config_mount = next(
+            mount for mount in relay['volumes']
+            if mount['target'] == '/config/central_topics.yaml'
+        )
+        self.assertTrue(config_mount['read_only'])
+
 
 if __name__ == '__main__':
     unittest.main()

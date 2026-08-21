@@ -126,9 +126,18 @@ topic과 서버 재발행 topic의 단일 설정이다.
 - `worker_rate.max_rate_hz`: WebSocket 수신 뒤 서버 ROS topic으로 재발행하는 최대
   빈도다.
 - `qos`: 서버 publisher의 reliability, durability, history, depth다.
+- `paired_with`: image와 해당 `CameraInfo`를 한 쌍으로 선언한다. 쌍은 서로를 가리키며
+  `enabled` 상태도 같아야 한다.
+- `replay_rate_hz`: 수신한 마지막 메시지를 캐시하고 지정 주기로 다시 발행한다. 정적
+  metadata가 늦게 연결한 Foxglove에서도 보이도록 RGB/depth `CameraInfo`에 `1.0`을 쓴다.
 
 서버는 각 활성 topic의 `source`를 한 번만 받을 수 있으므로 같은 차량 설정에서 source를
 중복해서 등록하면 시작 전에 거부한다. `target`도 중복할 수 없다.
+
+CameraInfo를 worker가 한 번이라도 수신한 뒤에만 캐시 재발행이 가능하다. 차량 Bridge가
+worker 연결 이전에 CameraInfo를 한 번만 발행했다면 서버가 과거 메시지를 복원할 수 없다.
+이 경우 차량 측 camera driver 또는 차량 Foxglove Bridge에서 해당 CameraInfo를 주기 발행
+또는 transient-local로 제공해야 한다.
 
 ### 관제 토픽과 중앙 map의 소유권
 
@@ -138,13 +147,16 @@ topic과 서버 재발행 topic의 단일 설정이다.
 들어간다. `battery`는 활성 상태 토픽이며 worker가 최대 0.2 Hz로 재발행한다.
 
 반면 [`config/central_topics.yaml`](config/central_topics.yaml)의
-`/controller_server/map`은 차량에서 오지 않는다. 중앙 map-server가 자체 발행하는 topic이며
-rosbag recorder가 별도 설정으로 기록한다. 차량 telemetry에 `/map` 또는
-`/{robot}/map`을 추가하지 않는다.
+`/controller_server/map`은 차량에서 오지 않는다. 중앙 map-server가 자체 발행하는 원본이며,
+`central-topic-republisher`가 마지막 map을 캐시해 1 Hz로 `/fleet/map`에 재발행한다. source와
+target을 분리해 자기 자신을 다시 구독하는 loop를 막고, Foxglove와 rosbag은 `/fleet/map`만
+사용한다. 차량 telemetry에 `/map` 또는 `/{robot}/map`을 추가하지 않는다.
 
 중앙 Foxglove(`ws://<server-ip>:8765`)는 관제용 화면이라 `/robot_1/rgb/image_raw`와
-`/robot_2/rgb/image_raw`는 표시하지만 raw depth image와 depth camera info는 topic picker에
-노출하지 않는다. depth 점검은 차량의 Foxglove Bridge에 직접 연결해서 수행한다.
+`/robot_2/rgb/image_raw` 및 각각의 `/robot_1/rgb/camera_info`,
+`/robot_2/rgb/camera_info`, `/fleet/map`을 표시한다. raw depth image와 depth camera info는
+topic picker에 노출하지 않는다. depth 점검은 차량의 Foxglove Bridge에 직접 연결해서
+수행한다.
 
 Nav2의 plan, local plan, costmap, NavigateToPose action status는 현재 `enabled: false`로
 선언되어 있다. 필요할 때 해당 항목만 `true`로 바꾸고 worker와 recorder를 재생성한다.

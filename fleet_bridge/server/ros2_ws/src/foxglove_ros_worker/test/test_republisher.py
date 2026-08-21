@@ -16,6 +16,7 @@ from fleet_bridge_config.models import (
 from foxglove_ros_worker.protocol import Channel
 from foxglove_ros_worker.republisher import (
     ChannelSelector,
+    LatestMessageReplay,
     RateGate,
     initialize_rclpy,
     qos_kwargs,
@@ -100,6 +101,20 @@ class RateGateTest(unittest.TestCase):
 
         self.assertTrue(gate.allow(unlimited, now_ns=1))
         self.assertTrue(gate.allow(unlimited, now_ns=1))
+
+
+class LatestMessageReplayTest(unittest.TestCase):
+    def test_replays_only_the_latest_received_message(self):
+        published = []
+        replay = LatestMessageReplay(published.append)
+
+        self.assertFalse(replay.replay())
+
+        replay.update('first')
+        replay.update('latest')
+
+        self.assertTrue(replay.replay())
+        self.assertEqual(published, ['latest'])
 
 
 class RosInitializationTest(unittest.TestCase):

@@ -22,6 +22,7 @@ setup(
             'foxglove_ros_worker = foxglove_ros_worker.main:main',
             'fleet_command_api = foxglove_ros_worker.api:main',
             'fleet_rosbag_recorder = foxglove_ros_worker.recording:main',
+            'fleet_central_topic_republisher = foxglove_ros_worker.central_republisher:main',
         ],
     },
 )

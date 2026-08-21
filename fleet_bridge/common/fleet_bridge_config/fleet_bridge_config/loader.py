@@ -285,10 +285,15 @@ def load_telemetry(path: Path | str, robot_id: str) -> tuple[TopicConfig, ...]:
         location = f'telemetry.topics[{index}]'
         raw = _mapping(raw_value, location)
         allowed = {
-            'id', 'enabled', 'source', 'target', 'type', 'worker_rate', 'qos',
+            'id', 'enabled', 'source', 'target', 'type', 'paired_with',
+            'replay_rate_hz', 'worker_rate', 'qos',
         }
         _keys(raw, allowed, location)
-        _required(raw, allowed, location)
+        _required(
+            raw,
+            {'id', 'enabled', 'source', 'target', 'type', 'worker_rate', 'qos'},
+            location,
+        )
         message_type = _string(raw['type'], f'{location}.type')
         if not MESSAGE_TYPE_PATTERN.fullmatch(message_type):
             raise ConfigError(f'{location}.type is not a valid message type')
@@ -300,6 +305,19 @@ def load_telemetry(path: Path | str, robot_id: str) -> tuple[TopicConfig, ...]:
             message_type=message_type,
             worker_rate=_load_rate(raw['worker_rate'], f'{location}.worker_rate'),
             qos=_load_qos(raw['qos'], f'{location}.qos'),
+            paired_with=(
+                _identifier(raw['paired_with'], f'{location}.paired_with')
+                if 'paired_with' in raw
+                else None
+            ),
+            replay_rate_hz=(
+                _positive_number(
+                    raw['replay_rate_hz'],
+                    f'{location}.replay_rate_hz',
+                )
+                if 'replay_rate_hz' in raw
+                else None
+            ),
         )
         if topic.id in ids:
             raise ConfigError(f'duplicate topic id: {topic.id}')
@@ -315,6 +333,19 @@ def load_telemetry(path: Path | str, robot_id: str) -> tuple[TopicConfig, ...]:
 
     if not topics:
         raise ConfigError('telemetry.topics must not be empty')
+    topics_by_id = {topic.id: topic for topic in topics}
+    for topic in topics:
+        if topic.paired_with is None:
+            continue
+        paired_topic = topics_by_id.get(topic.paired_with)
+        if paired_topic is None:
+            raise ConfigError(
+                f'{topic.id}.paired_with does not reference a configured topic',
+            )
+        if paired_topic.paired_with != topic.id:
+            raise ConfigError(f'{topic.id}.paired_with must be reciprocal')
+        if paired_topic.enabled != topic.enabled:
+            raise ConfigError(f'{topic.id}.paired_with must share enabled state')
     return tuple(topics)
 
 
@@ -327,27 +358,45 @@ def load_central_topics(path: Path | str) -> tuple[CentralTopicConfig, ...]:
 
     topics = []
     ids = set()
-    active_topics = set()
+    active_sources = set()
+    active_targets = set()
     for index, raw_value in enumerate(_list(document['topics'], 'central_topics.topics')):
         location = f'central_topics.topics[{index}]'
         raw = _mapping(raw_value, location)
-        _keys(raw, {'id', 'enabled', 'topic'}, location)
-        _required(raw, {'id', 'enabled', 'topic'}, location)
-        raw_topic = _string(raw['topic'], f'{location}.topic')
-        if '{' in raw_topic or '}' in raw_topic:
-            raise ConfigError(f'{location}.topic contains an unsupported template')
+        allowed = {
+            'id', 'enabled', 'source', 'target', 'type', 'replay_rate_hz', 'qos',
+        }
+        _keys(raw, allowed, location)
+        _required(raw, allowed, location)
+        message_type = _string(raw['type'], f'{location}.type')
+        if not MESSAGE_TYPE_PATTERN.fullmatch(message_type):
+            raise ConfigError(f'{location}.type is not a valid message type')
         topic = CentralTopicConfig(
             id=_identifier(raw['id'], f'{location}.id'),
             enabled=_boolean(raw['enabled'], f'{location}.enabled'),
-            topic=_topic_name(raw_topic, f'{location}.topic', 'central'),
+            source=_topic_name(raw['source'], f'{location}.source', 'central'),
+            target=_topic_name(raw['target'], f'{location}.target', 'central'),
+            message_type=message_type,
+            replay_rate_hz=_positive_number(
+                raw['replay_rate_hz'],
+                f'{location}.replay_rate_hz',
+            ),
+            qos=_load_qos(raw['qos'], f'{location}.qos'),
         )
         if topic.id in ids:
             raise ConfigError(f'duplicate central topic id: {topic.id}')
         ids.add(topic.id)
         if topic.enabled:
-            if topic.topic in active_topics:
-                raise ConfigError(f'duplicate central topic: {topic.topic}')
-            active_topics.add(topic.topic)
+            if topic.source == topic.target:
+                raise ConfigError(
+                    f'central topic source and target must differ: {topic.source}',
+                )
+            if topic.source in active_sources:
+                raise ConfigError(f'duplicate central topic: {topic.source}')
+            if topic.target in active_targets:
+                raise ConfigError(f'duplicate central topic: {topic.target}')
+            active_sources.add(topic.source)
+            active_targets.add(topic.target)
         topics.append(topic)
 
     if not topics:

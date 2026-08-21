@@ -115,10 +115,25 @@ topics:
     source: /ascamera/camera_publisher/rgb0/image
     target: /{robot}/rgb/image_raw
     type: sensor_msgs/msg/Image
+    paired_with: rgb_camera_info
     worker_rate: {}
     qos:
       reliability: best_effort
       durability: volatile
+      history: keep_last
+      depth: 1
+
+  - id: rgb_camera_info
+    enabled: true
+    source: /ascamera/camera_publisher/rgb0/camera_info
+    target: /{robot}/rgb/camera_info
+    type: sensor_msgs/msg/CameraInfo
+    paired_with: rgb_image_raw
+    replay_rate_hz: 1.0
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: transient_local
       history: keep_last
       depth: 1
 
@@ -127,6 +142,7 @@ topics:
     source: /depth/image_raw
     target: /{robot}/depth/image_raw
     type: sensor_msgs/msg/Image
+    paired_with: depth_camera_info
     worker_rate: {}
     qos:
       reliability: best_effort
@@ -139,10 +155,12 @@ topics:
     source: /depth/camera_info
     target: /{robot}/depth/camera_info
     type: sensor_msgs/msg/CameraInfo
+    paired_with: depth_image_raw
+    replay_rate_hz: 1.0
     worker_rate: {}
     qos:
-      reliability: best_effort
-      durability: volatile
+      reliability: reliable
+      durability: transient_local
       history: keep_last
       depth: 1
 

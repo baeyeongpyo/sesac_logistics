@@ -2,4 +2,12 @@ version: 1
 topics:
   - id: controller_map
     enabled: true
-    topic: /controller_server/map
+    source: /controller_server/map
+    target: /fleet/map
+    type: nav_msgs/msg/OccupancyGrid
+    replay_rate_hz: 1.0
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 1

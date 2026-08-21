@@ -74,9 +74,11 @@ class ConfigurationContractTest(unittest.TestCase):
             return any(re.fullmatch(pattern, topic) for pattern in whitelist)
 
         self.assertTrue(allowed('/robot_1/rgb/image_raw'))
-        self.assertTrue(allowed('/controller_server/map'))
+        self.assertTrue(allowed('/robot_1/rgb/camera_info'))
+        self.assertTrue(allowed('/fleet/map'))
         self.assertFalse(allowed('/robot_1/depth/image_raw'))
         self.assertFalse(allowed('/robot_1/depth/camera_info'))
+        self.assertFalse(allowed('/controller_server/map'))
 
     def test_example_environment_documents_server_domains_and_uris(self):
         content = (BUNDLE / '.env.example').read_text(encoding='utf-8')
@@ -137,6 +139,9 @@ class ReadmeContractTest(unittest.TestCase):
             'clientPublish',
             'zero Twist',
             '8766',
+            'rgb/camera_info',
+            '/fleet/map',
+            'replay_rate_hz',
         ):
             with self.subTest(required=required):
                 self.assertIn(required, content)

@@ -72,10 +72,16 @@ class TopicConfig:
     message_type: str
     worker_rate: RateConfig
     qos: QosConfig
+    paired_with: str | None = None
+    replay_rate_hz: float | None = None
 
 
 @dataclass(frozen=True)
 class CentralTopicConfig:
     id: str
     enabled: bool
-    topic: str
+    source: str
+    target: str
+    message_type: str
+    replay_rate_hz: float
+    qos: QosConfig

@@ -33,6 +33,23 @@ def initialize_rclpy(rclpy_module, no_signal_handlers) -> bool:
     return owns_rclpy
 
 
+class LatestMessageReplay:
+    """Retain the latest message and publish it again on a timer."""
+
+    def __init__(self, publish) -> None:
+        self._publish = publish
+        self._latest = None
+
+    def update(self, message: Any) -> None:
+        self._latest = message
+
+    def replay(self) -> bool:
+        if self._latest is None:
+            return False
+        self._publish(self._latest)
+        return True
+
+
 class ChannelSelector:
     """Select only explicitly enabled, type-safe CDR telemetry channels."""
 
@@ -119,6 +136,8 @@ class RosRepublisher:
         self._node = Node(f'foxglove_ros_worker_{robot_id}')
         self._publishers = {}
         self._message_types = {}
+        self._replays = {}
+        self._replay_timers = []
         for topic in topics:
             if not topic.enabled:
                 continue
@@ -129,6 +148,14 @@ class RosRepublisher:
                 topic.target,
                 _qos_profile(topic.qos),
             )
+            if topic.replay_rate_hz is not None:
+                self._replays[topic.id] = LatestMessageReplay(
+                    self._publishers[topic.id].publish,
+                )
+                self._replay_timers.append(self._node.create_timer(
+                    1.0 / topic.replay_rate_hz,
+                    lambda topic_id=topic.id: self._replays[topic_id].replay(),
+                ))
 
         status_qos = QosConfig('reliable', 'volatile', 'keep_last', 1)
         self._status_publisher = self._node.create_publisher(
@@ -155,6 +182,9 @@ class RosRepublisher:
         message_type = self._message_types[topic.id]
         message = self._deserialize_message(payload, message_type)
         self._publishers[topic.id].publish(message)
+        replay = self._replays.get(topic.id)
+        if replay is not None:
+            replay.update(message)
 
     def _publish_status(self) -> None:
         payload = json.dumps(

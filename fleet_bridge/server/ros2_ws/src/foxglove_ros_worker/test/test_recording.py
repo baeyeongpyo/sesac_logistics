@@ -81,7 +81,16 @@ class RecordingTest(unittest.TestCase):
                 {
                     'id': 'controller_map',
                     'enabled': True,
-                    'topic': '/controller_server/map',
+                    'source': '/controller_server/map',
+                    'target': '/fleet/map',
+                    'type': 'nav_msgs/msg/OccupancyGrid',
+                    'replay_rate_hz': 1.0,
+                    'qos': {
+                        'reliability': 'reliable',
+                        'durability': 'transient_local',
+                        'history': 'keep_last',
+                        'depth': 1,
+                    },
                 },
             ],
         })
@@ -91,7 +100,16 @@ class RecordingTest(unittest.TestCase):
                 {
                     'id': 'controller_map',
                     'enabled': False,
-                    'topic': '/controller_server/map',
+                    'source': '/controller_server/map',
+                    'target': '/fleet/map',
+                    'type': 'nav_msgs/msg/OccupancyGrid',
+                    'replay_rate_hz': 1.0,
+                    'qos': {
+                        'reliability': 'reliable',
+                        'durability': 'transient_local',
+                        'history': 'keep_last',
+                        'depth': 1,
+                    },
                 },
             ],
         })
@@ -118,7 +136,7 @@ class RecordingTest(unittest.TestCase):
                 '/robot_2/odom',
                 '/robot_2/depth/image_raw',
                 '/robot_2/fleet_bridge/status',
-                '/controller_server/map',
+                '/fleet/map',
             ),
         )
 
