@@ -82,12 +82,14 @@ class ConfigurationContractTest(unittest.TestCase):
 
         for required in (
             'SERVER_ROS_DOMAIN_ID=225',
-            'ROBOT_1_FOXGLOVE_URI=ws://192.168.10.215:8766',
-            'ROBOT_2_FOXGLOVE_URI=ws://192.168.10.216:8766',
+            'ROBOT_1_FOXGLOVE_URI=',
+            'ROBOT_2_FOXGLOVE_URI=',
             'RMW_IMPLEMENTATION=rmw_fastrtps_cpp',
             'FASTDDS_BUILTIN_TRANSPORTS=DEFAULT',
-            'COMMAND_API_HOST=127.0.0.1',
+            'COMMAND_API_HOST=',
             'COMMAND_API_PORT=8080',
+            'ROSBAG_HOST_DIRECTORY=',
+            'ROSBAG_SESSION_ID=',
         ):
             self.assertIn(required, content)
         for removed in (

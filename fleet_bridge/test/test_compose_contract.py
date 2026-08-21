@@ -8,6 +8,15 @@ BUNDLE = Path(__file__).resolve().parents[1]
 ENV_FILE = BUNDLE / '.env.example'
 
 
+def environment_values():
+    return {
+        key: value
+        for line in ENV_FILE.read_text(encoding='utf-8').splitlines()
+        if line and not line.startswith('#') and '=' in line
+        for key, value in [line.split('=', 1)]
+    }
+
+
 def compose_config(filename):
     result = subprocess.run(
         [
@@ -30,15 +39,16 @@ def compose_config(filename):
 class ServerComposeContractTest(unittest.TestCase):
     def test_workers_are_isolated_per_vehicle_on_server_domain(self):
         services = compose_config('docker-compose.server.yaml')['services']
+        environment = environment_values()
 
-        for name, robot_id, uri in (
-            ('worker-robot-1', 'robot_1', 'ws://192.168.10.215:8766'),
-            ('worker-robot-2', 'robot_2', 'ws://192.168.10.216:8766'),
+        for name, robot_id, variable in (
+            ('worker-robot-1', 'robot_1', 'ROBOT_1_FOXGLOVE_URI'),
+            ('worker-robot-2', 'robot_2', 'ROBOT_2_FOXGLOVE_URI'),
         ):
             with self.subTest(service=name):
                 worker = services[name]
                 self.assertEqual(worker['environment']['ROBOT_ID'], robot_id)
-                self.assertEqual(worker['environment']['FOXGLOVE_URI'], uri)
+                self.assertEqual(worker['environment']['FOXGLOVE_URI'], environment[variable])
                 self.assertEqual(worker['environment']['ROS_DOMAIN_ID'], '225')
                 self.assertEqual(worker['environment']['ROS_LOCALHOST_ONLY'], '1')
                 self.assertEqual(worker['network_mode'], 'host')
@@ -61,13 +71,20 @@ class ServerComposeContractTest(unittest.TestCase):
 
     def test_command_api_uses_vehicle_uri_and_configured_swagger_port(self):
         api = compose_config('docker-compose.server.yaml')['services']['command-api']
+        environment = environment_values()
 
         self.assertEqual(api['network_mode'], 'host')
-        self.assertEqual(api['environment']['COMMAND_API_HOST'], '127.0.0.1')
-        self.assertEqual(api['environment']['COMMAND_API_PORT'], '8080')
+        self.assertEqual(
+            api['environment']['COMMAND_API_HOST'],
+            environment['COMMAND_API_HOST'],
+        )
+        self.assertEqual(
+            api['environment']['COMMAND_API_PORT'],
+            environment['COMMAND_API_PORT'],
+        )
         self.assertEqual(
             api['environment']['ROBOT_1_FOXGLOVE_URI'],
-            'ws://192.168.10.215:8766',
+            environment['ROBOT_1_FOXGLOVE_URI'],
         )
         self.assertEqual(
             api['command'],
@@ -78,6 +95,28 @@ class ServerComposeContractTest(unittest.TestCase):
             if mount['target'] == '/config/fleet.yaml'
         )
         self.assertTrue(config_mount['read_only'])
+
+    def test_rosbag_recorder_uses_server_domain_and_read_only_configs(self):
+        recorder = compose_config('docker-compose.server.yaml')['services']['rosbag-recorder']
+
+        self.assertEqual(recorder['network_mode'], 'host')
+        self.assertEqual(recorder['ipc'], 'host')
+        self.assertEqual(recorder['environment']['ROS_DOMAIN_ID'], '225')
+        self.assertEqual(recorder['environment']['ROBOT_IDS'], 'robot_1,robot_2')
+        self.assertEqual(
+            recorder['command'],
+            ['ros2', 'run', 'foxglove_ros_worker', 'fleet_rosbag_recorder'],
+        )
+        for target in (
+            '/config/fleet.yaml',
+            '/config/telemetry.yaml',
+            '/config/central_topics.yaml',
+        ):
+            mount = next(
+                mount for mount in recorder['volumes']
+                if mount['target'] == target
+            )
+            self.assertTrue(mount['read_only'])
 
 
 if __name__ == '__main__':

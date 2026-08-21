@@ -130,13 +130,27 @@ topic과 서버 재발행 topic의 단일 설정이다.
 서버는 각 활성 topic의 `source`를 한 번만 받을 수 있으므로 같은 차량 설정에서 source를
 중복해서 등록하면 시작 전에 거부한다. `target`도 중복할 수 없다.
 
-### scan 또는 battery 추가
+### 관제 토픽과 중앙 map의 소유권
 
-기본 `scan`과 `battery`는 `enabled: false`다. 상시 관제가 필요할 때만 `true`로
-바꾼다. scan은 worker에서 최대 2 Hz, battery는 최대 0.2 Hz로 재발행한다.
+`telemetry.yaml`의 모든 항목은 차량 Foxglove Bridge에서 worker로 수신하는 차량 원본이다.
+`enabled: true`이면 worker 중계와 rosbag 기록에 함께 포함되고, `false`이면 둘 다
+제외된다. raw depth도 이 설정에서는 활성화되어 있으므로 central ROS Domain과 rosbag에는
+들어간다. `battery`는 활성 상태 토픽이며 worker가 최대 0.2 Hz로 재발행한다.
+
+반면 [`config/central_topics.yaml`](config/central_topics.yaml)의
+`/controller_server/map`은 차량에서 오지 않는다. 중앙 map-server가 자체 발행하는 topic이며
+rosbag recorder가 별도 설정으로 기록한다. 차량 telemetry에 `/map` 또는
+`/{robot}/map`을 추가하지 않는다.
+
+중앙 Foxglove(`ws://<server-ip>:8765`)는 관제용 화면이라 `/robot_1/rgb/image_raw`와
+`/robot_2/rgb/image_raw`는 표시하지만 raw depth image와 depth camera info는 topic picker에
+노출하지 않는다. depth 점검은 차량의 Foxglove Bridge에 직접 연결해서 수행한다.
+
+Nav2의 plan, local plan, costmap, NavigateToPose action status는 현재 `enabled: false`로
+선언되어 있다. 필요할 때 해당 항목만 `true`로 바꾸고 worker와 recorder를 재생성한다.
 
 ```yaml
-- id: scan
+- id: scan_filtered
   enabled: true
   source: /scan_filtered
   target: /{robot}/scan_filtered
@@ -152,6 +166,22 @@ topic과 서버 재발행 topic의 단일 설정이다.
 
 새 message type을 활성화하면 서버 이미지에 해당 ROS message package가 설치되어 있어야
 한다. 차량 측 topic rate 또는 message type 변경은 차량 Bridge 운영 환경에서 맞춘다.
+
+### rosbag recorder
+
+`rosbag-recorder`는 활성 차량 target, 각 차량의 `/fleet_bridge/status`, 활성 중앙 topic을
+새 rosbag2 세션에 기록한다. `ROSBAG_SESSION_ID`가 비어 있으면 UTC 시각 기반 이름을 쓰고,
+이미 있는 디렉터리는 덮어쓰지 않는다. Compose를 올리기 전에 호스트 저장 경로를 만든다.
+
+```bash
+sudo mkdir -p /srv/fleet-rosbag
+docker compose --env-file .env.server -f docker-compose.server.yaml \
+  up -d --force-recreate rosbag-recorder
+```
+
+특정 세션 이름이 필요하면 `.env.server`에 `ROSBAG_SESSION_ID=inspection-001`처럼 설정한 뒤
+같은 명령으로 recorder를 다시 생성한다. 기록 시작 뒤 `/rosbag/<session>/metadata.yaml`이
+생성됐는지 확인한다.
 
 ## 테스트 Command API와 Swagger
 

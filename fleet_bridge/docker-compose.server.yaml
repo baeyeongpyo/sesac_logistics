@@ -96,3 +96,44 @@ services:
       - --ros-args
       - --params-file
       - /config/server_foxglove.yaml
+
+  rosbag-recorder:
+    image: ${SERVER_IMAGE:-mentorpi-fleet-bridge-server:humble}
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    network_mode: host
+    ipc: host
+    restart: unless-stopped
+    stop_signal: SIGINT
+    stop_grace_period: 10s
+    environment:
+      ROS_DOMAIN_ID: ${SERVER_ROS_DOMAIN_ID:-225}
+      ROS_LOCALHOST_ONLY: "1"
+      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+      FASTDDS_BUILTIN_TRANSPORTS: ${FASTDDS_BUILTIN_TRANSPORTS:-DEFAULT}
+      ROBOT_IDS: robot_1,robot_2
+      FLEET_CONFIG: /config/fleet.yaml
+      TELEMETRY_CONFIG: /config/telemetry.yaml
+      CENTRAL_TOPICS_CONFIG: /config/central_topics.yaml
+      ROSBAG_ROOT: /rosbag
+      ROSBAG_SESSION_ID: ${ROSBAG_SESSION_ID:-}
+    volumes:
+      - type: bind
+        source: ./config/fleet.yaml
+        target: /config/fleet.yaml
+        read_only: true
+      - type: bind
+        source: ./config/telemetry.yaml
+        target: /config/telemetry.yaml
+        read_only: true
+      - type: bind
+        source: ./config/central_topics.yaml
+        target: /config/central_topics.yaml
+        read_only: true
+      - type: bind
+        source: ${ROSBAG_HOST_DIRECTORY:?ROSBAG_HOST_DIRECTORY is required}
+        target: /rosbag
+        bind:
+          create_host_path: false
+    command: [ros2, run, foxglove_ros_worker, fleet_rosbag_recorder]
