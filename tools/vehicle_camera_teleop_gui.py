@@ -687,6 +687,7 @@ class TeleopWindow(QMainWindow):
         self.arc_cycle_index = 0
         self.arc_cycle_advance_m = 0.10
         self.arc_cycle_pause_sec = 0.7
+        self.stable_detection_frames = 5
         self.arc_cycle_replan_due_at = None
         self.target_search_active = False
         self.target_search_linear_m_s = 0.08
@@ -1757,6 +1758,9 @@ class TeleopWindow(QMainWindow):
                 self.arc_cycle_pause_sec = min(10.0, max(
                     0.1, float(data.get("arc_cycle_pause_sec", 0.7))
                 ))
+                self.stable_detection_frames = min(30, max(
+                    1, int(data.get("stable_detection_frames", 5))
+                ))
                 self.camera_calibration_samples = list(
                     data.get("camera_calibration_samples", [])
                 )[-2:]
@@ -1847,6 +1851,7 @@ class TeleopWindow(QMainWindow):
             "insertion_distance_cm": self.arc_insertion_distance.value(),
             "near_center_check_distance_cm": self.near_center_check_distance_cm,
             "arc_cycle_pause_sec": self.arc_cycle_pause_sec,
+            "stable_detection_frames": self.stable_detection_frames,
         })
         path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -2523,7 +2528,7 @@ class TeleopWindow(QMainWindow):
             self.target_left.currentData(), self.target_right.currentData()
         ]:
             return None, None, "GUI와 검출 목표 불일치"
-        if int(candidate.get("streak", 0)) < 5:
+        if int(candidate.get("streak", 0)) < self.stable_detection_frames:
             return None, None, "검출이 아직 안정되지 않음"
         forward_cm = pnp.get("forward_distance_cm")
         if forward_cm is None or not math.isfinite(float(forward_cm)):
@@ -2548,7 +2553,7 @@ class TeleopWindow(QMainWindow):
             self.target_left.currentData(), self.target_right.currentData()
         ]:
             return None, None, "목표 불일치"
-        if int(candidate.get("streak", 0)) < 3:
+        if int(candidate.get("streak", 0)) < self.stable_detection_frames:
             return None, None, "검출 안정화 대기"
         forward_cm = pnp.get("forward_distance_cm")
         if forward_cm is None or not math.isfinite(float(forward_cm)):
