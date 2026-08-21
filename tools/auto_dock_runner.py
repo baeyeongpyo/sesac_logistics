@@ -74,14 +74,15 @@ def make_args(cli):
 
 
 class AutoDockRunner:
-    def __init__(self, window, command_topic, status_topic, left, right):
+    def __init__(self, window, trigger_topic, trigger_value, status_topic, left, right):
         self.window = window
         self.default_target = (left, right)
+        self.trigger_value = trigger_value.strip().lower()
         self.started_at = None
         self.last_status_at = 0.0
         self.status_pub = window.node.create_publisher(String, status_topic, 10)
-        self.command_sub = window.node.create_subscription(
-            String, command_topic, self.on_command, 10
+        self.trigger_sub = window.node.create_subscription(
+            String, trigger_topic, self.on_trigger, 10
         )
         self.publish_status("idle", "ready")
 
@@ -94,7 +95,8 @@ class AutoDockRunner:
         self.window.target_right.setCurrentIndex(self.window.target_right.findData(right))
         self.window.on_target_changed()
 
-    def on_command(self, msg):
+    def on_trigger(self, msg):
+        """Temporary Nav2-arrival adapter; topic and value are CLI-configurable."""
         try:
             command = json.loads(msg.data)
             if not isinstance(command, dict):
@@ -102,7 +104,7 @@ class AutoDockRunner:
         except (TypeError, ValueError, json.JSONDecodeError):
             command = {"command": str(msg.data).strip().lower()}
         action = str(command.get("command", "")).lower()
-        if action == "start":
+        if action == self.trigger_value:
             if self.started_at is not None:
                 self.publish_status("rejected", "already_running")
                 return
@@ -121,7 +123,7 @@ class AutoDockRunner:
             self.started_at = None
             self.publish_status("cancelled", "external_cancel")
         else:
-            self.publish_status("rejected", "use_start_or_cancel")
+            self.publish_status("ignored", "trigger_value_mismatch")
 
     def tick(self):
         self.window.tick()
@@ -154,10 +156,17 @@ def main():
     parser.add_argument("--speed", type=float, default=0.12)
     parser.add_argument("--angular-speed", type=float, default=0.35)
     parser.add_argument("--pose-config", default="/shared/vehicle_pose_config.json")
-    parser.add_argument("--command-topic", default="")
+    parser.add_argument(
+        "--trigger-topic", default="",
+        help="temporary Nav2-arrival String topic; replace later without code changes",
+    )
+    parser.add_argument(
+        "--trigger-value", default="arrived",
+        help="String payload that begins search/dock/lift (default: arrived)",
+    )
     parser.add_argument("--status-topic", default="")
     cli = parser.parse_args()
-    command_topic = cli.command_topic or f"/robot_{cli.vehicle}/auto_dock/command"
+    trigger_topic = cli.trigger_topic or f"/robot_{cli.vehicle}/nav2/arrival"
     status_topic = cli.status_topic or f"/robot_{cli.vehicle}/auto_dock/status"
 
     rclpy.init()
@@ -165,7 +174,9 @@ def main():
     node = TeleopNode(make_args(cli))
     window = TeleopWindow(node, make_args(cli))
     window.timer.stop()
-    runner = AutoDockRunner(window, command_topic, status_topic, cli.left, cli.right)
+    runner = AutoDockRunner(
+        window, trigger_topic, cli.trigger_value, status_topic, cli.left, cli.right
+    )
     timer = QTimer()
     timer.timeout.connect(runner.tick)
     timer.start(20)
