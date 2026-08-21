@@ -79,7 +79,7 @@ class AutoDockRunner:
         self.default_target = (left, right)
         self.trigger_value = trigger_value.strip().lower()
         self.started_at = None
-        self.last_status_at = 0.0
+        self.last_status_signature = None
         self.status_pub = window.node.create_publisher(String, status_topic, 10)
         self.trigger_sub = window.node.create_subscription(
             String, trigger_topic, self.on_trigger, 10
@@ -87,6 +87,10 @@ class AutoDockRunner:
         self.publish_status("idle", "ready")
 
     def publish_status(self, state, reason, **extra):
+        signature = (state, reason, tuple(sorted(extra.items())))
+        if signature == self.last_status_signature:
+            return
+        self.last_status_signature = signature
         message = {"state": state, "reason": reason, "stamp_monotonic": time.monotonic(), **extra}
         self.status_pub.publish(String(data=json.dumps(message, ensure_ascii=False)))
 
@@ -156,9 +160,13 @@ class AutoDockRunner:
             # arrives, so the pallet can be reacquired after it re-enters view.
             self.window.start_target_search(auto_lift_after_dock=True)
             self.publish_status("running", "search_restarted_after_controller_stop")
-        elif time.monotonic() - self.last_status_at >= 1.0:
-            self.last_status_at = time.monotonic()
-            self.publish_status("running", self.window.arc_label.text())
+        else:
+            phase = (
+                "searching"
+                if self.window.target_search_active
+                else f"docking_{self.window.arc_dock_phase or 'replanning'}"
+            )
+            self.publish_status("running", phase)
 
 
 def main():
