@@ -140,8 +140,11 @@ class AutoDockRunner:
             or self.window.arc_auto_replan_due_at is not None
         )
         if not active:
-            self.started_at = None
-            self.publish_status("failed", "controller_stopped_before_completion")
+            # A temporary camera/odom/docking failure must not consume the
+            # Nav2-arrival request.  Keep searching until an explicit cancel
+            # arrives, so the pallet can be reacquired after it re-enters view.
+            self.window.start_target_search(auto_lift_after_dock=True)
+            self.publish_status("running", "search_restarted_after_controller_stop")
         elif time.monotonic() - self.last_status_at >= 1.0:
             self.last_status_at = time.monotonic()
             self.publish_status("running", self.window.arc_label.text())
