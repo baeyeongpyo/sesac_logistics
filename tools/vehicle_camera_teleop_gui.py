@@ -96,6 +96,7 @@ class TeleopNode(Node):
         self.control_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.telemetry_base_url = args.primary_video_url.rsplit("/stream", 1)[0]
         self.front_range = math.inf
+        self.closest_obstacle_angle_rad = None
         self.odom_yaw_unwrapped = None
         self._last_odom_yaw = None
         self.odom_position = None
@@ -208,8 +209,13 @@ class TeleopNode(Node):
                 self.safety_min_valid_range,
                 self.lidar_self_filter_distance_m,
             ) <= value <= msg.range_max:
-                values.append(value)
-        self.front_range = min(values) if values else math.inf
+                angle = msg.angle_min + index * msg.angle_increment
+                values.append((value, math.atan2(math.sin(angle), math.cos(angle))))
+        if values:
+            self.front_range, self.closest_obstacle_angle_rad = min(values)
+        else:
+            self.front_range = math.inf
+            self.closest_obstacle_angle_rad = None
 
     def on_odom(self, msg):
         self.last_odom_monotonic = time.monotonic()
@@ -644,6 +650,7 @@ class TeleopWindow(QMainWindow):
         self.arc_plan = None
         self.arc_active = False
         self.last_arc_stop_reason = None
+        self.last_arc_stop_was_docking = False
         self.arc_start_position = None
         self.arc_start_yaw = None
         self.arc_started_at = None
@@ -3066,6 +3073,7 @@ class TeleopWindow(QMainWindow):
         self.arc_plan = {
             "created_at": time.monotonic(),
             "source": "odom_virtual_target",
+            "controller_mode": "variable_curvature_pose",
             "target_forward_cm": target_x * 100.0,
             "target_lateral_left_cm": target_y * 100.0,
             "target_x_m": target_x,
@@ -3388,6 +3396,7 @@ class TeleopWindow(QMainWindow):
 
     def cancel_arc_approach(self, reason="사용자 취소"):
         was_active = self.arc_active or self.target_search_active
+        self.last_arc_stop_was_docking = bool(self.arc_active)
         self.arc_active = False
         self.target_search_active = False
         self.arc_auto_enabled = False

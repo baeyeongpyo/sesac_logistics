@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 import os
 import shlex
 import sys
@@ -80,6 +81,8 @@ class AutoDockRunner:
         self.default_target = (left, right)
         self.trigger_value = trigger_value.strip().lower()
         self.started_at = None
+        self.recovery_until = None
+        self.recovery_was_docking = False
         self.last_status_signature = None
         self.status_pub = window.node.create_publisher(String, status_topic, 10)
         self.trigger_sub = window.node.create_subscription(
@@ -160,8 +163,29 @@ class AutoDockRunner:
         )
         if not active:
             if (self.window.last_arc_stop_reason or "").startswith("LiDAR interrupt"):
-                self.started_at = None
-                self.publish_status("interrupted", "lidar_safety_distance")
+                now = time.monotonic()
+                if self.recovery_until is None:
+                    angle = self.window.node.closest_obstacle_angle_rad
+                    angle = 0.0 if angle is None else angle
+                    # Move away from the closest filtered LiDAR return.
+                    self.recovery_was_docking = self.window.last_arc_stop_was_docking
+                    self.recovery_until = now + 0.7
+                    self.recovery_command = (
+                        -0.08 * math.cos(angle), -0.08 * math.sin(angle)
+                    )
+                    self.publish_status("recovering", "lidar_backoff")
+                if now < self.recovery_until:
+                    self.window.node.publish(*self.recovery_command, 0.0)
+                    return
+                self.window.node.stop(repeats=5)
+                self.recovery_until = None
+                self.window.last_arc_stop_reason = None
+                if self.recovery_was_docking and self.window.replan_arc_from_virtual_target():
+                    self.window.start_arc_approach()
+                    self.publish_status("running", "lidar_replanned_virtual_dock")
+                else:
+                    self.window.start_target_search(auto_lift_after_dock=True)
+                    self.publish_status("running", "lidar_recovery_search")
                 return
             # A temporary camera/odom/docking failure must not consume the
             # Nav2-arrival request.  Keep searching until an explicit cancel
