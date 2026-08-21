@@ -945,6 +945,8 @@ class YoloSymbolSeg(Node):
                     if pnp_pose["forward_distance_cm"] is None
                     else f" | dist {pnp_pose['forward_distance_cm']:.1f} cm"
                 )
+                if depth_yaw is not None:
+                    distance_text += f" | depth yaw {depth_yaw['yaw_deg']:+.1f} deg"
                 status_text = (
                     f"{self.target_top[0]}/{self.target_top[1]} | seen {self.candidate_streak} | "
                     f"lat {pnp_pose['lateral_ratio']:+.3f} | "
