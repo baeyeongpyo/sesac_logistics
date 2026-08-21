@@ -706,7 +706,17 @@ class TeleopWindow(QMainWindow):
         self.stable_detection_frames = 5
         self.arc_cycle_replan_due_at = None
         self.target_search_active = False
-        self.target_search_linear_m_s = 0.08
+        self.target_search_paused_for_detection = False
+        self.config_overrides = dict(getattr(args, "config_overrides", {}) or {})
+        configured_search_speed = float(getattr(args, "search_linear_speed_m_s", 0.0) or 0.0)
+        if configured_search_speed <= 0.0:
+            configured_search_speed = float(
+                self.config_overrides.get("search_linear_speed_m_s", 0.0) or 0.0
+            )
+        self.search_linear_speed_override_m_s = (
+            configured_search_speed if configured_search_speed > 0.0 else None
+        )
+        self.target_search_linear_m_s = self.search_linear_speed_override_m_s or 0.03
         self.target_search_angular_rad_s = 0.12
         self.search_circle_diameter_m = 1.34
         self.arc_forward_anchor_position = None
@@ -1792,6 +1802,7 @@ class TeleopWindow(QMainWindow):
         if path.exists():
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
+                data.update(self.config_overrides)
                 self.camera_distance_scale = data.get(
                     "camera_distance_scale_cm_per_pnp_unit"
                 )
@@ -1827,6 +1838,10 @@ class TeleopWindow(QMainWindow):
                 self.search_circle_diameter_m = min(10.0, max(
                     0.20, float(data.get("search_circle_diameter_m", 1.34))
                 ))
+                if self.search_linear_speed_override_m_s is None:
+                    self.target_search_linear_m_s = min(0.30, max(
+                        0.01, float(data.get("search_linear_speed_m_s", 0.03))
+                    ))
                 self.target_search_angular_rad_s = (
                     2.0 * self.target_search_linear_m_s
                     / self.search_circle_diameter_m
@@ -1934,6 +1949,7 @@ class TeleopWindow(QMainWindow):
             "arc_cycle_pause_sec": self.arc_cycle_pause_sec,
             "stable_detection_frames": self.stable_detection_frames,
             "search_circle_diameter_m": self.search_circle_diameter_m,
+            "search_linear_speed_m_s": self.target_search_linear_m_s,
             "lidar_stop_distance_m": self.args.stop_distance,
             "lidar_self_filter_distance_m": self.node.lidar_self_filter_distance_m,
         })
@@ -3375,6 +3391,7 @@ class TeleopWindow(QMainWindow):
         self.last_arc_stop_reason = None
         self.auto_lift_after_dock = bool(auto_lift_after_dock)
         self.last_auto_lift_monotonic = None
+        self.target_search_paused_for_detection = False
         self.set_selected_run_mode("search")
         self.target_search_active = True
         self.node.stop(repeats=3)
@@ -3384,6 +3401,42 @@ class TeleopWindow(QMainWindow):
         )
 
     def update_target_search(self):
+        detection = self.node.latest_detection or {}
+        candidate = detection.get("candidate")
+        detection_age = time.monotonic() - self.node.latest_detection_monotonic
+        is_selected_candidate = (
+            candidate is not None
+            and detection_age <= 0.8
+            and detection.get("target_top") == [
+                self.target_left.currentData(), self.target_right.currentData()
+            ]
+        )
+
+        # The first matching detection freezes the circular search.  This
+        # gives YOLO/depth consecutive stationary frames to form a stable
+        # measurement instead of driving past the target between frames.
+        if is_selected_candidate:
+            if not self.target_search_paused_for_detection:
+                self.target_search_paused_for_detection = True
+                self.node.stop(repeats=5)
+            candidate, _pnp, reason = self.valid_arc_measurement()
+            if reason is None and candidate is not None:
+                self.target_search_active = False
+                self.target_search_paused_for_detection = False
+                self.node.stop(repeats=5)
+                self.set_selected_run_mode("auto")
+                if self.plan_arc_approach():
+                    self.start_arc_approach()
+                    self.arc_label.setText("목표 안정 검출 | 자동 정렬 전환")
+                return
+            self.node.stop(repeats=1)
+            self.arc_label.setText(f"후보 검출 | 정지 후 안정화 대기: {reason}")
+            return
+
+        # A candidate that disappears before it becomes stable is rejected;
+        # resume the original circle rather than remaining stopped.
+        if self.target_search_paused_for_detection:
+            self.target_search_paused_for_detection = False
         candidate, _pnp, reason = self.valid_arc_measurement()
         if reason is None and candidate is not None:
             self.target_search_active = False
@@ -3408,6 +3461,7 @@ class TeleopWindow(QMainWindow):
         self.last_arc_stop_was_docking = bool(self.arc_active)
         self.arc_active = False
         self.target_search_active = False
+        self.target_search_paused_for_detection = False
         self.arc_auto_enabled = False
         self.arc_auto_internal_start = False
         self.arc_auto_replan_due_at = None

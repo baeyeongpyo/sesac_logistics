@@ -47,7 +47,7 @@ os.environ.pop("CYCLONEDDS_URI", None)
 import rclpy
 from python_qt_binding.QtCore import QTimer
 from python_qt_binding.QtWidgets import QApplication
-from std_msgs.msg import String
+from std_msgs.msg import Empty, String
 
 from vehicle_camera_teleop_gui import TeleopNode, TeleopWindow
 
@@ -70,25 +70,44 @@ def make_args(cli):
         angular_speed=cli.angular_speed, camera_pitch_deg=0.0, friction_coefficient=1.0,
         pose_config=cli.pose_config, stop_distance=0.20, safety_min_valid_range=0.25,
         lidar_self_filter_distance_m=0.25,
+        search_linear_speed_m_s=cli.search_linear_speed,
+        config_overrides=cli.config_overrides,
         record_fps=15.0, viewer_only=False, disable_external_webcams=True,
         disable_primary_camera=True, http_viewer_only=False,
     )
 
 
 class AutoDockRunner:
-    def __init__(self, window, trigger_topic, trigger_value, status_topic, left, right):
+    def __init__(self, window, trigger_topic, stop_topic, trigger_value, status_topic, left, right):
         self.window = window
         self.default_target = (left, right)
         self.trigger_value = trigger_value.strip().lower()
         self.started_at = None
         self.recovery_until = None
         self.recovery_was_docking = False
+        self.stop_latched = False
         self.last_status_signature = None
         self.status_pub = window.node.create_publisher(String, status_topic, 10)
         self.trigger_sub = window.node.create_subscription(
             String, trigger_topic, self.on_trigger, 10
         )
+        self.stop_sub = window.node.create_subscription(
+            Empty, stop_topic, self.on_emergency_stop, 10
+        )
         self.publish_status("idle", "ready")
+
+    def emergency_stop(self, reason):
+        """Disarm autonomous output until a new arrival command is received."""
+        self.stop_latched = True
+        self.recovery_until = None
+        self.window.cancel_arc_approach("외부 즉시 정지 명령")
+        self.window.node.stop(repeats=10)
+        self.window.node.publish_fork("STOP")
+        self.started_at = None
+        self.publish_status("cancelled", reason)
+
+    def on_emergency_stop(self, _msg):
+        self.emergency_stop("emergency_stop")
 
     def publish_status(self, state, reason, **extra):
         signature = (state, reason, tuple(sorted(extra.items())))
@@ -137,18 +156,18 @@ class AutoDockRunner:
                 self.publish_status("rejected", "invalid_target_symbols")
                 return
             self.set_target(left, right)
+            self.stop_latched = False
             self.started_at = time.monotonic()
             self.window.start_target_search(auto_lift_after_dock=True)
             self.publish_status("running", "search_started", left=left, right=right)
         elif action in ("cancel", "stop"):
-            self.window.cancel_arc_approach("외부 cancel 명령")
-            self.window.node.publish_fork("STOP")
-            self.started_at = None
-            self.publish_status("cancelled", "external_cancel")
+            self.emergency_stop("external_cancel")
         else:
             self.publish_status("ignored", "trigger_value_mismatch")
 
     def tick(self):
+        if self.stop_latched:
+            return
         self.window.tick()
         if self.started_at is None:
             return
@@ -220,9 +239,25 @@ def main():
         help="String payload that begins search/dock/lift (default: arrived)",
     )
     parser.add_argument("--status-topic", default="")
+    parser.add_argument("--stop-topic", default="")
+    parser.add_argument(
+        "--search-linear-speed", type=float, default=0.0,
+        help="temporary search speed override in m/s; 0 uses pose config",
+    )
+    parser.add_argument(
+        "--config-overrides", default="{}",
+        help="temporary JSON object merged over pose config for this run only",
+    )
     cli = parser.parse_args()
+    try:
+        cli.config_overrides = json.loads(cli.config_overrides)
+        if not isinstance(cli.config_overrides, dict):
+            raise ValueError("JSON object required")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        parser.error(f"--config-overrides must be a JSON object: {exc}")
     trigger_topic = cli.trigger_topic or f"/robot_{cli.vehicle}/nav2/arrival"
     status_topic = cli.status_topic or f"/robot_{cli.vehicle}/auto_dock/status"
+    stop_topic = cli.stop_topic or f"/robot_{cli.vehicle}/auto_dock/stop"
 
     rclpy.init()
     app = QApplication([])
@@ -230,7 +265,7 @@ def main():
     window = TeleopWindow(node, make_args(cli))
     window.timer.stop()
     runner = AutoDockRunner(
-        window, trigger_topic, cli.trigger_value, status_topic, cli.left, cli.right
+        window, trigger_topic, stop_topic, cli.trigger_value, status_topic, cli.left, cli.right
     )
     timer = QTimer()
     timer.timeout.connect(runner.tick)
