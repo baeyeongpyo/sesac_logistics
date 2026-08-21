@@ -1811,6 +1811,11 @@ class TeleopWindow(QMainWindow):
                 self.stable_detection_frames = min(30, max(
                     1, int(data.get("stable_detection_frames", 5))
                 ))
+                self.args.stop_distance = min(2.0, max(
+                    0.05, float(data.get(
+                        "lidar_stop_distance_m", self.args.stop_distance
+                    ))
+                ))
                 self.camera_calibration_samples = list(
                     data.get("camera_calibration_samples", [])
                 )[-2:]
@@ -1902,6 +1907,7 @@ class TeleopWindow(QMainWindow):
             "near_center_check_distance_cm": self.near_center_check_distance_cm,
             "arc_cycle_pause_sec": self.arc_cycle_pause_sec,
             "stable_detection_frames": self.stable_detection_frames,
+            "lidar_stop_distance_m": self.args.stop_distance,
         })
         path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -2982,9 +2988,16 @@ class TeleopWindow(QMainWindow):
             return False
         target_x = float(pnp["forward_distance_cm"]) / 100.0
         target_y = -float(pnp.get("lateral_ratio", 0.0)) * target_x
-        measured_yaw = yaw + math.radians(
-            self.calibrated_visual_yaw(float(candidate.get("frontal_error", 0.0)))
+        visual_yaw_deg = self.calibrated_visual_yaw(
+            float(candidate.get("frontal_error", 0.0))
         )
+        depth_yaw = candidate.get("depth_yaw") or {}
+        depth_yaw_deg = depth_yaw.get("yaw_deg")
+        if depth_yaw_deg is not None and math.isfinite(float(depth_yaw_deg)):
+            # Depth measures the two upper-tag depths directly.  Blend it with
+            # the image yaw only when both refer to the same stable target.
+            visual_yaw_deg = 0.5 * visual_yaw_deg + 0.5 * float(depth_yaw_deg)
+        measured_yaw = yaw + math.radians(visual_yaw_deg)
         c, s = math.cos(yaw), math.sin(yaw)
         measured_x = position[0] + c * target_x - s * target_y
         measured_y = position[1] + s * target_x + c * target_y
@@ -3023,6 +3036,7 @@ class TeleopWindow(QMainWindow):
             "position_residual_cm": position_residual * 100.0,
             "yaw_residual_deg": math.degrees(yaw_residual),
             "reprojection_error_px": pnp.get("reprojection_error_px"),
+            "depth_yaw_deg": depth_yaw_deg,
         })
         return fused and self.arc_replan_streak >= 3
 
@@ -4030,16 +4044,21 @@ class TeleopWindow(QMainWindow):
             return
 
         if self.arc_plan.get("controller_mode") == "variable_curvature_pose":
-            goal_x = self.arc_plan["goal_x_m"]
-            goal_y = self.arc_plan["goal_y_m"]
-            goal_yaw = self.arc_plan["goal_yaw_rad"]
-            error_x = goal_x - x
-            error_y = goal_y - y
-            position_error = math.hypot(error_x, error_y)
-            yaw_error = math.atan2(
-                math.sin(goal_yaw - relative_yaw),
-                math.cos(goal_yaw - relative_yaw),
+            candidate, pnp, _reason = self.valid_arc_measurement()
+            if candidate is not None and pnp is not None:
+                self.fuse_live_arc_target(candidate, pnp)
+            virtual = self.virtual_arc_target_relative()
+            if virtual is None:
+                self.cancel_arc_approach("가상 팔레트 좌표 없음")
+                return
+            target_x, target_y, target_yaw = virtual
+            standoff = self.arc_plan.get(
+                "alignment_distance_m", self.arc_standoff.value() / 100.0
             )
+            error_x = target_x - standoff * math.cos(target_yaw)
+            error_y = target_y - standoff * math.sin(target_yaw)
+            position_error = math.hypot(error_x, error_y)
+            yaw_error = target_yaw
             if position_error <= 0.025 and abs(yaw_error) <= math.radians(3.0):
                 self.node.stop(repeats=2)
                 if self.arc_pass_count < 1:
@@ -4073,20 +4092,17 @@ class TeleopWindow(QMainWindow):
                 linear_x = 0.0
                 angular_z = max(-max_angular, min(max_angular, 1.8 * yaw_error))
             else:
-                path_heading = math.atan2(error_y, error_x)
-                heading_error = math.atan2(
-                    math.sin(path_heading - relative_yaw),
-                    math.cos(path_heading - relative_yaw),
-                )
-                if abs(heading_error) > math.radians(75.0):
-                    linear_x = 0.0
-                else:
-                    linear_x = min(max_linear, max(0.025, 0.8 * position_error))
-                    linear_x *= max(0.30, math.cos(heading_error))
-                yaw_weight = max(0.15, min(0.9, 0.10 / max(position_error, 0.03)))
-                angular_z = 1.8 * heading_error + yaw_weight * yaw_error
-                angular_z = max(-max_angular, min(max_angular, angular_z))
-            self.node.publish(linear_x, 0.0, angular_z)
+                # Mecanum visual servo: keep approaching while correcting both
+                # lateral error and face yaw from the odom-held pallet pose.
+                linear_x = min(max_linear, max(0.0, 0.8 * error_x))
+                linear_y = max(-max_linear, min(max_linear, 1.0 * error_y))
+                angular_z = max(-max_angular, min(max_angular, 1.8 * yaw_error))
+                if position_error < 0.08:
+                    linear_x = min(linear_x, 0.04)
+                    linear_y = min(max(linear_y, -0.04), 0.04)
+            if position_error <= 0.025:
+                linear_y = 0.0
+            self.node.publish(linear_x, linear_y, angular_z)
             self.node.log_telemetry_event("arc_control", {
                 "phase": "variable_curvature_pose",
                 "pass": self.arc_pass_count + 1,
@@ -4098,14 +4114,14 @@ class TeleopWindow(QMainWindow):
                 "position_error_cm": position_error * 100.0,
                 "yaw_error_deg": math.degrees(yaw_error),
                 "cmd_vel": {
-                    "linear_x": linear_x, "linear_y": 0.0,
+                    "linear_x": linear_x, "linear_y": linear_y,
                     "angular_z": angular_z,
                 },
                 "front_range_m": self.node.front_range,
             })
             self.arc_label.setText(
-                f"{self.arc_pass_count + 1}차 곡률제어 | 위치 "
-                f"{position_error*100:.1f} cm / 각 {math.degrees(yaw_error):+.1f}°"
+                f"가상좌표 동시보정 | 전후 {error_x*100:+.1f} / "
+                f"좌 {error_y*100:+.1f} cm / 각 {math.degrees(yaw_error):+.1f}°"
             )
             return
 

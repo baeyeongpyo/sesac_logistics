@@ -95,6 +95,9 @@ class AutoDockRunner:
         self.status_pub.publish(String(data=json.dumps(message, ensure_ascii=False)))
 
     def set_target(self, left, right):
+        mode_index = self.window.approach_mode.findData("arc")
+        if mode_index >= 0:
+            self.window.approach_mode.setCurrentIndex(mode_index)
         self.window.target_left.setCurrentIndex(self.window.target_left.findData(left))
         self.window.target_right.setCurrentIndex(self.window.target_right.findData(right))
         self.window.on_target_changed()
