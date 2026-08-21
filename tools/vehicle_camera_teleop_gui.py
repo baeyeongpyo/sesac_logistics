@@ -708,6 +708,7 @@ class TeleopWindow(QMainWindow):
         self.target_search_active = False
         self.target_search_linear_m_s = 0.08
         self.target_search_angular_rad_s = 0.12
+        self.search_circle_diameter_m = 1.34
         self.arc_forward_anchor_position = None
         self.arc_forward_anchor_yaw = None
         self.arc_forward_anchor_remaining_m = None
@@ -1823,6 +1824,13 @@ class TeleopWindow(QMainWindow):
                 self.stable_detection_frames = min(30, max(
                     1, int(data.get("stable_detection_frames", 5))
                 ))
+                self.search_circle_diameter_m = min(10.0, max(
+                    0.20, float(data.get("search_circle_diameter_m", 1.34))
+                ))
+                self.target_search_angular_rad_s = (
+                    2.0 * self.target_search_linear_m_s
+                    / self.search_circle_diameter_m
+                )
                 self.args.stop_distance = min(2.0, max(
                     0.05, float(data.get(
                         "lidar_stop_distance_m", self.args.stop_distance
@@ -1925,6 +1933,7 @@ class TeleopWindow(QMainWindow):
             "near_center_check_distance_cm": self.near_center_check_distance_cm,
             "arc_cycle_pause_sec": self.arc_cycle_pause_sec,
             "stable_detection_frames": self.stable_detection_frames,
+            "search_circle_diameter_m": self.search_circle_diameter_m,
             "lidar_stop_distance_m": self.args.stop_distance,
             "lidar_self_filter_distance_m": self.node.lidar_self_filter_distance_m,
         })
