@@ -683,6 +683,10 @@ class TeleopWindow(QMainWindow):
         self.arc_auto_last_result = None
         self.arc_cycle_limit = 0
         self.arc_auto_insert_after_verify = True
+        # Set only by the headless integration runner.  GUI actions keep the
+        # existing behaviour and never raise the fork implicitly.
+        self.auto_lift_after_dock = False
+        self.last_auto_lift_monotonic = None
         self.terminal_run_mode = "search"
         self.arc_cycle_index = 0
         self.arc_cycle_advance_m = 0.10
@@ -3323,8 +3327,10 @@ class TeleopWindow(QMainWindow):
             return
         self.start_arc_approach()
 
-    def start_target_search(self):
+    def start_target_search(self, auto_lift_after_dock=False):
         self.cancel_arc_approach("원형 목표 탐색 시작")
+        self.auto_lift_after_dock = bool(auto_lift_after_dock)
+        self.last_auto_lift_monotonic = None
         self.set_selected_run_mode("search")
         self.target_search_active = True
         self.node.stop(repeats=3)
@@ -3386,6 +3392,7 @@ class TeleopWindow(QMainWindow):
         self.arc_forward_anchor_position = None
         self.arc_forward_anchor_yaw = None
         self.arc_forward_anchor_remaining_m = None
+        self.auto_lift_after_dock = False
         self.node.stop(repeats=3)
         self.arc_execute_button.setText("주행 실행")
         if was_active:
@@ -3403,6 +3410,16 @@ class TeleopWindow(QMainWindow):
                 "odom_yaw": self.node.odom_yaw_unwrapped,
             })
         self.arc_execute_button.setEnabled(self.arc_plan is not None)
+
+    def finish_auto_lift_after_dock(self):
+        """Raise once after a successful headless docking run."""
+        if not self.auto_lift_after_dock:
+            return False
+        self.auto_lift_after_dock = False
+        self.last_auto_lift_monotonic = time.monotonic()
+        self.node.publish_fork("UP")
+        self.node.log_telemetry_event("arc_auto_lift", {"command": "UP"})
+        return True
 
     def start_verified_holonomic_forward(self, now, verified_yaw_deg):
         if self.arc_dock_forward_target_m is None:
@@ -3820,8 +3837,10 @@ class TeleopWindow(QMainWindow):
                 self.arc_execute_button.setText("주행 실행")
                 self.begin_arc_manual_correction(result)
                 self.node.log_telemetry_event("arc_complete", result)
+                lifted = self.finish_auto_lift_after_dock()
                 self.arc_label.setText(
                     f"횡이동 → 회전 → 직선 삽입 완료 | {self.arc_auto_pass}회"
+                    + (" | 리프트 상승 명령" if lifted else "")
                 )
                 return
             max_linear = min(
@@ -4242,6 +4261,7 @@ class TeleopWindow(QMainWindow):
         self.arc_auto_internal_start = False
         self.arc_auto_replan_due_at = None
         self.arc_cycle_replan_due_at = None
+        self.auto_lift_after_dock = False
         self.pressed.clear()
         self.node.stop(repeats=5)
         self.node.publish_fork("STOP")
