@@ -258,6 +258,10 @@ class YoloSymbolSeg(Node):
         self.candidate_streak = 0
         self.camera_matrix = None
         self.distortion = None
+        self.odom_position = None
+        self.odom_yaw = None
+        self.entity_tracks = []
+        self.next_entity_track_id = 1
         self.previous_pnp_yaw = None
         self.telemetry_lock = threading.Lock()
         self.telemetry_file = None
@@ -433,6 +437,17 @@ class YoloSymbolSeg(Node):
             self.distortion = np.asarray(message.d, dtype=np.float64)
 
     def on_odom(self, message):
+        orientation = message.pose.pose.orientation
+        yaw = math.atan2(
+            2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
+            1.0 - 2.0 * (orientation.y * orientation.y + orientation.z * orientation.z),
+        )
+        with self.lock:
+            self.odom_position = (
+                float(message.pose.pose.position.x),
+                float(message.pose.pose.position.y),
+            )
+            self.odom_yaw = yaw
         self.log_telemetry("odom", {
             "position": [message.pose.pose.position.x, message.pose.pose.position.y],
             "orientation_z": message.pose.pose.orientation.z,
@@ -448,6 +463,112 @@ class YoloSymbolSeg(Node):
                 if message.range_min <= value <= message.range_max:
                     front.append(float(value))
         self.log_telemetry("scan", {"front_min_m": min(front) if front else None})
+
+    def remember_complete_entity(self, entity, pnp):
+        """Add/update a short-lived target map entry from a full 2x2 detection."""
+        if pnp is None or pnp.get("forward_distance_cm") is None:
+            return None
+        with self.lock:
+            position = self.odom_position
+            yaw = self.odom_yaw
+        if position is None or yaw is None:
+            return None
+        forward = float(pnp["forward_distance_cm"]) / 100.0
+        left = -float(pnp.get("lateral_ratio", 0.0)) * forward
+        world_x = position[0] + math.cos(yaw) * forward - math.sin(yaw) * left
+        world_y = position[1] + math.sin(yaw) * forward + math.cos(yaw) * left
+        matrix = tuple(item["class"] for item in entity["ordered_tags"])
+        now = time.monotonic()
+        self.entity_tracks = [
+            track for track in self.entity_tracks if now - track["seen_at"] <= 20.0
+        ]
+        matches = [
+            track for track in self.entity_tracks
+            if track["matrix"] == matrix
+            and math.dist((world_x, world_y), (track["world_x"], track["world_y"])) <= 0.45
+        ]
+        if matches:
+            track = min(matches, key=lambda item: math.dist(
+                (world_x, world_y), (item["world_x"], item["world_y"])
+            ))
+            track.update(world_x=world_x, world_y=world_y, seen_at=now)
+        else:
+            track = {
+                "id": self.next_entity_track_id,
+                "matrix": matrix,
+                "world_x": world_x,
+                "world_y": world_y,
+                "seen_at": now,
+            }
+            self.next_entity_track_id += 1
+            self.entity_tracks.append(track)
+        return track["id"]
+
+    def match_partial_entity(self, detections):
+        """Match only the upper target pair against the local odom-based map."""
+        with self.lock:
+            position = self.odom_position
+            yaw = self.odom_yaw
+            matrix = None if self.camera_matrix is None else self.camera_matrix.copy()
+        if position is None or yaw is None or matrix is None:
+            return None
+        now = time.monotonic()
+        self.entity_tracks = [
+            track for track in self.entity_tracks if now - track["seen_at"] <= 20.0
+        ]
+        left_name, right_name = self.target_top
+        left_tags = [item for item in detections if item["class"] == left_name]
+        right_tags = [item for item in detections if item["class"] == right_name]
+        scores = []
+        for left_tag in left_tags:
+            for right_tag in right_tags:
+                if left_tag is right_tag:
+                    continue
+                left_center = detection_center(left_tag)
+                right_center = detection_center(right_tag)
+                if left_center[0] >= right_center[0]:
+                    continue
+                average_height = max(
+                    (left_tag["box"][3] - left_tag["box"][1]
+                     + right_tag["box"][3] - right_tag["box"][1]) * 0.5,
+                    1.0,
+                )
+                if abs(left_center[1] - right_center[1]) > average_height * 0.65:
+                    continue
+                pair_u = (left_center[0] + right_center[0]) * 0.5
+                observed_bearing = -math.atan2(pair_u - matrix[0, 2], matrix[0, 0])
+                for track in self.entity_tracks:
+                    if track["matrix"][:2] != (left_name, right_name):
+                        continue
+                    dx = track["world_x"] - position[0]
+                    dy = track["world_y"] - position[1]
+                    forward = math.cos(yaw) * dx + math.sin(yaw) * dy
+                    left = -math.sin(yaw) * dx + math.cos(yaw) * dy
+                    if forward <= 0.10:
+                        continue
+                    expected_bearing = math.atan2(left, forward)
+                    error = abs(math.atan2(
+                        math.sin(observed_bearing - expected_bearing),
+                        math.cos(observed_bearing - expected_bearing),
+                    ))
+                    scores.append((error, track, left_tag, right_tag, observed_bearing))
+        if not scores:
+            return None
+        scores.sort(key=lambda item: item[0])
+        best = scores[0]
+        # Never pick between neighbouring identical-tag pallets without a
+        # clear bearing separation; wait for a complete entity instead.
+        if best[0] > math.radians(10.0):
+            return None
+        if len(scores) > 1 and scores[1][0] - best[0] < math.radians(3.0):
+            return None
+        return {
+            "entity_id": best[1]["id"],
+            "left_tag": best[2],
+            "right_tag": best[3],
+            "bearing_error_deg": math.degrees(best[0]),
+            "age_sec": now - best[1]["seen_at"],
+        }
 
     def start_telemetry(self, session):
         safe_session = re.sub(r"[^A-Za-z0-9_.-]", "_", session)
@@ -689,12 +810,28 @@ class YoloSymbolSeg(Node):
 
             candidate = min(complete_entities, key=target_rank)
         candidate_status = None
+        tracked_partial = None
         cv2.line(annotated, (frame.shape[1] // 2, 35), (frame.shape[1] // 2, frame.shape[0] - 1), (255, 255, 255), 1)
         if candidate is None:
             self.candidate_center = None
             self.candidate_streak = 0
             self.previous_pnp_yaw = None
-            status_text = f"target {self.target_top[0]}/{self.target_top[1]}: N/A | seen 0"
+            tracked_partial = self.match_partial_entity(results)
+            if tracked_partial is None:
+                status_text = f"target {self.target_top[0]}/{self.target_top[1]}: N/A | seen 0"
+            else:
+                left_center = detection_center(tracked_partial["left_tag"])
+                right_center = detection_center(tracked_partial["right_tag"])
+                cv2.line(
+                    annotated, tuple(map(round, left_center)), tuple(map(round, right_center)),
+                    (255, 100, 0), 2,
+                )
+                for point in (left_center, right_center):
+                    cv2.circle(annotated, tuple(map(round, point)), 5, (255, 100, 0), -1)
+                status_text = (
+                    f"tracked entity #{tracked_partial['entity_id']} | "
+                    f"upper pair | map err {tracked_partial['bearing_error_deg']:.1f} deg"
+                )
         else:
             next_center = entity_center(candidate)
             px1, py1, px2, py2 = candidate["pallet"]["box"]
@@ -716,6 +853,7 @@ class YoloSymbolSeg(Node):
             bottom_row_error = candidate["bottom_row_error"]
             overlap_angle = candidate["overlap_angle"]
             pnp_pose = self.estimate_target_pose(candidate)
+            entity_id = self.remember_complete_entity(candidate, pnp_pose)
             cv2.rectangle(annotated, (px1, py1), (px2, py2), (0, 255, 255), 3)
             for point in candidate["tag_centers"]:
                 cv2.circle(annotated, (round(point[0]), round(point[1])), 4, (0, 255, 255), -1)
@@ -747,6 +885,7 @@ class YoloSymbolSeg(Node):
                 "pnp": pnp_pose,
                 "pallet_box": candidate["pallet"]["box"],
                 "matrix": [item["class"] for item in candidate["ordered_tags"]],
+                "entity_id": entity_id,
             }
         elapsed = time.perf_counter() - started
         cv2.putText(annotated, f"YOLO11n-detect {self.input_size} | {elapsed * 1000:.0f} ms | conf {self.confidence:.2f}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2)
@@ -768,6 +907,13 @@ class YoloSymbolSeg(Node):
             },
             "detections": results,
             "candidate": candidate_status,
+            "tracked_partial": (
+                None if tracked_partial is None else {
+                    "entity_id": tracked_partial["entity_id"],
+                    "bearing_error_deg": tracked_partial["bearing_error_deg"],
+                    "age_sec": tracked_partial["age_sec"],
+                }
+            ),
         }
         self.result_pub.publish(String(data=json.dumps(result_payload)))
         self.log_telemetry("inference", result_payload)
