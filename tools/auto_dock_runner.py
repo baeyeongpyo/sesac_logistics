@@ -97,12 +97,23 @@ class AutoDockRunner:
 
     def on_trigger(self, msg):
         """Temporary Nav2-arrival adapter; topic and value are CLI-configurable."""
-        try:
-            command = json.loads(msg.data)
-            if not isinstance(command, dict):
-                raise ValueError("JSON object required")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            command = {"command": str(msg.data).strip().lower()}
+        raw = str(msg.data).strip()
+        # Deliberately keep the temporary integration human-readable:
+        # "arrived diamond spade" = trigger, left tag, right tag.
+        fields = raw.split()
+        if len(fields) in (1, 3) and fields and fields[0].lower() in (
+            self.trigger_value, "cancel", "stop",
+        ):
+            command = {"command": fields[0].lower()}
+            if len(fields) == 3:
+                command.update({"left": fields[1].lower(), "right": fields[2].lower()})
+        else:
+            try:
+                command = json.loads(raw)
+                if not isinstance(command, dict):
+                    raise ValueError("JSON object required")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                command = {"command": raw.lower()}
         action = str(command.get("command", "")).lower()
         if action == self.trigger_value:
             if self.started_at is not None:
