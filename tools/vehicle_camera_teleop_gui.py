@@ -686,6 +686,7 @@ class TeleopWindow(QMainWindow):
         self.terminal_run_mode = "search"
         self.arc_cycle_index = 0
         self.arc_cycle_advance_m = 0.10
+        self.arc_cycle_pause_sec = 0.7
         self.arc_cycle_replan_due_at = None
         self.target_search_active = False
         self.target_search_linear_m_s = 0.08
@@ -1753,6 +1754,9 @@ class TeleopWindow(QMainWindow):
                 self.near_center_check_distance_cm = float(
                     data.get("near_center_check_distance_cm", 25.0)
                 )
+                self.arc_cycle_pause_sec = min(10.0, max(
+                    0.1, float(data.get("arc_cycle_pause_sec", 0.7))
+                ))
                 self.camera_calibration_samples = list(
                     data.get("camera_calibration_samples", [])
                 )[-2:]
@@ -1842,6 +1846,7 @@ class TeleopWindow(QMainWindow):
             "small_rotation_speed_rad_s": self.small_rotation_speed_rad_s,
             "insertion_distance_cm": self.arc_insertion_distance.value(),
             "near_center_check_distance_cm": self.near_center_check_distance_cm,
+            "arc_cycle_pause_sec": self.arc_cycle_pause_sec,
         })
         path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -3156,7 +3161,7 @@ class TeleopWindow(QMainWindow):
                 f"{reason} | 자동 재시도 {self.arc_auto_pass}회 종료"
             )
             return
-        self.arc_auto_replan_due_at = now + 0.7
+        self.arc_auto_replan_due_at = now + self.arc_cycle_pause_sec
         self.arc_label.setText(
             f"{reason} | {self.arc_auto_pass}회 정지, 자동 재계산 대기"
         )
@@ -3197,7 +3202,7 @@ class TeleopWindow(QMainWindow):
     def schedule_next_selected_cycle(self, now, reason):
         self.arc_active = False
         self.arc_dock_phase = None
-        self.arc_cycle_replan_due_at = now + 0.7
+        self.arc_cycle_replan_due_at = now + self.arc_cycle_pause_sec
         self.node.stop(repeats=5)
         limit_text = "∞" if self.arc_cycle_limit <= 0 else str(self.arc_cycle_limit)
         self.arc_label.setText(
@@ -3218,7 +3223,7 @@ class TeleopWindow(QMainWindow):
         if not self.plan_arc_approach(reobserve=True):
             self.node.stop(repeats=5)
             if self.arc_cycle_limit <= 0:
-                self.arc_cycle_replan_due_at = now + 0.7
+                self.arc_cycle_replan_due_at = now + self.arc_cycle_pause_sec
                 self.arc_label.setText("무제한 자동모드 | 목표 재검출 대기")
                 return
             self.arc_label.setText("다음 사이클 계산 실패 | 정지")
