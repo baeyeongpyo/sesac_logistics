@@ -107,6 +107,9 @@ class TeleopNode(Node):
         self.battery_samples = []
         self.last_battery_monotonic = 0.0
         self.safety_min_valid_range = args.safety_min_valid_range
+        self.lidar_self_filter_distance_m = getattr(
+            args, "lidar_self_filter_distance_m", 0.25
+        )
         self.last_scan_monotonic = 0.0
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -200,11 +203,12 @@ class TeleopNode(Node):
         self.last_scan_monotonic = time.monotonic()
         values = []
         for index, value in enumerate(msg.ranges):
-            angle = msg.angle_min + index * msg.angle_increment
-            angle = math.atan2(math.sin(angle), math.cos(angle))
-            if abs(angle) <= math.radians(20) and math.isfinite(value):
-                if max(msg.range_min, self.safety_min_valid_range) <= value <= msg.range_max:
-                    values.append(value)
+            if math.isfinite(value) and max(
+                msg.range_min,
+                self.safety_min_valid_range,
+                self.lidar_self_filter_distance_m,
+            ) <= value <= msg.range_max:
+                values.append(value)
         self.front_range = min(values) if values else math.inf
 
     def on_odom(self, msg):
@@ -639,6 +643,7 @@ class TeleopWindow(QMainWindow):
         self.mapping_odom_start_position = None
         self.arc_plan = None
         self.arc_active = False
+        self.last_arc_stop_reason = None
         self.arc_start_position = None
         self.arc_start_yaw = None
         self.arc_started_at = None
@@ -1816,6 +1821,12 @@ class TeleopWindow(QMainWindow):
                         "lidar_stop_distance_m", self.args.stop_distance
                     ))
                 ))
+                self.node.lidar_self_filter_distance_m = min(1.0, max(
+                    0.05, float(data.get(
+                        "lidar_self_filter_distance_m",
+                        self.node.lidar_self_filter_distance_m,
+                    ))
+                ))
                 self.camera_calibration_samples = list(
                     data.get("camera_calibration_samples", [])
                 )[-2:]
@@ -1908,6 +1919,7 @@ class TeleopWindow(QMainWindow):
             "arc_cycle_pause_sec": self.arc_cycle_pause_sec,
             "stable_detection_frames": self.stable_detection_frames,
             "lidar_stop_distance_m": self.args.stop_distance,
+            "lidar_self_filter_distance_m": self.node.lidar_self_filter_distance_m,
         })
         path.write_text(
             json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -3343,6 +3355,7 @@ class TeleopWindow(QMainWindow):
 
     def start_target_search(self, auto_lift_after_dock=False):
         self.cancel_arc_approach("원형 목표 탐색 시작")
+        self.last_arc_stop_reason = None
         self.auto_lift_after_dock = bool(auto_lift_after_dock)
         self.last_auto_lift_monotonic = None
         self.set_selected_run_mode("search")
@@ -3407,6 +3420,7 @@ class TeleopWindow(QMainWindow):
         self.arc_forward_anchor_yaw = None
         self.arc_forward_anchor_remaining_m = None
         self.auto_lift_after_dock = False
+        self.last_arc_stop_reason = str(reason)
         self.node.stop(repeats=3)
         self.arc_execute_button.setText("주행 실행")
         if was_active:
@@ -4308,7 +4322,15 @@ class TeleopWindow(QMainWindow):
         linear_x, linear_y, angular_z = self.command()
         manual_drive_active = bool(self.pressed & self.MOVEMENT_KEYS)
         blocked = linear_x > 0.0 and self.node.front_range < self.args.stop_distance
-        if manual_drive_active and self.arc_active:
+        autonomous_active = (
+            self.arc_active
+            or self.target_search_active
+            or self.arc_cycle_replan_due_at is not None
+            or self.arc_auto_replan_due_at is not None
+        )
+        if autonomous_active and self.node.front_range < self.args.stop_distance:
+            self.cancel_arc_approach("LiDAR interrupt: 안전거리 침범")
+        elif manual_drive_active and self.arc_active:
             self.cancel_arc_approach("수동 조작 전환")
         elif manual_drive_active and self.target_search_active:
             self.cancel_arc_approach("수동 조작으로 목표 탐색 취소")

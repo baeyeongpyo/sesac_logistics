@@ -68,6 +68,7 @@ def make_args(cli):
         output_dir=f"/home/ubuntu/recordings/vehicle{cli.vehicle}", linear_speed=cli.speed,
         angular_speed=cli.angular_speed, camera_pitch_deg=0.0, friction_coefficient=1.0,
         pose_config=cli.pose_config, stop_distance=0.20, safety_min_valid_range=0.25,
+        lidar_self_filter_distance_m=0.25,
         record_fps=15.0, viewer_only=False, disable_external_webcams=True,
         disable_primary_camera=True, http_viewer_only=False,
     )
@@ -158,6 +159,10 @@ class AutoDockRunner:
             or self.window.arc_auto_replan_due_at is not None
         )
         if not active:
+            if (self.window.last_arc_stop_reason or "").startswith("LiDAR interrupt"):
+                self.started_at = None
+                self.publish_status("interrupted", "lidar_safety_distance")
+                return
             # A temporary camera/odom/docking failure must not consume the
             # Nav2-arrival request.  Keep searching until an explicit cancel
             # arrives, so the pallet can be reacquired after it re-enters view.
