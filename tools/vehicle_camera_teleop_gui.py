@@ -4000,6 +4000,7 @@ class TeleopWindow(QMainWindow):
                 }
                 self.begin_arc_manual_correction(result)
                 self.node.log_telemetry_event("arc_complete", result)
+                self.finish_auto_lift_after_dock()
                 return
             max_linear = min(
                 self.linear.value() / self.linear.speed_scale, 0.05
