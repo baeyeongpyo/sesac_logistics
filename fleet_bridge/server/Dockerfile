@@ -14,12 +14,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-pip \
       python3-yaml \
       ros-humble-ament-index-cpp \
+      ros-humble-action-msgs \
       ros-humble-diagnostic-msgs \
       ros-humble-geometry-msgs \
       ros-humble-nav-msgs \
       ros-humble-rclcpp-components \
       ros-humble-resource-retriever \
       ros-humble-rosgraph-msgs \
+      ros-humble-rosbag2 \
       ros-humble-rosx-introspection \
       ros-humble-sensor-msgs \
       ros-humble-tf2-msgs \
@@ -49,12 +51,14 @@ SHELL ["/bin/bash", "-c"]
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libssl3 \
       python3-yaml \
+      ros-humble-action-msgs \
       ros-humble-diagnostic-msgs \
       ros-humble-geometry-msgs \
       ros-humble-nav-msgs \
       ros-humble-resource-retriever \
       ros-humble-rmw-fastrtps-cpp \
       ros-humble-rosgraph-msgs \
+      ros-humble-rosbag2 \
       ros-humble-rosx-introspection \
       ros-humble-sensor-msgs \
       ros-humble-tf2-msgs \

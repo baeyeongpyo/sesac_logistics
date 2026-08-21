@@ -48,8 +48,45 @@ topics:
       history: keep_last
       depth: 10
 
+  - id: scan_raw
+    enabled: true
+    source: /scan_raw
+    target: /{robot}/scan_raw
+    type: sensor_msgs/msg/LaserScan
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+
+  - id: scan_filtered
+    enabled: true
+    source: /scan_filtered
+    target: /{robot}/scan_filtered
+    type: sensor_msgs/msg/LaserScan
+    worker_rate:
+      max_rate_hz: 2.0
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+
+  - id: imu_data_raw
+    enabled: true
+    source: /imu/data_raw
+    target: /{robot}/imu/data_raw
+    type: sensor_msgs/msg/Imu
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+
   - id: battery
-    enabled: false
+    enabled: true
     source: /ros_robot_controller/battery
     target: /{robot}/battery
     type: sensor_msgs/msg/BatteryState
@@ -73,15 +110,146 @@ topics:
       history: keep_last
       depth: 10
 
-  - id: scan
-    enabled: false
-    source: /scan_filtered
-    target: /{robot}/scan_filtered
-    type: sensor_msgs/msg/LaserScan
-    worker_rate:
-      max_rate_hz: 2.0
+  - id: rgb_image_raw
+    enabled: true
+    source: /ascamera/camera_publisher/rgb0/image
+    target: /{robot}/rgb/image_raw
+    type: sensor_msgs/msg/Image
+    worker_rate: {}
     qos:
       reliability: best_effort
       durability: volatile
       history: keep_last
       depth: 1
+
+  - id: depth_image_raw
+    enabled: true
+    source: /depth/image_raw
+    target: /{robot}/depth/image_raw
+    type: sensor_msgs/msg/Image
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+
+  - id: depth_camera_info
+    enabled: true
+    source: /depth/camera_info
+    target: /{robot}/depth/camera_info
+    type: sensor_msgs/msg/CameraInfo
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+
+  - id: navigation_goal
+    enabled: true
+    source: /move_base_simple/goal
+    target: /{robot}/move_base_simple/goal
+    type: geometry_msgs/msg/PoseStamped
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+
+  - id: navigation_status
+    enabled: true
+    source: /navigation/status
+    target: /{robot}/navigation/status
+    type: std_msgs/msg/String
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+
+  - id: navigation_cmd_vel
+    enabled: true
+    source: /navigation/cmd_vel
+    target: /{robot}/navigation/cmd_vel
+    type: geometry_msgs/msg/Twist
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+
+  - id: controller_cmd_vel
+    enabled: true
+    source: /controller/cmd_vel
+    target: /{robot}/controller/cmd_vel
+    type: geometry_msgs/msg/Twist
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+
+  - id: plan
+    enabled: false
+    source: /plan
+    target: /{robot}/plan
+    type: nav_msgs/msg/Path
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+
+  - id: local_plan
+    enabled: false
+    source: /local_plan
+    target: /{robot}/local_plan
+    type: nav_msgs/msg/Path
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+
+  - id: global_costmap
+    enabled: false
+    source: /global_costmap/costmap
+    target: /{robot}/global_costmap/costmap
+    type: nav_msgs/msg/OccupancyGrid
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 1
+
+  - id: local_costmap
+    enabled: false
+    source: /local_costmap/costmap
+    target: /{robot}/local_costmap/costmap
+    type: nav_msgs/msg/OccupancyGrid
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 1
+
+  - id: navigate_to_pose_status
+    enabled: false
+    source: /navigate_to_pose/_action/status
+    target: /{robot}/navigate_to_pose/_action/status
+    type: action_msgs/msg/GoalStatusArray
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10

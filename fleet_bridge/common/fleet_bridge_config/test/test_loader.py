@@ -326,12 +326,46 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertEqual(fleet.server.domain_id, 225)
         self.assertEqual(fleet.server.command_api.port, 8080)
         self.assertEqual(fleet.vehicles[0].command.topic, '/cmd_vel')
+        enabled = {topic.id for topic in topics if topic.enabled}
+        self.assertEqual(
+            enabled,
+            {
+                'odom',
+                'tf',
+                'tf_static',
+                'amcl_pose',
+                'scan_raw',
+                'scan_filtered',
+                'imu_data_raw',
+                'battery',
+                'diagnostics',
+                'rgb_image_raw',
+                'depth_image_raw',
+                'depth_camera_info',
+                'navigation_goal',
+                'navigation_status',
+                'navigation_cmd_vel',
+                'controller_cmd_vel',
+            },
+        )
+        self.assertEqual(
+            {topic.id for topic in topics if not topic.enabled},
+            {
+                'plan',
+                'local_plan',
+                'global_costmap',
+                'local_costmap',
+                'navigate_to_pose_status',
+            },
+        )
         battery = next(topic for topic in topics if topic.id == 'battery')
-        scan = next(topic for topic in topics if topic.id == 'scan')
-        self.assertFalse(battery.enabled)
+        scan_filtered = next(topic for topic in topics if topic.id == 'scan_filtered')
         self.assertEqual(battery.worker_rate.max_rate_hz, 0.2)
-        self.assertFalse(scan.enabled)
-        self.assertEqual(scan.worker_rate.max_rate_hz, 2.0)
+        self.assertEqual(scan_filtered.worker_rate.max_rate_hz, 2.0)
+        self.assertFalse(any(
+            topic.source == '/map' or topic.target.endswith('/map')
+            for topic in topics
+        ))
         odom = next(topic for topic in topics if topic.id == 'odom')
         self.assertEqual(odom.source, '/odom')
         self.assertEqual(odom.target, '/robot_1/odom')

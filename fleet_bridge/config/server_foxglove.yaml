@@ -3,12 +3,10 @@ foxglove_bridge:
     address: 0.0.0.0
     port: 8765
     topic_whitelist:
-      - ^/robot_1/.*$
-      - ^/robot_2/.*$
-      - ^/fleet/.*$
+      - ^/robot_(1|2)/(odom|tf|tf_static|amcl_pose|scan_raw|scan_filtered|imu/data_raw|battery|diagnostics|rgb/image_raw|move_base_simple/goal|navigation/status|navigation/cmd_vel|controller/cmd_vel|fleet_bridge/status)$
+      - ^/controller_server/map$
     best_effort_qos_topic_whitelist:
-      - ^/robot_1/(odom|tf|scan)$
-      - ^/robot_2/(odom|tf|scan)$
+      - ^/robot_(1|2)/(odom|tf|scan_raw|scan_filtered|imu/data_raw|rgb/image_raw)$
     service_whitelist:
       - '(?!)'
     param_whitelist:

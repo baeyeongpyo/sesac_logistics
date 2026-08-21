@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import unittest
 
 import yaml
@@ -30,6 +31,8 @@ class DockerImageContractTest(unittest.TestCase):
             content.count('ros-humble-resource-retriever'),
             2,
         )
+        self.assertGreaterEqual(content.count('ros-humble-rosbag2'), 2)
+        self.assertGreaterEqual(content.count('ros-humble-action-msgs'), 2)
 
     def test_server_entrypoint_sources_ros_and_workspace_then_exec(self):
         content = (BUNDLE / 'server/entrypoint.sh').read_text(encoding='utf-8')
@@ -64,8 +67,15 @@ class ConfigurationContractTest(unittest.TestCase):
         self.assertEqual(parameters['client_topic_whitelist'], ['(?!)'])
         self.assertEqual(parameters['service_whitelist'], ['(?!)'])
         self.assertEqual(parameters['param_whitelist'], ['(?!)'])
-        self.assertIn('^/robot_1/.*$', parameters['topic_whitelist'])
-        self.assertIn('^/robot_2/.*$', parameters['topic_whitelist'])
+        whitelist = parameters['topic_whitelist']
+
+        def allowed(topic):
+            return any(re.fullmatch(pattern, topic) for pattern in whitelist)
+
+        self.assertTrue(allowed('/robot_1/rgb/image_raw'))
+        self.assertTrue(allowed('/controller_server/map'))
+        self.assertFalse(allowed('/robot_1/depth/image_raw'))
+        self.assertFalse(allowed('/robot_1/depth/camera_info'))
 
     def test_example_environment_documents_server_domains_and_uris(self):
         content = (BUNDLE / '.env.example').read_text(encoding='utf-8')
