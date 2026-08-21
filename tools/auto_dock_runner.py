@@ -57,7 +57,7 @@ SYMBOLS = ("star", "diamond", "spade", "clover", "heart")
 def make_args(cli):
     robot_namespace = f"/robot_{cli.vehicle}"
     return SimpleNamespace(
-        vehicle=cli.vehicle, ros_domain_id=cli.ros_domain_id,
+        vehicle=cli.vehicle, ros_domain_id=cli.ros_domain_id, node_name="auto_dock",
         webcam_ip="", image_topic="", secondary_image_topic="", secondary_video_url="",
         primary_video_url="", primary_video_command="", control_host="127.0.0.1",
         control_port=8091, control_url="", control_command="", webcam_1_video_url="",

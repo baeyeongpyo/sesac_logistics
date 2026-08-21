@@ -78,7 +78,7 @@ from std_msgs.msg import String, UInt16
 
 class TeleopNode(Node):
     def __init__(self, args):
-        super().__init__("vehicle_camera_teleop_gui")
+        super().__init__(getattr(args, "node_name", "vehicle_camera_teleop_gui"))
         self.viewer_only = args.viewer_only
         self.bridge = CvBridge()
         self.frame = None
