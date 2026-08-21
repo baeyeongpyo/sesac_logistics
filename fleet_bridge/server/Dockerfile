@@ -30,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN python3 -m pip install --no-cache-dir --target /opt/python \
       fastapi==0.115.12 \
+      httpx==0.28.1 \
       uvicorn==0.34.0 \
       websockets==10.4
 

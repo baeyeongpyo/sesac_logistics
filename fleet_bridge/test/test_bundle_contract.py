@@ -46,6 +46,7 @@ class DockerImageContractTest(unittest.TestCase):
 
         self.assertIn('websockets==10.4', content)
         self.assertIn('fastapi==0.115.12', content)
+        self.assertIn('httpx==0.28.1', content)
         self.assertIn('uvicorn==0.34.0', content)
         self.assertIn('ros-humble-geometry-msgs', content)
         self.assertIn('/opt/python', content)
