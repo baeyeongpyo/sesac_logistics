@@ -99,6 +99,7 @@ class ServerComposeContractTest(unittest.TestCase):
     def test_rosbag_recorder_uses_server_domain_and_read_only_configs(self):
         recorder = compose_config('docker-compose.server.yaml')['services']['rosbag-recorder']
 
+        self.assertEqual(recorder['profiles'], ['recording'])
         self.assertEqual(recorder['network_mode'], 'host')
         self.assertEqual(recorder['ipc'], 'host')
         self.assertEqual(recorder['environment']['ROS_DOMAIN_ID'], '225')

@@ -2,6 +2,7 @@ FROM ros:humble-ros-base-jammy AS builder
 
 SHELL ["/bin/bash", "-c"]
 ARG FOXGLOVE_BRIDGE_COMMIT=41f96cc6053632a472d9a821989952771b1117f2
+ARG MENTORPI_COMMIT=fb6d9969e935eb0e31966185158e33347951e761
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential \
@@ -15,16 +16,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-yaml \
       ros-humble-ament-index-cpp \
       ros-humble-action-msgs \
+      ros-humble-bond \
       ros-humble-diagnostic-msgs \
+      ros-humble-dwb-msgs \
       ros-humble-geometry-msgs \
+      ros-humble-lifecycle-msgs \
+      ros-humble-map-msgs \
+      ros-humble-nav2-msgs \
       ros-humble-nav-msgs \
+      ros-humble-rcl-interfaces \
       ros-humble-rclcpp-components \
       ros-humble-resource-retriever \
       ros-humble-rosgraph-msgs \
       ros-humble-rosbag2 \
+      ros-humble-rosidl-default-generators \
+      ros-humble-rosidl-default-runtime \
       ros-humble-rosx-introspection \
       ros-humble-sensor-msgs \
+      ros-humble-std-msgs \
       ros-humble-tf2-msgs \
+      ros-humble-visualization-msgs \
       zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -37,6 +48,12 @@ RUN python3 -m pip install --no-cache-dir --target /opt/python \
 WORKDIR /opt/fleet_bridge_ws
 RUN git clone https://github.com/foxglove/ros-foxglove-bridge.git src/foxglove_bridge \
     && git -C src/foxglove_bridge checkout "${FOXGLOVE_BRIDGE_COMMIT}"
+RUN git init /tmp/mentorpi \
+    && git -C /tmp/mentorpi remote add origin https://github.com/Hiwonder/MentorPi.git \
+    && git -C /tmp/mentorpi fetch --depth 1 origin "${MENTORPI_COMMIT}" \
+    && git -C /tmp/mentorpi checkout FETCH_HEAD -- driver/ros_robot_controller_msgs \
+    && mv /tmp/mentorpi/driver/ros_robot_controller_msgs src/ros_robot_controller_msgs \
+    && rm -rf /tmp/mentorpi
 COPY common/fleet_bridge_config src/fleet_bridge_config
 COPY server/ros2_ws/src/foxglove_ros_worker src/foxglove_ros_worker
 
@@ -53,16 +70,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libssl3 \
       python3-yaml \
       ros-humble-action-msgs \
+      ros-humble-bond \
       ros-humble-diagnostic-msgs \
+      ros-humble-dwb-msgs \
       ros-humble-geometry-msgs \
+      ros-humble-lifecycle-msgs \
+      ros-humble-map-msgs \
+      ros-humble-nav2-msgs \
       ros-humble-nav-msgs \
+      ros-humble-rcl-interfaces \
       ros-humble-resource-retriever \
       ros-humble-rmw-fastrtps-cpp \
       ros-humble-rosgraph-msgs \
       ros-humble-rosbag2 \
+      ros-humble-rosidl-default-runtime \
       ros-humble-rosx-introspection \
       ros-humble-sensor-msgs \
+      ros-humble-std-msgs \
       ros-humble-tf2-msgs \
+      ros-humble-visualization-msgs \
       zlib1g \
     && rm -rf /var/lib/apt/lists/*
 

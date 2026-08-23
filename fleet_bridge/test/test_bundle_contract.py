@@ -7,6 +7,19 @@ import yaml
 
 BUNDLE = Path(__file__).resolve().parents[1]
 PINNED_COMMIT = '41f96cc6053632a472d9a821989952771b1117f2'
+MENTORPI_COMMIT = 'fb6d9969e935eb0e31966185158e33347951e761'
+VEHICLE_MESSAGE_PACKAGES = (
+    'ros-humble-bond',
+    'ros-humble-dwb-msgs',
+    'ros-humble-lifecycle-msgs',
+    'ros-humble-map-msgs',
+    'ros-humble-nav2-msgs',
+    'ros-humble-rcl-interfaces',
+    'ros-humble-rosidl-default-runtime',
+    'ros-humble-std-msgs',
+    'ros-humble-visualization-msgs',
+)
+EXPECTED_VEHICLE_TOPIC_COUNT = 76
 
 
 class DockerImageContractTest(unittest.TestCase):
@@ -51,8 +64,47 @@ class DockerImageContractTest(unittest.TestCase):
         self.assertIn('ros-humble-geometry-msgs', content)
         self.assertIn('/opt/python', content)
 
+    def test_server_image_can_resolve_every_vehicle_message_package(self):
+        dockerfile = (BUNDLE / 'server/Dockerfile').read_text(encoding='utf-8')
+        package_xml = (
+            BUNDLE / 'server/ros2_ws/src/foxglove_ros_worker/package.xml'
+        ).read_text(encoding='utf-8')
+
+        for package in VEHICLE_MESSAGE_PACKAGES:
+            with self.subTest(package=package):
+                self.assertGreaterEqual(dockerfile.count(package), 2)
+        self.assertIn(MENTORPI_COMMIT, dockerfile)
+        self.assertIn('driver/ros_robot_controller_msgs', dockerfile)
+        self.assertIn('<exec_depend>ros_robot_controller_msgs</exec_depend>', package_xml)
+        for dependency in (
+            'action_msgs',
+            'bond',
+            'diagnostic_msgs',
+            'dwb_msgs',
+            'geometry_msgs',
+            'lifecycle_msgs',
+            'map_msgs',
+            'nav2_msgs',
+            'nav_msgs',
+            'rcl_interfaces',
+            'sensor_msgs',
+            'std_msgs',
+            'tf2_msgs',
+            'visualization_msgs',
+        ):
+            with self.subTest(dependency=dependency):
+                self.assertIn(f'<exec_depend>{dependency}</exec_depend>', package_xml)
+
 
 class ConfigurationContractTest(unittest.TestCase):
+    def test_server_foxglove_allows_an_eight_mib_client_send_buffer(self):
+        document = yaml.safe_load(
+            (BUNDLE / 'config/server_foxglove.yaml').read_text(encoding='utf-8'),
+        )
+        parameters = document['foxglove_bridge']['ros__parameters']
+
+        self.assertEqual(parameters['send_buffer_limit'], 8 * 1024 * 1024)
+
     def test_server_foxglove_is_observation_only_and_namespaced(self):
         document = yaml.safe_load(
             (BUNDLE / 'config/server_foxglove.yaml').read_text(encoding='utf-8'),
@@ -73,12 +125,62 @@ class ConfigurationContractTest(unittest.TestCase):
         def allowed(topic):
             return any(re.fullmatch(pattern, topic) for pattern in whitelist)
 
-        self.assertTrue(allowed('/robot_1/rgb/image_raw'))
-        self.assertTrue(allowed('/robot_1/rgb/camera_info'))
+        self.assertTrue(allowed('/robot_1/ascamera/camera_publisher/rgb0/image'))
+        self.assertTrue(allowed('/robot_1/ascamera/camera_publisher/depth0/image_raw'))
+        self.assertTrue(allowed('/robot_2/goal_pose'))
         self.assertTrue(allowed('/fleet/map'))
-        self.assertFalse(allowed('/robot_1/depth/image_raw'))
-        self.assertFalse(allowed('/robot_1/depth/camera_info'))
+        self.assertFalse(allowed('/robot_3/odom'))
         self.assertFalse(allowed('/controller_server/map'))
+
+    def test_server_foxglove_exposes_every_namespaced_vehicle_topic(self):
+        document = yaml.safe_load(
+            (BUNDLE / 'config/server_foxglove.yaml').read_text(encoding='utf-8'),
+        )
+        whitelist = document['foxglove_bridge']['ros__parameters']['topic_whitelist']
+
+        def allowed(topic):
+            return any(re.fullmatch(pattern, topic) for pattern in whitelist)
+
+        snapshot_pattern = re.compile(r'^(?P<topic>/\S+) \[[^]]+\]$')
+        snapshot_lines = (
+            BUNDLE / 'config/tmp/vehicle_node_topic'
+        ).read_text(encoding='utf-8').splitlines()
+        self.assertEqual(len(snapshot_lines), EXPECTED_VEHICLE_TOPIC_COUNT)
+        sources = []
+        for line_number, line in enumerate(snapshot_lines, start=1):
+            match = snapshot_pattern.fullmatch(line)
+            self.assertIsNotNone(
+                match,
+                f'invalid vehicle topic snapshot line {line_number}: {line!r}',
+            )
+            sources.append(match['topic'])
+
+        for robot_id in ('robot_1', 'robot_2'):
+            for source in sources:
+                with self.subTest(robot_id=robot_id, source=source):
+                    self.assertTrue(allowed(f'/{robot_id}{source}'))
+
+    def test_server_foxglove_matches_every_best_effort_republished_topic(self):
+        foxglove = yaml.safe_load(
+            (BUNDLE / 'config/server_foxglove.yaml').read_text(encoding='utf-8'),
+        )
+        patterns = foxglove['foxglove_bridge']['ros__parameters'][
+            'best_effort_qos_topic_whitelist'
+        ]
+        telemetry = yaml.safe_load(
+            (BUNDLE / 'config/telemetry.yaml').read_text(encoding='utf-8'),
+        )
+
+        for robot_id in ('robot_1', 'robot_2'):
+            for topic in telemetry['topics']:
+                if topic['qos']['reliability'] != 'best_effort':
+                    continue
+                target = topic['target'].replace('{robot}', robot_id)
+                with self.subTest(robot_id=robot_id, target=target):
+                    self.assertTrue(any(
+                        re.fullmatch(pattern, target)
+                        for pattern in patterns
+                    ))
 
     def test_example_environment_documents_server_domains_and_uris(self):
         content = (BUNDLE / '.env.example').read_text(encoding='utf-8')
@@ -139,7 +241,8 @@ class ReadmeContractTest(unittest.TestCase):
             'clientPublish',
             'zero Twist',
             '8766',
-            'rgb/camera_info',
+            'ascamera/camera_publisher/rgb0/image',
+            '/goal_pose',
             '/fleet/map',
             'replay_rate_hz',
         ):

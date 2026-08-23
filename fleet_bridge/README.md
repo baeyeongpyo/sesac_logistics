@@ -100,7 +100,7 @@ docker run -d --name fleet-command-api --restart unless-stopped \
 ```
 
 서버 관제에는 Foxglove 앱에서 `ws://<server-ip>:8765` 하나만 연결한다. 이 endpoint는
-`/robot_1/*`, `/robot_2/*`, `/fleet/*`만 제공하며 observation-only이다. 서버에서
+`/robot_1/*`, `/robot_2/*`, `/fleet/map`만 제공하며 observation-only이다. 서버에서
 topic publish, service 호출, parameter 변경은 허용하지 않는다.
 
 ### 차량 Bridge protocol probe
@@ -143,7 +143,8 @@ topic과 서버 재발행 topic의 단일 설정이다.
   확장된다.
 - `type`: 양쪽에서 확인할 ROS message type이다. type이 다르면 구독하지 않는다.
 - `worker_rate.max_rate_hz`: WebSocket 수신 뒤 서버 ROS topic으로 재발행하는 최대
-  빈도다.
+  빈도다. 차량에서 worker로 전송되는 원본 대역폭 자체는 줄이지 않으므로, 차량 측
+  프레임레이트·압축 정책은 차량 Bridge 운영 환경에서 별도로 적용한다.
 - `qos`: 서버 publisher의 reliability, durability, history, depth다.
 - `paired_with`: image와 해당 `CameraInfo`를 한 쌍으로 선언한다. 쌍은 서로를 가리키며
   `enabled` 상태도 같아야 한다.
@@ -161,24 +162,41 @@ worker 연결 이전에 CameraInfo를 한 번만 발행했다면 서버가 과�
 ### 관제 토픽과 중앙 map의 소유권
 
 `telemetry.yaml`의 모든 항목은 차량 Foxglove Bridge에서 worker로 수신하는 차량 원본이다.
-`enabled: true`이면 worker 중계와 rosbag 기록에 함께 포함되고, `false`이면 둘 다
-제외된다. raw depth도 이 설정에서는 활성화되어 있으므로 central ROS Domain과 rosbag에는
-들어간다. `battery`는 활성 상태 토픽이며 worker가 최대 0.2 Hz로 재발행한다.
+[`config/tmp/vehicle_node_topic`](config/tmp/vehicle_node_topic)에 기록한 76개 topic과 type을
+권위 목록으로 사용하며 현재는 모두 `enabled: true`다. worker는 경로를 정규화하거나 별칭으로
+바꾸지 않고 차량 ID만 접두사로 붙인다. 예를 들어 `/odom`은 `/robot_1/odom`,
+`/goal_pose`(`geometry_msgs/msg/PoseStamped`)는 `/robot_1/goal_pose`,
+`/ros_robot_controller/battery`(`std_msgs/msg/UInt16`)는
+`/robot_1/ros_robot_controller/battery`가 된다. 따라서 서로 다른 차량의 같은 원본 topic은
+서버 Domain 225에서 충돌하지 않는다.
+
+RGB와 depth image의 중앙 ROS 재발행은 각각 최대 5 Hz, `scan_filtered`는 최대 2 Hz,
+배터리는 최대 0.2 Hz로 제한한다. 이 제한은 worker가 WebSocket으로 메시지를 받은 뒤에
+적용되므로 차량에서 서버로 들어오는 원본 네트워크 대역폭은 줄이지 않는다.
 
 반면 [`config/central_topics.yaml`](config/central_topics.yaml)의
 `/controller_server/map`은 차량에서 오지 않는다. 중앙 map-server가 자체 발행하는 원본이며,
 `central-topic-republisher`가 마지막 map을 캐시해 1 Hz로 `/fleet/map`에 재발행한다. source와
 target을 분리해 자기 자신을 다시 구독하는 loop를 막고, Foxglove와 rosbag은 `/fleet/map`만
-사용한다. 차량 telemetry에 `/map` 또는 `/{robot}/map`을 추가하지 않는다.
+사용한다. 차량 Nav2의 `/map`은 별도 소유권을 가지며 각각 `/robot_1/map`, `/robot_2/map`으로
+중계되므로 중앙 `/fleet/map`과 충돌하지 않는다.
 
-중앙 Foxglove(`ws://<server-ip>:8765`)는 관제용 화면이라 `/robot_1/rgb/image_raw`와
-`/robot_2/rgb/image_raw` 및 각각의 `/robot_1/rgb/camera_info`,
-`/robot_2/rgb/camera_info`, `/fleet/map`을 표시한다. raw depth image와 depth camera info는
-topic picker에 노출하지 않는다. depth 점검은 차량의 Foxglove Bridge에 직접 연결해서
-수행한다.
+중앙 Foxglove(`ws://<server-ip>:8765`)는 `/robot_1/*`, `/robot_2/*`, `/fleet/map`을
+관측용으로 노출한다. 예를 들어 RGB 영상은
+`/robot_1/ascamera/camera_publisher/rgb0/image`, depth 영상은
+`/robot_1/ascamera/camera_publisher/depth0/image_raw`이다. 중앙 Bridge의
+`clientPublish`, service, parameter 기능은 계속 비활성화되어 있으므로 이 endpoint에서
+차량 명령을 발행할 수는 없다.
 
-Nav2의 plan, local plan, costmap, NavigateToPose action status는 현재 `enabled: false`로
-선언되어 있다. 필요할 때 해당 항목만 `true`로 바꾸고 worker와 recorder를 재생성한다.
+Nav2의 plan, local plan, costmap, behavior tree log, `/goal_pose`도 권위 목록에 포함되어
+차량별 namespace로 중계된다. 현재 스냅샷에 없는 hidden `/_action/*` topic은 이 설정에
+추측해서 추가하지 않는다. NavigateToPose action 상태까지 필요하면 차량에서
+`ros2 topic list -t --include-hidden-topics`로 다시 수집한 뒤 같은 source/type/target 계약에
+추가한다.
+
+이 중계는 관측 경로다. Command API가 차량 `/goal_pose`에 발행한 목표도 다시
+`/{robot}/goal_pose`로 관측될 수 있지만, 서버의 namespaced telemetry topic에 발행하는
+것만으로 차량 Nav2 명령이 전달되지는 않는다.
 
 ```yaml
 - id: scan_filtered
@@ -195,19 +213,22 @@ Nav2의 plan, local plan, costmap, NavigateToPose action status는 현재 `enabl
     depth: 1
 ```
 
-새 message type을 활성화하면 서버 이미지에 해당 ROS message package가 설치되어 있어야
-한다. 차량 측 topic rate 또는 message type 변경은 차량 Bridge 운영 환경에서 맞춘다.
+서버 이미지는 이 목록을 해석하는 Nav2, DWB, lifecycle, map 메시지 패키지와 MentorPi의
+`ros_robot_controller_msgs`를 포함한다. 커스텀 인터페이스는 Dockerfile에 고정한 MentorPi
+커밋에서 빌드한다. 차량 측 topic rate 또는 message type이 바뀌면 권위 목록과
+`telemetry.yaml`을 함께 갱신한다.
 
 ### rosbag recorder
 
-`rosbag-recorder`는 활성 차량 target, 각 차량의 `/fleet_bridge/status`, 활성 중앙 topic을
-새 rosbag2 세션에 기록한다. `ROSBAG_SESSION_ID`가 비어 있으면 UTC 시각 기반 이름을 쓰고,
-이미 있는 디렉터리는 덮어쓰지 않는다. Compose를 올리기 전에 호스트 저장 경로를 만든다.
+`rosbag-recorder`는 기본 기동 대상이 아니다. 녹화가 필요한 경우에만 `recording` profile로
+활성 차량 target, 각 차량의 `/fleet_bridge/status`, 활성 중앙 topic을 새 rosbag2 세션에
+기록한다. `ROSBAG_SESSION_ID`가 비어 있으면 UTC 시각 기반 이름을 쓰고, 이미 있는
+디렉터리는 덮어쓰지 않는다. Compose를 올리기 전에 호스트 저장 경로를 만든다.
 
 ```bash
 sudo mkdir -p /srv/fleet-rosbag
 docker compose --env-file .env.server -f docker-compose.server.yaml \
-  up -d --force-recreate rosbag-recorder
+  --profile recording up -d --force-recreate rosbag-recorder
 ```
 
 특정 세션 이름이 필요하면 `.env.server`에 `ROSBAG_SESSION_ID=inspection-001`처럼 설정한 뒤

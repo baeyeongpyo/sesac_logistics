@@ -1,8 +1,35 @@
 name: mentorpi-dds-observation
 
-# 실차 관측 전용 구성이다. 모든 participant는 ROS Domain 215에서 multicast
-# discovery를 사용하며, Gazebo·DDS Discovery Server·DDS Domain Bridge에는 의존하지 않는다.
+x-domain-bridge-environment: &domain-bridge-environment
+  CONTROL_DOMAIN: "225"
+  SOURCE_NAMESPACE: "/"
+
+x-domain-bridge: &domain-bridge
+  build:
+    context: ./domain-bridge
+  image: "${DOMAIN_BRIDGE_IMAGE:-mentorpi-domain-bridge:humble}"
+  network_mode: host
+  ipc: host
+  restart: unless-stopped
+  command: [/usr/local/bin/run-domain-bridge]
+
+# 실차 관측 전용 구성이다. 각 bridge 컨테이너가 차량 Domain과 중앙 Domain 225의
+# DDS participant를 함께 생성해 명시된 토픽만 중개한다.
 services:
+  bridge-robot-1:
+    <<: *domain-bridge
+    environment:
+      <<: *domain-bridge-environment
+      VEHICLE_DOMAIN: "215"
+      CENTRAL_PREFIX: "/robot_1"
+
+  bridge-robot-2:
+    <<: *domain-bridge
+    environment:
+      <<: *domain-bridge-environment
+      VEHICLE_DOMAIN: "216"
+      CENTRAL_PREFIX: "/robot_2"
+
   foxglove-bridge:
     build:
       context: .
@@ -20,6 +47,11 @@ services:
       [ros2, launch, foxglove_bridge, foxglove_bridge_launch.xml,
        "address:=${FOXGLOVE_BIND_ADDRESS:-0.0.0.0}",
        "port:=${FOXGLOVE_PORT:-8765}"]
+    depends_on:
+      bridge-robot-1:
+        condition: service_started
+      bridge-robot-2:
+        condition: service_started
 
   map-server:
     build:
@@ -54,6 +86,11 @@ services:
         bind:
           create_host_path: false
     command: [/usr/local/bin/mentorpi-map-server-bootstrap]
+    depends_on:
+      bridge-robot-1:
+        condition: service_started
+      bridge-robot-2:
+        condition: service_started
 
   rosbag-recorder:
     build:
@@ -77,6 +114,11 @@ services:
         bind:
           create_host_path: false
     command: [/usr/local/bin/mentorpi-rosbag-recorder-bootstrap]
+    depends_on:
+      bridge-robot-1:
+        condition: service_started
+      bridge-robot-2:
+        condition: service_started
 
 volumes:
   map-server-overlay:

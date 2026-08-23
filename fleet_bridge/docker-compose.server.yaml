@@ -126,6 +126,7 @@ services:
       - fleet_central_topic_republisher
 
   rosbag-recorder:
+    profiles: [recording]
     image: ${SERVER_IMAGE:-mentorpi-fleet-bridge-server:humble}
     build:
       context: .

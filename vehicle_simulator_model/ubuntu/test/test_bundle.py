@@ -94,18 +94,48 @@ class DeployOnlyBundleTest(unittest.TestCase):
             ],
         )
 
-    def test_physical_observation_compose_uses_the_central_control_domain(self):
-        """The observer must consume only telemetry bridged into Domain 225."""
+    def test_physical_observation_compose_uses_static_vehicle_bridges(self):
+        """Each physical vehicle must have one isolated bridge into Domain 225."""
         self.assertTrue((OBSERVATION_BUNDLE / 'Dockerfile').is_file())
         self.assertTrue((OBSERVATION_BUNDLE / 'README.md').is_file())
-        compose = yaml.safe_load(OBSERVATION_COMPOSE.read_text())
-        services = compose['services']
+        result = subprocess.run(
+            [
+                'docker', 'compose',
+                '--env-file', str(OBSERVATION_BUNDLE / '.env.example'),
+                '-f', str(OBSERVATION_COMPOSE),
+                'config', '--format', 'json',
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        services = json.loads(result.stdout)['services']
 
         self.assertEqual(
             set(services),
-            {'foxglove-bridge', 'map-server', 'rosbag-recorder'},
+            {
+                'bridge-robot-1', 'bridge-robot-2',
+                'foxglove-bridge', 'map-server', 'rosbag-recorder',
+            },
         )
-        for name in services:
+
+        for name, domain, prefix in (
+            ('bridge-robot-1', '215', '/robot_1'),
+            ('bridge-robot-2', '216', '/robot_2'),
+        ):
+            with self.subTest(bridge=name):
+                bridge = services[name]
+                self.assertEqual(bridge['image'], 'mentorpi-domain-bridge:humble')
+                self.assertEqual(bridge['network_mode'], 'host')
+                self.assertEqual(bridge['environment'], {
+                    'CENTRAL_PREFIX': prefix,
+                    'CONTROL_DOMAIN': '225',
+                    'SOURCE_NAMESPACE': '/',
+                    'VEHICLE_DOMAIN': domain,
+                })
+
+        for name in ('foxglove-bridge', 'map-server', 'rosbag-recorder'):
             with self.subTest(service=name):
                 service = services[name]
                 self.assertEqual(service['network_mode'], 'host')
@@ -113,7 +143,17 @@ class DeployOnlyBundleTest(unittest.TestCase):
                 self.assertNotIn('DDS_DISCOVERY_HOST', service['environment'])
                 self.assertNotIn('DDS_DISCOVERY_PORT', service['environment'])
                 self.assertNotIn('DDS_SUPER_CLIENT', service['environment'])
-                self.assertNotIn('depends_on', service)
+
+        for name in ('foxglove-bridge', 'map-server', 'rosbag-recorder'):
+            with self.subTest(dependent_service=name):
+                self.assertEqual(
+                    services[name]['depends_on']['bridge-robot-1']['condition'],
+                    'service_started',
+                )
+                self.assertEqual(
+                    services[name]['depends_on']['bridge-robot-2']['condition'],
+                    'service_started',
+                )
 
         self.assertEqual(
             services['rosbag-recorder']['command'],
@@ -160,7 +200,10 @@ class DeployOnlyBundleTest(unittest.TestCase):
                 invocation.read_text().splitlines(),
                 [
                     'bag', 'record', '--output', str(root / 'bags/live-20260816-01'),
-                    '/tf', '/tf_static', '/fleet/status', '/controller_server/map',
+                    '/robot_1/tf', '/robot_1/tf_static',
+                    '/robot_2/tf', '/robot_2/tf_static',
+                    '/robot_1/fleet/status', '/robot_2/fleet/status',
+                    '/controller_server/map',
                     '/robot_1/odom', '/robot_1/scan_raw', '/robot_1/imu/data_raw',
                     '/robot_1/depth/image_raw', '/robot_1/depth/camera_info',
                     '/robot_1/cmd_vel_nav', '/robot_1/controller/cmd_vel',

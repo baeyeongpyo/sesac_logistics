@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import sys
 from tempfile import TemporaryDirectory
 import unittest
@@ -51,6 +52,27 @@ VALID_TELEMETRY = {
         },
     ],
 }
+
+VEHICLE_TOPIC_PATTERN = re.compile(
+    r'^(?P<topic>/\S+) \[(?P<message_type>[A-Za-z][A-Za-z0-9_]*/msg/[A-Za-z][A-Za-z0-9_]*)\]$',
+)
+EXPECTED_VEHICLE_TOPIC_COUNT = 76
+
+
+def load_vehicle_topic_snapshot():
+    snapshot_path = BUNDLE / 'config/tmp/vehicle_node_topic'
+    entries = []
+    for line_number, raw_line in enumerate(
+        snapshot_path.read_text(encoding='utf-8').splitlines(),
+        start=1,
+    ):
+        match = VEHICLE_TOPIC_PATTERN.fullmatch(raw_line)
+        if match is None:
+            raise AssertionError(
+                f'invalid vehicle topic snapshot line {line_number}: {raw_line!r}',
+            )
+        entries.append((match['topic'], match['message_type']))
+    return entries
 
 
 class ConfigLoaderTest(unittest.TestCase):
@@ -490,55 +512,36 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertEqual(fleet.server.domain_id, 225)
         self.assertEqual(fleet.server.command_api.port, 8080)
         self.assertEqual(fleet.vehicles[0].command.topic, '/cmd_vel')
-        enabled = {topic.id for topic in topics if topic.enabled}
+        self.assertEqual(fleet.vehicles[0].navigation.goal_topic, '/goal_pose')
         self.assertEqual(
-            enabled,
-            {
-                'odom',
-                'tf',
-                'tf_static',
-                'amcl_pose',
-                'scan_raw',
-                'scan_filtered',
-                'imu_data_raw',
-                'battery',
-                'diagnostics',
-                'rgb_image_raw',
-                'rgb_camera_info',
-                'depth_image_raw',
-                'depth_camera_info',
-                'navigation_goal',
-                'navigation_status',
-                'navigation_cmd_vel',
-                'controller_cmd_vel',
-            },
+            fleet.vehicles[0].navigation.cancel_service,
+            '/navigate_to_pose/_action/cancel_goal',
         )
-        self.assertEqual(
-            {topic.id for topic in topics if not topic.enabled},
-            {
-                'plan',
-                'local_plan',
-                'global_costmap',
-                'local_costmap',
-                'navigate_to_pose_status',
-            },
+        self.assertTrue(all(topic.enabled for topic in topics))
+        battery = next(
+            topic for topic in topics
+            if topic.id == 'ros_robot_controller_battery'
         )
-        battery = next(topic for topic in topics if topic.id == 'battery')
         scan_filtered = next(topic for topic in topics if topic.id == 'scan_filtered')
         self.assertEqual(battery.worker_rate.max_rate_hz, 0.2)
+        self.assertEqual(battery.message_type, 'std_msgs/msg/UInt16')
         self.assertEqual(scan_filtered.worker_rate.max_rate_hz, 2.0)
-        rgb_image = next(topic for topic in topics if topic.id == 'rgb_image_raw')
+        rgb_image = next(topic for topic in topics if topic.id == 'ascamera_rgb0_image')
         rgb_camera_info = next(
-            topic for topic in topics if topic.id == 'rgb_camera_info'
+            topic for topic in topics if topic.id == 'ascamera_rgb0_camera_info'
         )
-        depth_image = next(topic for topic in topics if topic.id == 'depth_image_raw')
+        depth_image = next(
+            topic for topic in topics if topic.id == 'ascamera_depth0_image_raw'
+        )
         depth_camera_info = next(
-            topic for topic in topics if topic.id == 'depth_camera_info'
+            topic for topic in topics if topic.id == 'ascamera_depth0_camera_info'
         )
-        self.assertEqual(rgb_image.paired_with, 'rgb_camera_info')
-        self.assertEqual(rgb_camera_info.paired_with, 'rgb_image_raw')
-        self.assertEqual(depth_image.paired_with, 'depth_camera_info')
-        self.assertEqual(depth_camera_info.paired_with, 'depth_image_raw')
+        self.assertEqual(rgb_image.paired_with, 'ascamera_rgb0_camera_info')
+        self.assertEqual(rgb_camera_info.paired_with, 'ascamera_rgb0_image')
+        self.assertEqual(depth_image.paired_with, 'ascamera_depth0_camera_info')
+        self.assertEqual(depth_camera_info.paired_with, 'ascamera_depth0_image_raw')
+        self.assertEqual(rgb_image.worker_rate.max_rate_hz, 5.0)
+        self.assertEqual(depth_image.worker_rate.max_rate_hz, 5.0)
         self.assertEqual(rgb_camera_info.replay_rate_hz, 1.0)
         self.assertEqual(depth_camera_info.replay_rate_hz, 1.0)
         self.assertEqual(rgb_camera_info.qos.durability, 'transient_local')
@@ -563,13 +566,34 @@ class ConfigLoaderTest(unittest.TestCase):
                 ),
             ],
         )
-        self.assertFalse(any(
-            topic.source == '/map' or topic.target.endswith('/map')
-            for topic in topics
-        ))
+        vehicle_map = next(topic for topic in topics if topic.id == 'map')
+        self.assertEqual(vehicle_map.source, '/map')
+        self.assertEqual(vehicle_map.target, '/robot_1/map')
         odom = next(topic for topic in topics if topic.id == 'odom')
         self.assertEqual(odom.source, '/odom')
         self.assertEqual(odom.target, '/robot_1/odom')
+
+    def test_repository_telemetry_maps_every_vehicle_topic_with_exact_type(self):
+        snapshot = load_vehicle_topic_snapshot()
+        topics = load_telemetry(BUNDLE / 'config/telemetry.yaml', 'robot_1')
+
+        self.assertEqual(len(snapshot), EXPECTED_VEHICLE_TOPIC_COUNT)
+        self.assertEqual(len(snapshot), len(set(snapshot)))
+        self.assertEqual(
+            {
+                (
+                    topic.source,
+                    topic.message_type,
+                    topic.target,
+                    topic.enabled,
+                )
+                for topic in topics
+            },
+            {
+                (source, message_type, f'/robot_1{source}', True)
+                for source, message_type in snapshot
+            },
+        )
 
 
 if __name__ == '__main__':
