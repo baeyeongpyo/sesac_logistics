@@ -45,6 +45,13 @@ def pallet_center_from_face(pose, face_to_center_m):
     }
 
 
+def right_angle_error(first_yaw, second_yaw):
+    """Return distance from the nearest 90-degree multiple."""
+    difference = abs(normalize_angle(float(first_yaw) - float(second_yaw)))
+    quarter_turn = math.pi / 2.0
+    return abs(difference - round(difference / quarter_turn) * quarter_turn)
+
+
 class TagEntityMapper(Node):
     """Fuse YOLO 2x2 faces into pallets and publish one representative face."""
 
@@ -58,6 +65,9 @@ class TagEntityMapper(Node):
         self.declare_parameter("storage_path", "/shared/tag_entity_map.json")
         self.declare_parameter("pallet_face_to_center_m", 0.55)
         self.declare_parameter("pallet_merge_distance_m", 0.45)
+        self.declare_parameter("pallet_face_group_distance_m", 0.35)
+        self.declare_parameter("pallet_duplicate_face_distance_m", 0.12)
+        self.declare_parameter("pallet_angle_tolerance_deg", 20.0)
         self.declare_parameter("face_merge_yaw_deg", 40.0)
 
         requested_vehicle = int(self.get_parameter("vehicle").value)
@@ -81,6 +91,16 @@ class TagEntityMapper(Node):
         self.pallet_merge_distance_m = max(
             0.05, float(self.get_parameter("pallet_merge_distance_m").value)
         )
+        self.face_group_distance_m = max(
+            0.05, float(self.get_parameter("pallet_face_group_distance_m").value)
+        )
+        self.duplicate_face_distance_m = max(
+            0.02,
+            float(self.get_parameter("pallet_duplicate_face_distance_m").value),
+        )
+        self.pallet_angle_tolerance_rad = math.radians(max(
+            1.0, float(self.get_parameter("pallet_angle_tolerance_deg").value)
+        ))
         self.face_merge_yaw_rad = math.radians(max(
             1.0, float(self.get_parameter("face_merge_yaw_deg").value)
         ))
@@ -106,7 +126,7 @@ class TagEntityMapper(Node):
             if payload.get("frame_id") != self.map_frame:
                 return
             pallets = payload.get("pallets")
-            if payload.get("schema_version") == 2 and isinstance(pallets, list):
+            if payload.get("schema_version") == 3 and isinstance(pallets, list):
                 self.pallets = [item for item in pallets if isinstance(item, dict)]
                 numeric_ids = [
                     int(str(item.get("id", "0")).rsplit("_", 1)[-1])
@@ -116,7 +136,7 @@ class TagEntityMapper(Node):
                 self.next_id = max(numeric_ids, default=0) + 1
             elif isinstance(payload.get("entities"), list):
                 self.get_logger().warning(
-                    "ignoring legacy face-only entity map; pallet grouping starts clean"
+                    "ignoring incompatible entity map schema; pallet grouping starts clean"
                 )
         except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
             self.get_logger().warning(f"entity map load failed: {exc}")
@@ -183,18 +203,45 @@ class TagEntityMapper(Node):
         for pallet in self.pallets:
             current = pallet.get("center") or {}
             try:
-                distance = math.dist(
+                center_distance = math.dist(
                     (float(current["x"]), float(current["y"])),
                     (center["x"], center["y"]),
                 )
             except (KeyError, TypeError, ValueError):
                 continue
-            if distance <= self.pallet_merge_distance_m:
-                candidates.append((distance, pallet))
+            face_matches = []
+            for face in pallet.get("faces") or []:
+                face_pose = face.get("pose") or {}
+                try:
+                    face_distance = math.dist(
+                        (float(face_pose["x"]), float(face_pose["y"])),
+                        (pose["x"], pose["y"]),
+                    )
+                    angle_error = right_angle_error(face_pose["yaw"], pose["yaw"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                depth_pair = (
+                    angle_source == "depth" and face.get("angle_source") == "depth"
+                )
+                angle_matches = angle_error <= self.pallet_angle_tolerance_rad
+                pnp_duplicate = (
+                    not depth_pair and face_distance <= self.duplicate_face_distance_m
+                )
+                if angle_matches or pnp_duplicate:
+                    face_matches.append((face_distance, angle_error))
+            if not face_matches:
+                continue
+            face_distance, angle_error = min(face_matches)
+            spatial_matches = (
+                center_distance <= self.pallet_merge_distance_m
+                or face_distance <= self.face_group_distance_m
+            )
+            if spatial_matches:
+                candidates.append((min(center_distance, face_distance), angle_error, pallet))
 
         now = time.time() if observed_unix is None else float(observed_unix)
         if candidates:
-            pallet = min(candidates, key=lambda item: item[0])[1]
+            pallet = min(candidates, key=lambda item: (item[0], item[1]))[2]
             current = pallet["center"]
             alpha = 0.20
             current["x"] = (1.0 - alpha) * float(current["x"]) + alpha * center["x"]
@@ -224,7 +271,11 @@ class TagEntityMapper(Node):
                 )
             except (KeyError, TypeError, ValueError):
                 continue
-            if yaw_error <= self.face_merge_yaw_rad:
+            pnp_duplicate = (
+                angle_source != "depth"
+                and distance <= self.duplicate_face_distance_m
+            )
+            if yaw_error <= self.face_merge_yaw_rad or pnp_duplicate:
                 face_candidates.append((yaw_error, distance, face))
 
         if not face_candidates and len(faces) >= 4:
@@ -243,7 +294,13 @@ class TagEntityMapper(Node):
                 face_candidates.append((yaw_error, distance, face))
 
         if face_candidates:
-            face = min(face_candidates, key=lambda item: (item[0], item[1]))[2]
+            face = min(
+                face_candidates,
+                key=lambda item: (
+                    item[1] if angle_source != "depth" else item[0],
+                    item[0] if angle_source != "depth" else item[1],
+                ),
+            )[2]
             current = face["pose"]
             alpha = 0.20
             current["x"] = (1.0 - alpha) * float(current["x"]) + alpha * pose["x"]
@@ -316,7 +373,7 @@ class TagEntityMapper(Node):
 
     def payload(self):
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "frame_id": self.map_frame,
             "state": self.last_state,
             "updated_unix": time.time(),
