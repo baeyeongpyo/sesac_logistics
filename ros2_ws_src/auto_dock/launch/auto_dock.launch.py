@@ -1,6 +1,7 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, SetEnvironmentVariable
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 
 
 def generate_launch_description():
@@ -16,24 +17,27 @@ def generate_launch_description():
             "config_overrides", default_value="{}",
             description="Temporary JSON object merged over pose config for this run only.",
         ),
-        # The runner only selects a YOLO target through UDP; it cannot detect
-        # symbols by itself.  Keep the detector in this launch so one
-        # `ros2 launch auto_dock ...` command is sufficient.
+        # Keep every child in the vehicle DDS domain even when the invoking
+        # shell has not exported ROS_DOMAIN_ID.
+        SetEnvironmentVariable("ROS_DOMAIN_ID", LaunchConfiguration("ros_domain_id")),
+        # YOLO stays an independent node; auto_dock sends only its selected
+        # tag pair through the existing local UDP target-control interface.
         ExecuteProcess(
             cmd=["/usr/bin/python3", "/shared/yolo_symbol_seg_node.py"],
             output="screen",
         ),
-        ExecuteProcess(
-            cmd=[
-                "/usr/bin/python3",
-                "/home/ubuntu/ros2_ws/tools/auto_dock_runner.py",
-                "--vehicle", LaunchConfiguration("vehicle"),
-                "--ros-domain-id", LaunchConfiguration("ros_domain_id"),
-                "--pose-config", LaunchConfiguration("pose_config"),
-                "--search-linear-speed", LaunchConfiguration("search_linear_speed_m_s"),
-                "--config-overrides", LaunchConfiguration("config_overrides"),
-            ],
-            additional_env={"QT_QPA_PLATFORM": "offscreen"},
+        Node(
+            package="auto_dock",
+            executable="auto_dock_node",
+            name="auto_dock",
             output="screen",
+            parameters=[{
+                "vehicle": LaunchConfiguration("vehicle"),
+                "pose_config": LaunchConfiguration("pose_config"),
+                "config_overrides": LaunchConfiguration("config_overrides"),
+                # Keep the short speed override for quick field tests; it is
+                # merged by launch into the same JSON override mechanism.
+                "search_linear_speed_m_s": LaunchConfiguration("search_linear_speed_m_s"),
+            }],
         ),
     ])

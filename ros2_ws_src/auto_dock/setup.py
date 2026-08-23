@@ -17,4 +17,9 @@ setup(
     maintainer_email="robotics@example.com",
     description="Headless pallet auto-docking launch package.",
     license="Apache-2.0",
+    entry_points={
+        "console_scripts": [
+            "auto_dock_node = auto_dock.auto_dock_node:main",
+        ],
+    },
 )
