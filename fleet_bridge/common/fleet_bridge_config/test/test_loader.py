@@ -131,6 +131,12 @@ class ConfigLoaderTest(unittest.TestCase):
                         'max_hold_ms': 1000,
                         'publish_rate_hz': 10,
                     },
+                    'navigation': {
+                        'goal_topic': '/goal_pose',
+                        'goal_type': 'geometry_msgs/msg/PoseStamped',
+                        'cancel_service': '/navigate_to_pose/_action/cancel_goal',
+                        'cancel_service_type': 'action_msgs/srv/CancelGoal',
+                    },
                 },
             ],
         }
@@ -147,6 +153,11 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertEqual(loaded.vehicles[0].namespace, '/robot_1')
         self.assertEqual(loaded.vehicles[0].command.topic, '/cmd_vel')
         self.assertEqual(loaded.vehicles[0].command.max_hold_ms, 1000)
+        self.assertEqual(loaded.vehicles[0].navigation.goal_topic, '/goal_pose')
+        self.assertEqual(
+            loaded.vehicles[0].navigation.cancel_service,
+            '/navigate_to_pose/_action/cancel_goal',
+        )
 
     def test_load_fleet_rejects_missing_environment_value(self):
         fleet = {
@@ -211,6 +222,45 @@ class ConfigLoaderTest(unittest.TestCase):
                 invalid['vehicles'][0]['command'][field] = value
                 with self.assertRaisesRegex(ConfigError, field):
                     load_fleet(self.write_yaml(f'{field}.yaml', invalid), {})
+
+    def test_load_fleet_rejects_wrong_nav2_interface_types(self):
+        fleet = {
+            'server': {
+                'domain_id': 225,
+                'foxglove_port': 8765,
+                'command_api': {'host': '127.0.0.1', 'port': 8080},
+            },
+            'vehicles': [{
+                'id': 'robot_1',
+                'foxglove_uri': 'ws://10.0.0.11:8766',
+                'enabled': True,
+                'command': {
+                    'topic': '/cmd_vel',
+                    'type': 'geometry_msgs/msg/Twist',
+                    'max_linear_x': 0.3,
+                    'max_angular_z': 1.0,
+                    'max_hold_ms': 1000,
+                    'publish_rate_hz': 10,
+                },
+                'navigation': {
+                    'goal_topic': '/goal_pose',
+                    'goal_type': 'geometry_msgs/msg/PoseStamped',
+                    'cancel_service': '/navigate_to_pose/_action/cancel_goal',
+                    'cancel_service_type': 'action_msgs/srv/CancelGoal',
+                },
+            }],
+        }
+        cases = (
+            ('goal_type', 'geometry_msgs/msg/Pose'),
+            ('cancel_service_type', 'std_srvs/srv/Empty'),
+        )
+
+        for field, value in cases:
+            with self.subTest(field=field):
+                invalid = yaml.safe_load(yaml.safe_dump(fleet))
+                invalid['vehicles'][0]['navigation'][field] = value
+                with self.assertRaisesRegex(ConfigError, field):
+                    load_fleet(self.write_yaml(f'nav-{field}.yaml', invalid), {})
 
     def test_load_telemetry_rejects_duplicate_target(self):
         duplicated = yaml.safe_load(yaml.safe_dump(VALID_TELEMETRY))

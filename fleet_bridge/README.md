@@ -2,12 +2,14 @@
 
 이 번들은 서버에서만 실행한다. 각 차량이 제공하는 Foxglove Bridge WebSocket을
 수신해 ROS 2 Domain 225의 차량별 `/{robot_id}/*` topic으로 재발행하고, 시험용
-`cmd_vel`·`stop` REST API와 Swagger UI를 제공한다.
+`cmd_vel`·Nav2 goal/cancel·통합 `stop` REST API와 Swagger UI를 제공한다.
 
 ```text
 robot_1 Foxglove Bridge :8766          server / Humble / Domain 225
   /odom, /tf, /amcl_pose  ────────>  worker-robot-1 -> /robot_1/*
   /cmd_vel  <─────────────────────  Command API :8080
+  /goal_pose <────────────────────  Command API :8080
+  NavigateToPose cancel service <─  Command API :8080
 
 robot_2 Foxglove Bridge :8766          server Foxglove Bridge :8765
   /odom, /tf, /amcl_pose  ────────>  worker-robot-2 -> /robot_2/*
@@ -16,12 +18,29 @@ robot_2 Foxglove Bridge :8766          server Foxglove Bridge :8765
 차량용 Docker 이미지, Compose 파일, ROS topic filter는 이 저장소에 포함하지 않는다.
 차량 주행 컨테이너 또는 차량 운영 환경에서 Foxglove Bridge를 직접 실행해야 한다.
 차량 Bridge는 서버가 연결할 `:8766` endpoint를 제공하고, telemetry 원본 topic을
-노출해야 한다. 원격 명령을 사용할 경우 `clientPublish`는 `/cmd_vel`만 허용해야 한다.
+노출해야 한다. 원격 명령을 사용할 경우 `clientPublish`는 `/cmd_vel`과 `/goal_pose`만
+허용하고, `services` capability와 hidden
+`/navigate_to_pose/_action/cancel_goal` service만 추가로 허용해야 한다.
+
+차량의 `foxglove_bridge` 설정은 최소한 다음 접근 범위를 제공해야 한다. 정규식 문법과
+파라미터 이름은 차량에 설치한 Bridge 버전에서 다시 확인한다.
+
+```yaml
+foxglove_bridge:
+  ros__parameters:
+    capabilities: [clientPublish, services]
+    include_hidden: true
+    client_topic_whitelist:
+      - ^/(cmd_vel|goal_pose)$
+    service_whitelist:
+      - ^/navigate_to_pose/_action/cancel_goal$
+```
 
 ## 서버 설정
 
-[`config/fleet.yaml`](config/fleet.yaml)은 차량 ID, Foxglove URI, 안전한 명령 상한을
-정의한다. `id`가 server ROS topic prefix가 되므로 `robot_1`은 `/robot_1/*`,
+[`config/fleet.yaml`](config/fleet.yaml)은 차량 ID, Foxglove URI, 안전한 속도 명령 상한,
+Nav2 goal topic과 cancel service를 정의한다. `id`가 server ROS topic prefix가 되므로
+`robot_1`은 `/robot_1/*`,
 `robot_2`는 `/robot_2/*`로 분리된다.
 
 ```dotenv
@@ -212,17 +231,48 @@ docker compose --env-file .env.server -f docker-compose.server.yaml \
   }
   ```
 
+- `POST /api/v1/robots/{robot_id}/nav2/goal_pose`
+
+  요청 본문은 `geometry_msgs/msg/PoseStamped`와 같은 구조다.
+
+  ```json
+  {
+    "header": {
+      "stamp": {"sec": 0, "nanosec": 0},
+      "frame_id": "map"
+    },
+    "pose": {
+      "position": {"x": 1.0, "y": 2.0, "z": 0.0},
+      "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
+    }
+  }
+  ```
+
+- `POST /api/v1/robots/{robot_id}/nav2/cancel`
 - `POST /api/v1/robots/{robot_id}/stop`
 
 `cmd_vel`은 `config/fleet.yaml`의 선속도·각속도·유지 시간 상한을 검증한다. 지정한
 `hold_ms` 동안만 command를 발행하며 종료와 오류 경로에서 반드시 zero Twist를 보낸다.
-`stop`은 즉시 zero Twist를 전송한다. 차량 URI 연결 실패, `clientPublish` 미허용,
-CDR 미지원은 HTTP 503으로 반환한다.
+`nav2/cancel`은 UUID와 timestamp가 모두 0인 `action_msgs/srv/CancelGoal` 요청으로 현재
+NavigateToPose goal을 모두 취소한다. 응답의 `nav2_return_code`와
+`nav2_goals_canceling`으로 차량이 수락한 결과를 확인할 수 있다.
+
+`stop`은 Nav2 cancel과 zero Twist를 동시에 요청한다. 어느 한 경로가 실패해도 다른
+경로를 계속 시도하고, 하나 이상의 전송이 실패하면 결과를 HTTP 503 detail에 남긴다.
+차량 URI 연결 실패, 필요한 `clientPublish`/`services` capability 미허용, hidden cancel
+service 미노출, CDR 미지원도 HTTP 503으로 반환한다. cancel service 광고와 응답은 각각
+최대 5초 기다리며, 최초 `serverInfo` 응답도 5초 안에 오지 않으면 실패한다.
 
 ```bash
 curl -X POST http://127.0.0.1:8080/api/v1/robots/robot_1/cmd_vel \
   -H 'content-type: application/json' \
   -d '{"linear_x":0.1,"angular_z":0.0,"hold_ms":300}'
+
+curl -X POST http://127.0.0.1:8080/api/v1/robots/robot_1/nav2/goal_pose \
+  -H 'content-type: application/json' \
+  -d '{"header":{"stamp":{"sec":0,"nanosec":0},"frame_id":"map"},"pose":{"position":{"x":1.0,"y":2.0,"z":0.0},"orientation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0}}}'
+
+curl -X POST http://127.0.0.1:8080/api/v1/robots/robot_1/nav2/cancel
 
 curl -X POST http://127.0.0.1:8080/api/v1/robots/robot_1/stop
 ```

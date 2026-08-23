@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -25,11 +25,20 @@ class CommandConfig:
 
 
 @dataclass(frozen=True)
+class NavigationConfig:
+    goal_topic: str = '/goal_pose'
+    goal_message_type: str = 'geometry_msgs/msg/PoseStamped'
+    cancel_service: str = '/navigate_to_pose/_action/cancel_goal'
+    cancel_service_type: str = 'action_msgs/srv/CancelGoal'
+
+
+@dataclass(frozen=True)
 class VehicleConfig:
     id: str
     foxglove_uri: str
     enabled: bool
     command: CommandConfig
+    navigation: NavigationConfig = field(default_factory=NavigationConfig)
 
     @property
     def namespace(self) -> str:

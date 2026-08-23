@@ -41,6 +41,35 @@ class Advertise:
 
 
 @dataclass(frozen=True)
+class Service:
+    id: int
+    name: str
+    type: str
+    request_encoding: str | None
+    response_encoding: str | None
+
+
+@dataclass(frozen=True)
+class AdvertiseServices:
+    services: tuple[Service, ...]
+
+
+@dataclass(frozen=True)
+class ServiceCallFailure:
+    service_id: int
+    call_id: int
+    message: str
+
+
+@dataclass(frozen=True)
+class ServiceCallResponse:
+    service_id: int
+    call_id: int
+    encoding: str
+    payload: bytes
+
+
+@dataclass(frozen=True)
 class Unadvertise:
     channel_ids: tuple[int, ...]
 
@@ -81,7 +110,9 @@ def _string_tuple(value: Any, field: str) -> tuple[str, ...]:
     return tuple(_require_string(item, field) for item in value)
 
 
-def parse_server_message(payload: str) -> ServerInfo | Advertise | Unadvertise | IgnoredMessage:
+def parse_server_message(
+    payload: str,
+) -> ServerInfo | Advertise | AdvertiseServices | ServiceCallFailure | Unadvertise | IgnoredMessage:
     """Parse a Foxglove server JSON message into a typed value."""
 
     try:
@@ -144,6 +175,45 @@ def parse_server_message(payload: str) -> ServerInfo | Advertise | Unadvertise |
             for channel_id in raw_channel_ids
         ))
 
+    if operation == 'advertiseServices':
+        raw_services = message.get('services')
+        if not isinstance(raw_services, list):
+            raise ProtocolError('services must be an array')
+        services = []
+        for index, raw_service in enumerate(raw_services):
+            service = _require_dict(raw_service, f'services[{index}]')
+            request = service.get('request')
+            response = service.get('response')
+            request_encoding = None
+            response_encoding = None
+            if request is not None:
+                request = _require_dict(request, f'services[{index}].request')
+                request_encoding = _require_string(
+                    request.get('encoding'),
+                    f'services[{index}].request.encoding',
+                )
+            if response is not None:
+                response = _require_dict(response, f'services[{index}].response')
+                response_encoding = _require_string(
+                    response.get('encoding'),
+                    f'services[{index}].response.encoding',
+                )
+            services.append(Service(
+                id=_require_int(service.get('id'), f'services[{index}].id'),
+                name=_require_string(service.get('name'), f'services[{index}].name'),
+                type=_require_string(service.get('type'), f'services[{index}].type'),
+                request_encoding=request_encoding,
+                response_encoding=response_encoding,
+            ))
+        return AdvertiseServices(tuple(services))
+
+    if operation == 'serviceCallFailure':
+        return ServiceCallFailure(
+            service_id=_require_int(message.get('serviceId'), 'serviceId'),
+            call_id=_require_int(message.get('callId'), 'callId'),
+            message=_require_string(message.get('message'), 'message'),
+        )
+
     return IgnoredMessage(operation)
 
 
@@ -192,6 +262,55 @@ def client_message_frame(channel_id: int, payload: bytes) -> bytes:
     if not isinstance(payload, bytes):
         raise ProtocolError('client message payload must be bytes')
     return b'\x01' + struct.pack('<I', _require_int(channel_id, 'channel id')) + payload
+
+
+def client_service_call_frame(
+    service_id: int,
+    call_id: int,
+    encoding: str,
+    payload: bytes,
+) -> bytes:
+    """Build a service-call request binary frame (client opcode 2)."""
+
+    if not isinstance(payload, bytes):
+        raise ProtocolError('service call payload must be bytes')
+    encoding_bytes = _require_string(encoding, 'service encoding').encode('utf-8')
+    return (
+        b'\x02'
+        + struct.pack(
+            '<III',
+            _require_int(service_id, 'service id'),
+            _require_int(call_id, 'call id'),
+            len(encoding_bytes),
+        )
+        + encoding_bytes
+        + payload
+    )
+
+
+def parse_service_call_response_frame(payload: bytes) -> ServiceCallResponse:
+    """Parse a service-call response binary frame (server opcode 3)."""
+
+    if not isinstance(payload, bytes):
+        raise ProtocolError('service response frame must be bytes')
+    if len(payload) < 13:
+        raise ProtocolError('service response frame is shorter than its header')
+    if payload[0] != 3:
+        raise ProtocolError(f'unsupported service response opcode: {payload[0]}')
+    service_id, call_id, encoding_length = struct.unpack_from('<III', payload, 1)
+    encoding_end = 13 + encoding_length
+    if encoding_end > len(payload):
+        raise ProtocolError('service response encoding exceeds frame length')
+    try:
+        encoding = payload[13:encoding_end].decode('utf-8')
+    except UnicodeDecodeError as error:
+        raise ProtocolError('service response encoding must be UTF-8') from error
+    return ServiceCallResponse(
+        service_id=service_id,
+        call_id=call_id,
+        encoding=encoding,
+        payload=payload[encoding_end:],
+    )
 
 
 def parse_message_frame(payload: bytes) -> MessageFrame:

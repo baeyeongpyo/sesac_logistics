@@ -15,6 +15,11 @@ vehicles:
       max_angular_z: 1.0
       max_hold_ms: 1000
       publish_rate_hz: 10
+    navigation:
+      goal_topic: /goal_pose
+      goal_type: geometry_msgs/msg/PoseStamped
+      cancel_service: /navigate_to_pose/_action/cancel_goal
+      cancel_service_type: action_msgs/srv/CancelGoal
   - id: robot_2
     foxglove_uri: ${ROBOT_2_FOXGLOVE_URI}
     enabled: true
@@ -25,3 +30,8 @@ vehicles:
       max_angular_z: 1.0
       max_hold_ms: 1000
       publish_rate_hz: 10
+    navigation:
+      goal_topic: /goal_pose
+      goal_type: geometry_msgs/msg/PoseStamped
+      cancel_service: /navigate_to_pose/_action/cancel_goal
+      cancel_service_type: action_msgs/srv/CancelGoal

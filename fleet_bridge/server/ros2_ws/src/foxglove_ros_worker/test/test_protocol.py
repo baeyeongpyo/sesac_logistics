@@ -10,13 +10,17 @@ sys.path.insert(0, str(PACKAGE))
 
 from foxglove_ros_worker.protocol import (
     Advertise,
+    AdvertiseServices,
     IgnoredMessage,
     ProtocolError,
     ServerInfo,
+    ServiceCallFailure,
     Unadvertise,
     client_advertise_message,
     client_message_frame,
+    client_service_call_frame,
     parse_message_frame,
+    parse_service_call_response_frame,
     parse_server_message,
     subscribe_message,
 )
@@ -41,6 +45,32 @@ class FoxgloveProtocolTest(unittest.TestCase):
             }],
         })
         self.assertEqual(frame, b'\x01' + struct.pack('<I', 1) + b'cdr-payload')
+
+    def test_builds_and_parses_cdr_service_call_frames(self):
+        request = client_service_call_frame(
+            service_id=7,
+            call_id=12,
+            encoding='cdr',
+            payload=b'cancel-request',
+        )
+        response = parse_service_call_response_frame(
+            b'\x03'
+            + struct.pack('<III', 7, 12, 3)
+            + b'cdr'
+            + b'cancel-response',
+        )
+
+        self.assertEqual(
+            request,
+            b'\x02'
+            + struct.pack('<III', 7, 12, 3)
+            + b'cdr'
+            + b'cancel-request',
+        )
+        self.assertEqual(response.service_id, 7)
+        self.assertEqual(response.call_id, 12)
+        self.assertEqual(response.encoding, 'cdr')
+        self.assertEqual(response.payload, b'cancel-response')
 
     def test_parses_server_info_and_advertised_cdr_channels(self):
         server_info = parse_server_message(json.dumps({
@@ -71,6 +101,46 @@ class FoxgloveProtocolTest(unittest.TestCase):
         self.assertEqual(advertise.channels[0].id, 3)
         self.assertEqual(advertise.channels[0].topic, '/robot_1/odom')
         self.assertEqual(advertise.channels[0].schema_name, 'nav_msgs/msg/Odometry')
+
+    def test_parses_advertised_services_and_service_call_failure(self):
+        advertised = parse_server_message(json.dumps({
+            'op': 'advertiseServices',
+            'services': [{
+                'id': 7,
+                'name': '/navigate_to_pose/_action/cancel_goal',
+                'type': 'action_msgs/srv/CancelGoal',
+                'request': {
+                    'encoding': 'cdr',
+                    'schemaName': 'action_msgs/srv/CancelGoal_Request',
+                    'schemaEncoding': 'ros2msg',
+                    'schema': 'action_msgs/GoalInfo goal_info',
+                },
+                'response': {
+                    'encoding': 'cdr',
+                    'schemaName': 'action_msgs/srv/CancelGoal_Response',
+                    'schemaEncoding': 'ros2msg',
+                    'schema': 'int8 return_code',
+                },
+            }],
+        }))
+        failure = parse_server_message(json.dumps({
+            'op': 'serviceCallFailure',
+            'serviceId': 7,
+            'callId': 12,
+            'message': 'service unavailable',
+        }))
+
+        self.assertIsInstance(advertised, AdvertiseServices)
+        self.assertEqual(advertised.services[0].id, 7)
+        self.assertEqual(
+            advertised.services[0].name,
+            '/navigate_to_pose/_action/cancel_goal',
+        )
+        self.assertEqual(advertised.services[0].request_encoding, 'cdr')
+        self.assertEqual(
+            failure,
+            ServiceCallFailure(7, 12, 'service unavailable'),
+        )
 
     def test_parses_unadvertise_and_ignores_known_unneeded_operations(self):
         message = parse_server_message(json.dumps({

@@ -15,6 +15,8 @@ from fleet_bridge_config.models import (
     VehicleConfig,
 )
 from foxglove_ros_worker.api import create_app
+from foxglove_ros_worker.command import NavigationCancelResult, StopDeliveryError
+from foxglove_ros_worker.protocol import ProtocolError
 
 
 def fleet(*, enabled=True):
@@ -44,6 +46,8 @@ class RecordingCommandClient:
     def __init__(self, error=None):
         self.error = error
         self.twists = []
+        self.goal_poses = []
+        self.nav_cancels = []
         self.stops = []
 
     async def send_twist(self, vehicle, linear_x, angular_z, hold_ms):
@@ -51,10 +55,22 @@ class RecordingCommandClient:
             raise self.error
         self.twists.append((vehicle.id, linear_x, angular_z, hold_ms))
 
+    async def send_goal_pose(self, vehicle, goal_pose):
+        if self.error:
+            raise self.error
+        self.goal_poses.append((vehicle.id, goal_pose))
+
+    async def cancel_navigation(self, vehicle):
+        if self.error:
+            raise self.error
+        self.nav_cancels.append(vehicle.id)
+        return NavigationCancelResult(return_code=0, goals_canceling=1)
+
     async def stop(self, vehicle):
         if self.error:
             raise self.error
         self.stops.append(vehicle.id)
+        return NavigationCancelResult(return_code=0, goals_canceling=1)
 
 
 class CommandApiTest(unittest.TestCase):
@@ -92,6 +108,90 @@ class CommandApiTest(unittest.TestCase):
                 response = client.post('/api/v1/robots/robot_1/cmd_vel', json=payload)
                 self.assertEqual(response.status_code, 422)
 
+    def test_goal_pose_returns_accepted_and_delivers_exact_ros_shape(self):
+        client, commands = self.client()
+        goal_pose = {
+            'header': {
+                'stamp': {'sec': 12, 'nanosec': 34},
+                'frame_id': 'map',
+            },
+            'pose': {
+                'position': {'x': 1.0, 'y': 2.0, 'z': 0.0},
+                'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0},
+            },
+        }
+
+        response = client.post(
+            '/api/v1/robots/robot_1/nav2/goal_pose',
+            json=goal_pose,
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()['command'], 'nav2_goal_pose')
+        self.assertEqual(commands.goal_poses, [('robot_1', goal_pose)])
+
+    def test_goal_pose_rejects_incomplete_pose_stamped(self):
+        client, commands = self.client()
+
+        response = client.post(
+            '/api/v1/robots/robot_1/nav2/goal_pose',
+            json={
+                'header': {'stamp': {'sec': 0, 'nanosec': 0}, 'frame_id': 'map'},
+                'pose': {
+                    'position': {'x': 1.0, 'y': 2.0, 'z': 0.0},
+                    'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0},
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(commands.goal_poses, [])
+
+    def test_goal_pose_rejects_stamp_outside_ros_int32(self):
+        client, commands = self.client()
+
+        response = client.post(
+            '/api/v1/robots/robot_1/nav2/goal_pose',
+            json={
+                'header': {
+                    'stamp': {'sec': 2_147_483_648, 'nanosec': 0},
+                    'frame_id': 'map',
+                },
+                'pose': {
+                    'position': {'x': 1.0, 'y': 2.0, 'z': 0.0},
+                    'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0},
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(commands.goal_poses, [])
+
+    def test_nav2_cancel_returns_cancel_result(self):
+        client, commands = self.client()
+
+        response = client.post('/api/v1/robots/robot_1/nav2/cancel')
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json(), {
+            'robot_id': 'robot_1',
+            'command': 'nav2_cancel',
+            'hold_ms': None,
+            'nav2_return_code': 0,
+            'nav2_goals_canceling': 1,
+        })
+        self.assertEqual(commands.nav_cancels, ['robot_1'])
+
+    def test_nav2_cancel_returns_service_unavailable_for_invalid_cdr(self):
+        client, _commands = self.client(
+            error=ProtocolError('invalid Nav2 cancel CDR response'),
+        )
+
+        response = client.post('/api/v1/robots/robot_1/nav2/cancel')
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn('invalid Nav2 cancel CDR', response.json()['detail'])
+
     def test_api_rejects_unknown_or_disabled_robot(self):
         client, _commands = self.client()
         unknown = client.post('/api/v1/robots/robot_x/stop')
@@ -108,6 +208,15 @@ class CommandApiTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 503)
 
+    def test_stop_returns_service_unavailable_after_partial_delivery_failure(self):
+        error = StopDeliveryError((('Nav2 cancel', ConnectionError('offline')),))
+        client, _commands = self.client(error=error)
+
+        response = client.post('/api/v1/robots/robot_1/stop')
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn('Nav2 cancel', response.json()['detail'])
+
     def test_stop_docs_and_openapi_are_available(self):
         client, commands = self.client()
         stop = client.post('/api/v1/robots/robot_1/stop')
@@ -120,6 +229,8 @@ class CommandApiTest(unittest.TestCase):
         self.assertEqual(docs.status_code, 200)
         self.assertIn('swagger-ui', docs.text)
         self.assertIn('/api/v1/robots/{robot_id}/cmd_vel', schema['paths'])
+        self.assertIn('/api/v1/robots/{robot_id}/nav2/goal_pose', schema['paths'])
+        self.assertIn('/api/v1/robots/{robot_id}/nav2/cancel', schema['paths'])
         self.assertIn('/api/v1/robots/{robot_id}/stop', schema['paths'])
 
 

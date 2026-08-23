@@ -11,6 +11,7 @@ from .models import (
     CommandApiConfig,
     CommandConfig,
     FleetConfig,
+    NavigationConfig,
     QosConfig,
     RateConfig,
     ServerConfig,
@@ -164,9 +165,9 @@ def load_fleet(path: Path | str, environ: Mapping[str, str]) -> FleetConfig:
     for index, raw_value in enumerate(_list(document['vehicles'], 'fleet.vehicles')):
         location = f'fleet.vehicles[{index}]'
         raw = _mapping(raw_value, location)
-        allowed = {'id', 'foxglove_uri', 'enabled', 'command'}
+        allowed = {'id', 'foxglove_uri', 'enabled', 'command', 'navigation'}
         _keys(raw, allowed, location)
-        _required(raw, allowed, location)
+        _required(raw, {'id', 'foxglove_uri', 'enabled', 'command'}, location)
         robot_id = _identifier(raw['id'], f'{location}.id')
         raw_command = _mapping(raw['command'], f'{location}.command')
         _keys(
@@ -189,6 +190,52 @@ def load_fleet(path: Path | str, environ: Mapping[str, str]) -> FleetConfig:
         if command_type != 'geometry_msgs/msg/Twist':
             raise ConfigError(
                 f'{location}.command.type must be geometry_msgs/msg/Twist',
+            )
+        navigation = NavigationConfig()
+        if 'navigation' in raw:
+            raw_navigation = _mapping(
+                raw['navigation'],
+                f'{location}.navigation',
+            )
+            navigation_keys = {
+                'goal_topic',
+                'goal_type',
+                'cancel_service',
+                'cancel_service_type',
+            }
+            _keys(raw_navigation, navigation_keys, f'{location}.navigation')
+            _required(raw_navigation, navigation_keys, f'{location}.navigation')
+            goal_type = _string(
+                raw_navigation['goal_type'],
+                f'{location}.navigation.goal_type',
+            )
+            if goal_type != 'geometry_msgs/msg/PoseStamped':
+                raise ConfigError(
+                    f'{location}.navigation.goal_type must be '
+                    'geometry_msgs/msg/PoseStamped',
+                )
+            cancel_service_type = _string(
+                raw_navigation['cancel_service_type'],
+                f'{location}.navigation.cancel_service_type',
+            )
+            if cancel_service_type != 'action_msgs/srv/CancelGoal':
+                raise ConfigError(
+                    f'{location}.navigation.cancel_service_type must be '
+                    'action_msgs/srv/CancelGoal',
+                )
+            navigation = NavigationConfig(
+                goal_topic=_topic_name(
+                    raw_navigation['goal_topic'],
+                    f'{location}.navigation.goal_topic',
+                    robot_id,
+                ),
+                goal_message_type=goal_type,
+                cancel_service=_topic_name(
+                    raw_navigation['cancel_service'],
+                    f'{location}.navigation.cancel_service',
+                    robot_id,
+                ),
+                cancel_service_type=cancel_service_type,
             )
         vehicle = VehicleConfig(
             id=robot_id,
@@ -220,6 +267,7 @@ def load_fleet(path: Path | str, environ: Mapping[str, str]) -> FleetConfig:
                     f'{location}.command.publish_rate_hz',
                 ),
             ),
+            navigation=navigation,
         )
         if vehicle.command.publish_rate_hz > 100:
             raise ConfigError(

@@ -14,6 +14,7 @@ from fleet_bridge_config.models import FleetConfig, VehicleConfig
 from .command import (
     CommandValidationError,
     FoxgloveCommandClient,
+    StopDeliveryError,
     validate_command,
 )
 from .protocol import ProtocolError
@@ -43,10 +44,59 @@ class CmdVelRequest(BaseModel):
     )
 
 
+class RosTimeRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    sec: int = Field(..., ge=0, le=2_147_483_647)
+    nanosec: int = Field(..., ge=0, le=999999999)
+
+
+class HeaderRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    stamp: RosTimeRequest
+    frame_id: str = Field(..., min_length=1)
+
+
+class PositionRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
+
+    x: float
+    y: float
+    z: float
+
+
+class OrientationRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
+
+    x: float
+    y: float
+    z: float
+    w: float
+
+
+class PoseRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    position: PositionRequest
+    orientation: OrientationRequest
+
+
+class GoalPoseRequest(BaseModel):
+    """ROS ``geometry_msgs/msg/PoseStamped`` JSON shape."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    header: HeaderRequest
+    pose: PoseRequest
+
+
 class CommandAccepted(BaseModel):
     robot_id: str
     command: str
     hold_ms: int | None = None
+    nav2_return_code: int | None = None
+    nav2_goals_canceling: int | None = None
 
 
 def _active_vehicle(fleet: FleetConfig, robot_id: str) -> VehicleConfig:
@@ -79,7 +129,7 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
         title='Fleet Bridge Test Command API',
         version='1.0.0',
         description=(
-            '테스트 목적의 cmd_vel 및 stop API입니다. '
+            '테스트 목적의 cmd_vel, Nav2 goal/cancel 및 통합 stop API입니다. '
             '운영 환경에서는 인증과 네트워크 접근 제어를 추가해야 합니다.'
         ),
     )
@@ -124,19 +174,78 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
         )
 
     @app.post(
+        '/api/v1/robots/{robot_id}/nav2/goal_pose',
+        status_code=status.HTTP_202_ACCEPTED,
+        response_model=CommandAccepted,
+        tags=['commands'],
+        summary='Send a Nav2 PoseStamped goal',
+    )
+    async def nav2_goal_pose(
+        robot_id: str,
+        request: GoalPoseRequest,
+    ) -> CommandAccepted:
+        vehicle = _active_vehicle(fleet, robot_id)
+        try:
+            await command_client.send_goal_pose(vehicle, request.model_dump())
+        except (
+            ConnectionError,
+            OSError,
+            ProtocolError,
+            WebSocketException,
+        ) as error:
+            raise _delivery_error(error) from error
+        return CommandAccepted(robot_id=robot_id, command='nav2_goal_pose')
+
+    @app.post(
+        '/api/v1/robots/{robot_id}/nav2/cancel',
+        status_code=status.HTTP_202_ACCEPTED,
+        response_model=CommandAccepted,
+        tags=['commands'],
+        summary='Cancel all active Nav2 NavigateToPose goals',
+    )
+    async def nav2_cancel(robot_id: str) -> CommandAccepted:
+        vehicle = _active_vehicle(fleet, robot_id)
+        try:
+            result = await command_client.cancel_navigation(vehicle)
+        except (
+            ConnectionError,
+            OSError,
+            ProtocolError,
+            WebSocketException,
+        ) as error:
+            raise _delivery_error(error) from error
+        return CommandAccepted(
+            robot_id=robot_id,
+            command='nav2_cancel',
+            nav2_return_code=result.return_code,
+            nav2_goals_canceling=result.goals_canceling,
+        )
+
+    @app.post(
         '/api/v1/robots/{robot_id}/stop',
         status_code=status.HTTP_202_ACCEPTED,
         response_model=CommandAccepted,
         tags=['commands'],
-        summary='Send an immediate zero cmd_vel command',
+        summary='Cancel Nav2 and send an immediate zero cmd_vel command',
     )
     async def stop(robot_id: str) -> CommandAccepted:
         vehicle = _active_vehicle(fleet, robot_id)
         try:
-            await command_client.stop(vehicle)
-        except (ConnectionError, OSError, ProtocolError, WebSocketException) as error:
+            result = await command_client.stop(vehicle)
+        except (
+            ConnectionError,
+            OSError,
+            ProtocolError,
+            StopDeliveryError,
+            WebSocketException,
+        ) as error:
             raise _delivery_error(error) from error
-        return CommandAccepted(robot_id=robot_id, command='stop')
+        return CommandAccepted(
+            robot_id=robot_id,
+            command='stop',
+            nav2_return_code=result.return_code,
+            nav2_goals_canceling=result.goals_canceling,
+        )
 
     return app
 
