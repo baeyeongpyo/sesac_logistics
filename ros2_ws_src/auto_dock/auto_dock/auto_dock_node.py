@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GUI-free ROS node for pallet search, alignment, insertion, and lift-up.
+"""GUI-free ROS node for pallet search, alignment, insertion, and handoff.
 
 The 1.1 implementation lived inside ``TeleopWindow`` and a headless runner
 instantiated Qt only to reuse that GUI state.  This node owns the autonomous
@@ -56,6 +56,9 @@ class AutoDockNode(Node):
         self.declare_parameter("trigger_topic", "")
         self.declare_parameter("status_topic", "")
         self.declare_parameter("stop_topic", "")
+        self.declare_parameter("entry_complete_topic", "")
+        self.declare_parameter("lift_up_complete_topic", "")
+        self.declare_parameter("drive_ready_topic", "")
         self.declare_parameter("detection_topic", "")
         self.declare_parameter("scan_topic", "/scan_raw")
         self.declare_parameter("odom_topic", "/odom_raw")
@@ -87,6 +90,15 @@ class AutoDockNode(Node):
         self.trigger_topic = self.topic_or_default("trigger_topic", f"{robot}/nav2/arrival")
         self.status_topic = self.topic_or_default("status_topic", f"{robot}/auto_dock/status")
         self.stop_topic = self.topic_or_default("stop_topic", f"{robot}/auto_dock/stop")
+        self.entry_complete_topic = self.topic_or_default(
+            "entry_complete_topic", f"{robot}/auto_dock/entry_complete"
+        )
+        self.lift_up_complete_topic = self.topic_or_default(
+            "lift_up_complete_topic", f"{robot}/lift/up_complete"
+        )
+        self.drive_ready_topic = self.topic_or_default(
+            "drive_ready_topic", f"{robot}/auto_dock/drive_ready"
+        )
         self.detection_topic = self.topic_or_default(
             "detection_topic", f"{robot}/symbol_seg/detections"
         )
@@ -111,6 +123,8 @@ class AutoDockNode(Node):
         }
         self.target_world = None
         self.insert_start_position = None
+        self.post_lift_reverse_start = None
+        self.turn_target_yaw = None
         self.backoff_until = None
         self.backoff_command = (0.0, 0.0)
         self.was_docking_before_interrupt = False
@@ -125,8 +139,17 @@ class AutoDockNode(Node):
         status_qos.reliability = ReliabilityPolicy.RELIABLE
         status_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.status_pub = self.create_publisher(String, self.status_topic, status_qos)
+        self.entry_complete_pub = self.create_publisher(
+            Empty, self.entry_complete_topic, 10
+        )
+        self.drive_ready_pub = self.create_publisher(
+            Empty, self.drive_ready_topic, 10
+        )
         self.create_subscription(String, self.trigger_topic, self.on_trigger, 10)
         self.create_subscription(Empty, self.stop_topic, self.on_stop, 10)
+        self.create_subscription(
+            Empty, self.lift_up_complete_topic, self.on_lift_up_complete, 10
+        )
         self.create_subscription(String, self.detection_topic, self.on_detection, 10)
         self.create_subscription(
             LaserScan, str(self.get_parameter("scan_topic").value), self.on_scan, 10
@@ -226,6 +249,8 @@ class AutoDockNode(Node):
         self.load_config()
         self.target_world = None
         self.insert_start_position = None
+        self.post_lift_reverse_start = None
+        self.turn_target_yaw = None
         self.candidate_stop_due_at = None
         self.send_yolo_target()
         self.state = "search"
@@ -235,11 +260,30 @@ class AutoDockNode(Node):
     def on_stop(self, _msg):
         self.cancel("emergency_stop")
 
+    def on_lift_up_complete(self, _msg):
+        if self.state != "waiting_lift_up":
+            self.get_logger().warning(
+                "ignoring lift-up completion outside waiting_lift_up state"
+            )
+            return
+        if self.odom_yaw is None:
+            self.cancel("odom_missing_after_lift_up")
+            return
+        if self.odom_position is None:
+            self.cancel("odom_missing_after_lift_up")
+            return
+        self.post_lift_reverse_start = self.odom_position
+        self.turn_target_yaw = None
+        self.state = "reversing_after_lift"
+        self.publish_status("running", "lift_up_complete_reversing")
+
     def cancel(self, reason):
         self.state = "idle"
         self.reason = reason
         self.backoff_until = None
         self.candidate_stop_due_at = None
+        self.post_lift_reverse_start = None
+        self.turn_target_yaw = None
         self.stop_drive(10)
         self.fork_pub.publish(String(data="STOP"))
         self.publish_status("cancelled", reason)
@@ -349,11 +393,14 @@ class AutoDockNode(Node):
         return c * dx + s * dy, -s * dx + c * dy, normalize_angle(self.target_world["yaw"] - self.odom_yaw)
 
     def interrupt_for_lidar(self):
-        if self.state in {"idle", "safety_backoff"}:
+        if self.state in {"idle", "waiting_lift_up", "safety_backoff"}:
             return False
         legacy_clearance = self.number("lidar_stop_distance_m", 0.35, 0.05, 2.0)
         violations = []
-        for direction, (distance, angle) in self.nearest_by_direction.items():
+        directions = (
+            ("rear", self.nearest_by_direction["rear"]),
+        ) if self.state == "reversing_after_lift" else self.nearest_by_direction.items()
+        for direction, (distance, angle) in directions:
             clearance = self.number(
                 f"lidar_{direction}_clearance_m", legacy_clearance, 0.05, 2.0
             )
@@ -366,6 +413,13 @@ class AutoDockNode(Node):
         _margin, direction, distance, angle, clearance = min(violations)
         self.nearest_range = distance
         self.nearest_angle = angle
+        if self.state in {"reversing_after_lift", "turning_for_drive"}:
+            self.stop_drive()
+            self.publish_status(
+                "waiting", "post_lift_manoeuvre_blocked", direction=direction,
+                range_m=round(distance, 3), clearance_m=round(clearance, 3),
+            )
+            return True
         self.was_docking_before_interrupt = self.state in {"docking", "inserting"}
         self.candidate_stop_due_at = None
         angle = angle or 0.0
@@ -391,6 +445,12 @@ class AutoDockNode(Node):
             self.tick_docking()
         elif self.state == "inserting":
             self.tick_inserting()
+        elif self.state == "waiting_lift_up":
+            self.stop_drive()
+        elif self.state == "reversing_after_lift":
+            self.tick_reversing_after_lift()
+        elif self.state == "turning_for_drive":
+            self.tick_turning_for_drive()
         elif self.state == "safety_backoff":
             self.tick_backoff()
 
@@ -465,9 +525,53 @@ class AutoDockNode(Node):
             self.publish_drive(0.05, 0.0, 0.0)
             return
         self.stop_drive(10)
-        self.fork_pub.publish(String(data="UP"))
-        self.state = "idle"
-        self.publish_status("completed", "docked_and_lift_up")
+        self.state = "waiting_lift_up"
+        self.entry_complete_pub.publish(Empty())
+        self.publish_status("waiting", "entry_complete_waiting_lift_up")
+
+    def tick_reversing_after_lift(self):
+        if self.post_lift_reverse_start is None or self.odom_position is None:
+            self.cancel("odom_missing_during_post_lift_reverse")
+            return
+        reverse_m = self.number(
+            "post_lift_reverse_distance_cm", 30.0, 5.0, 200.0
+        ) / 100.0
+        travelled = math.dist(self.odom_position, self.post_lift_reverse_start)
+        if travelled < reverse_m:
+            speed = self.number(
+                "post_lift_reverse_speed_m_s", 0.05, 0.01, 0.20
+            )
+            self.publish_drive(-speed, 0.0, 0.0)
+            return
+        self.stop_drive(10)
+        turn_deg = self.number("post_lift_turn_deg", 180.0, -360.0, 360.0)
+        self.turn_target_yaw = normalize_angle(
+            self.odom_yaw + math.radians(turn_deg)
+        )
+        self.state = "turning_for_drive"
+        self.publish_status("running", "post_lift_reverse_complete_turning", turn_deg=turn_deg)
+
+    def tick_turning_for_drive(self):
+        if self.turn_target_yaw is None or self.odom_yaw is None:
+            self.cancel("odom_missing_during_post_lift_turn")
+            return
+        yaw_error = normalize_angle(self.turn_target_yaw - self.odom_yaw)
+        tolerance = math.radians(
+            self.number("post_lift_turn_tolerance_deg", 3.0, 0.5, 30.0)
+        )
+        if abs(yaw_error) <= tolerance:
+            self.stop_drive(10)
+            self.turn_target_yaw = None
+            self.state = "idle"
+            self.drive_ready_pub.publish(Empty())
+            self.publish_status("completed", "drive_ready_after_lift")
+            return
+        max_speed = self.number(
+            "post_lift_turn_speed_rad_s", 0.30, 0.05, 1.0
+        )
+        self.publish_drive(
+            0.0, 0.0, clamp(1.2 * yaw_error, -max_speed, max_speed)
+        )
 
     def tick_backoff(self):
         if self.backoff_until is not None and time.monotonic() < self.backoff_until:

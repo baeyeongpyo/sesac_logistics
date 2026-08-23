@@ -36,6 +36,41 @@ def transform_pose_2d(pose, transform):
     }
 
 
+def transform_snapshot(transform):
+    """Store the planar map<-odom transform used by persisted landmarks."""
+    translation = transform.transform.translation
+    rotation = transform.transform.rotation
+    return {
+        "x": float(translation.x),
+        "y": float(translation.y),
+        "yaw": math.atan2(
+            2.0 * (rotation.w * rotation.z + rotation.x * rotation.y),
+            1.0 - 2.0 * (rotation.y * rotation.y + rotation.z * rotation.z),
+        ),
+    }
+
+
+def rebase_map_pose(pose, previous_transform, current_transform):
+    """Move a saved map pose when localization changes map<-odom."""
+    old_yaw = float(previous_transform["yaw"])
+    old_c, old_s = math.cos(old_yaw), math.sin(old_yaw)
+    map_dx = float(pose["x"]) - float(previous_transform["x"])
+    map_dy = float(pose["y"]) - float(previous_transform["y"])
+    odom_x = old_c * map_dx + old_s * map_dy
+    odom_y = -old_s * map_dx + old_c * map_dy
+    new_yaw = float(current_transform["yaw"])
+    new_c, new_s = math.cos(new_yaw), math.sin(new_yaw)
+    rebased = {
+        "x": float(current_transform["x"]) + new_c * odom_x - new_s * odom_y,
+        "y": float(current_transform["y"]) + new_s * odom_x + new_c * odom_y,
+    }
+    if "yaw" in pose:
+        rebased["yaw"] = normalize_angle(
+            float(pose["yaw"]) - old_yaw + new_yaw
+        )
+    return rebased
+
+
 def pallet_center_from_face(pose, face_to_center_m):
     """Project an observed face along its inward normal to the pallet center."""
     yaw = float(pose.get("yaw", 0.0))
@@ -122,6 +157,7 @@ class TagEntityMapper(Node):
         )
         self.pallets = []
         self.next_id = 1
+        self.map_from_odom = None
         self.last_state = "waiting_for_map_tf"
         self.load_map()
 
@@ -142,8 +178,11 @@ class TagEntityMapper(Node):
             if payload.get("frame_id") != self.map_frame:
                 return
             pallets = payload.get("pallets")
-            if payload.get("schema_version") == 9 and isinstance(pallets, list):
+            if payload.get("schema_version") == 10 and isinstance(pallets, list):
                 self.pallets = [item for item in pallets if isinstance(item, dict)]
+                saved_transform = payload.get("map_from_odom")
+                if isinstance(saved_transform, dict):
+                    self.map_from_odom = saved_transform
                 numeric_ids = [
                     int(str(item.get("id", "0")).rsplit("_", 1)[-1])
                     for item in self.pallets
@@ -174,6 +213,7 @@ class TagEntityMapper(Node):
                 self.last_state = "waiting_for_map_tf"
                 self.publish_map()
             return
+        self.rebase_for_transform(transform_snapshot(transform))
 
         changed = False
         source_stamp_ns = int(detection.get("source_stamp_ns", 0) or 0)
@@ -220,6 +260,34 @@ class TagEntityMapper(Node):
             self.last_state = "mapping"
             self.save_map()
             self.publish_map()
+
+    def rebase_for_transform(self, current_transform):
+        if self.map_from_odom is None:
+            self.map_from_odom = current_transform
+            return
+        previous = self.map_from_odom
+        translation_change = math.dist(
+            (float(previous["x"]), float(previous["y"])),
+            (float(current_transform["x"]), float(current_transform["y"])),
+        )
+        yaw_change = abs(normalize_angle(
+            float(current_transform["yaw"]) - float(previous["yaw"])
+        ))
+        if translation_change < 1e-6 and yaw_change < 1e-6:
+            return
+        for pallet in self.pallets:
+            center = pallet.get("center")
+            if isinstance(center, dict):
+                pallet["center"] = rebase_map_pose(
+                    center, previous, current_transform
+                )
+            for face in pallet.get("faces") or []:
+                pose = face.get("pose")
+                if isinstance(pose, dict):
+                    face["pose"] = rebase_map_pose(
+                        pose, previous, current_transform
+                    )
+        self.map_from_odom = current_transform
 
     def merge_observation(
         self, matrix, pose, source_id, angle_source="pnp", visibility_score=0.0,
@@ -503,8 +571,9 @@ class TagEntityMapper(Node):
 
     def payload(self):
         return {
-            "schema_version": 9,
+            "schema_version": 10,
             "frame_id": self.map_frame,
+            "map_from_odom": self.map_from_odom,
             "state": self.last_state,
             "updated_unix": time.time(),
             "entities": self.visible_entities(),
