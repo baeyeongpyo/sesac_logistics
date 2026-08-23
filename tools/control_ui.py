@@ -73,6 +73,7 @@ def runtime_args(cli):
         arrival_topic=f"/robot_{cli.vehicle}/nav2/arrival",
         auto_dock_stop_topic=f"/robot_{cli.vehicle}/auto_dock/stop",
         auto_dock_status_topic=f"/robot_{cli.vehicle}/auto_dock/status",
+        map_topic="/map", entity_map_topic=f"/robot_{cli.vehicle}/tag_entity_map",
         output_dir=f"/home/ubuntu/recordings/vehicle{cli.vehicle}", linear_speed=cli.speed,
         angular_speed=cli.angular_speed, camera_pitch_deg=0.0,
         friction_coefficient=1.0, pose_config=cli.pose_config,

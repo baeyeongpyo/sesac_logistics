@@ -504,6 +504,8 @@ class YoloSymbolSeg(Node):
         left = -float(pnp.get("lateral_ratio", 0.0)) * forward
         world_x = position[0] + math.cos(yaw) * forward - math.sin(yaw) * left
         world_y = position[1] + math.sin(yaw) * forward + math.cos(yaw) * left
+        face_yaw = yaw - math.radians(float(pnp.get("yaw_deg", 0.0)))
+        world_yaw = math.atan2(math.sin(face_yaw), math.cos(face_yaw))
         matrix = tuple(item["class"] for item in entity["ordered_tags"])
         now = time.monotonic()
         self.entity_tracks = [
@@ -518,18 +520,22 @@ class YoloSymbolSeg(Node):
             track = min(matches, key=lambda item: math.dist(
                 (world_x, world_y), (item["world_x"], item["world_y"])
             ))
-            track.update(world_x=world_x, world_y=world_y, seen_at=now)
+            track.update(
+                world_x=world_x, world_y=world_y, world_yaw=world_yaw,
+                seen_at=now,
+            )
         else:
             track = {
                 "id": self.next_entity_track_id,
                 "matrix": matrix,
                 "world_x": world_x,
                 "world_y": world_y,
+                "world_yaw": world_yaw,
                 "seen_at": now,
             }
             self.next_entity_track_id += 1
             self.entity_tracks.append(track)
-        return track["id"]
+        return track
 
     def match_partial_entity(self, detections):
         """Match only the upper target pair against the local odom-based map."""
@@ -857,6 +863,12 @@ class YoloSymbolSeg(Node):
             cv2.rectangle(annotated, (bx1, by1), (bx2, by2), color, 2)
             cv2.putText(annotated, f"{NAMES[class_id]} {score:.2f}", (bx1, max(20, by1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
             results.append({"class": NAMES[class_id], "confidence": score, "box": box})
+        map_entities = [
+            entity for entity in pallet_entities(results)
+            if entity["complete"]
+            and abs(float(entity.get("top_row_error", 999.0))) <= 0.8
+            and abs(float(entity.get("bottom_row_error", 999.0))) <= 0.8
+        ]
         entities = pallet_entities(results, self.target_top)
         complete_entities = [
             entity for entity in entities
@@ -886,6 +898,22 @@ class YoloSymbolSeg(Node):
 
             candidate = min(complete_entities, key=target_rank)
         candidate_status = None
+        entity_observations = []
+        for entity in map_entities:
+            entity_pnp = self.estimate_target_pose(entity)
+            track = self.remember_complete_entity(entity, entity_pnp)
+            if track is None:
+                continue
+            entity_observations.append({
+                "entity_id": track["id"],
+                "matrix": list(track["matrix"]),
+                "pnp": entity_pnp,
+                "odom_pose": {
+                    "x": track["world_x"],
+                    "y": track["world_y"],
+                    "yaw": track["world_yaw"],
+                },
+            })
         tracked_partial = None
         cv2.line(annotated, (frame.shape[1] // 2, 35), (frame.shape[1] // 2, frame.shape[0] - 1), (255, 255, 255), 1)
         if candidate is None:
@@ -937,7 +965,8 @@ class YoloSymbolSeg(Node):
             depth_yaw = self.depth_yaw_from_pair(
                 candidate["ordered_tags"][0], candidate["ordered_tags"][1], source_stamp_ns
             )
-            entity_id = self.remember_complete_entity(candidate, pnp_pose)
+            entity_track = self.remember_complete_entity(candidate, pnp_pose)
+            entity_id = None if entity_track is None else entity_track["id"]
             cv2.rectangle(annotated, (px1, py1), (px2, py2), (0, 255, 255), 3)
             for point in candidate["tag_centers"]:
                 cv2.circle(annotated, (round(point[0]), round(point[1])), 4, (0, 255, 255), -1)
@@ -990,6 +1019,7 @@ class YoloSymbolSeg(Node):
                 "friction_coefficient": self.friction_coefficient,
             },
             "detections": results,
+            "entities": entity_observations,
             "candidate": candidate_status,
             "tracked_partial": (
                 None if tracked_partial is None else {

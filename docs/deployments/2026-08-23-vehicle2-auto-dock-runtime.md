@@ -9,6 +9,9 @@
 - Target candidate stop delay: `candidate_stop_delay_sec = 0.5`
 - External webcams default: `disable_external_webcams = true`
 - Directional LiDAR clearances: `lidar_front_clearance_m`, `lidar_rear_clearance_m`, `lidar_left_clearance_m`, and `lidar_right_clearance_m`; all initially `0.35 m`.
+- Complete 2x2 pallet faces publish through `/robot_2/tag_entity_map` after `odom → map` TF conversion.
+- Persistent entity map storage: `/shared/tag_entity_map.json`.
+- The development GUI renders `/map` with entity position, face direction, and its four-symbol matrix without RViz.
 - `search_circle_diameter_m` is absent, so Auto Dock uses its `1.34 m` fallback.
 - Restored calibration includes `centerline_offset_cm = 4.0`, `insertion_distance_cm = 9.0`, and `near_center_check_distance_cm = 25.0`.
 - Auto Dock loads this file again on the next arrival trigger.

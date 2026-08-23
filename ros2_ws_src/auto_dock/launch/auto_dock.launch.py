@@ -79,4 +79,11 @@ def generate_launch_description():
                 "search_linear_speed_m_s": LaunchConfiguration("search_linear_speed_m_s"),
             }],
         ),
+        Node(
+            package="auto_dock",
+            executable="tag_entity_mapper",
+            name="tag_entity_mapper",
+            output="screen",
+            parameters=[{"vehicle": LaunchConfiguration("vehicle")}],
+        ),
     ])

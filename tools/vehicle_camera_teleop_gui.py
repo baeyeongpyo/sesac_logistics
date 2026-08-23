@@ -74,9 +74,9 @@ import numpy as np
 import rclpy
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Twist
-from nav_msgs.msg import Odometry
-from python_qt_binding.QtCore import QEvent, QRect, Qt, QTimer
-from python_qt_binding.QtGui import QImage, QPainter, QPixmap
+from nav_msgs.msg import OccupancyGrid, Odometry
+from python_qt_binding.QtCore import QEvent, QPointF, QRect, Qt, QTimer
+from python_qt_binding.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from python_qt_binding.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QGridLayout, QGroupBox, QHBoxLayout,
     QDoubleSpinBox, QLabel, QListWidget, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSlider,
@@ -174,6 +174,20 @@ class DevControlClientNode(Node):
         self.auto_dock_status_sub = self.create_subscription(
             String, args.auto_dock_status_topic, self.on_auto_dock_status, status_qos
         )
+        map_qos = QoSProfile(depth=1)
+        map_qos.reliability = ReliabilityPolicy.RELIABLE
+        map_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.map_image = None
+        self.map_metadata = None
+        self.map_sequence = 0
+        self.entity_map = {"state": "waiting", "entities": []}
+        self.entity_map_sequence = 0
+        self.map_sub = self.create_subscription(
+            OccupancyGrid, args.map_topic, self.on_map, map_qos
+        )
+        self.entity_map_sub = self.create_subscription(
+            String, args.entity_map_topic, self.on_entity_map, map_qos
+        )
 
     def publish_arrival(self, left, right):
         self.arrival_pub.publish(String(data=f"arrived {left} {right}"))
@@ -188,6 +202,46 @@ class DevControlClientNode(Node):
                 self.auto_dock_status = status
         except (TypeError, ValueError):
             self.get_logger().warning("invalid auto_dock status JSON received")
+
+    def on_map(self, msg):
+        width = int(msg.info.width)
+        height = int(msg.info.height)
+        if width <= 0 or height <= 0 or len(msg.data) != width * height:
+            return
+        occupancy = np.asarray(msg.data, dtype=np.int16).reshape(height, width)
+        grayscale = np.full((height, width), 110, dtype=np.uint8)
+        known = occupancy >= 0
+        grayscale[known] = np.clip(
+            254.0 - occupancy[known].astype(np.float32) * 2.34, 20, 254
+        ).astype(np.uint8)
+        grayscale = np.flipud(grayscale)
+        orientation = msg.info.origin.orientation
+        origin_yaw = math.atan2(
+            2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
+            1.0 - 2.0 * (orientation.y * orientation.y + orientation.z * orientation.z),
+        )
+        self.map_image = QImage(
+            grayscale.data, width, height, width, QImage.Format_Grayscale8
+        ).copy()
+        self.map_metadata = {
+            "width": width,
+            "height": height,
+            "resolution": float(msg.info.resolution),
+            "origin_x": float(msg.info.origin.position.x),
+            "origin_y": float(msg.info.origin.position.y),
+            "origin_yaw": origin_yaw,
+            "frame_id": str(msg.header.frame_id),
+        }
+        self.map_sequence += 1
+
+    def on_entity_map(self, msg):
+        try:
+            payload = json.loads(msg.data)
+            if isinstance(payload, dict):
+                self.entity_map = payload
+                self.entity_map_sequence += 1
+        except (TypeError, ValueError, json.JSONDecodeError):
+            self.get_logger().warning("invalid tag entity map JSON received")
 
     def on_detection(self, msg):
         try:
@@ -626,6 +680,87 @@ class VideoLabel(QLabel):
         painter.drawPixmap(self._draw_rect, self._pixmap)
 
 
+class EntityMapView(QWidget):
+    """Low-cost OccupancyGrid view with persistent pallet-face markers."""
+
+    SYMBOL_TEXT = {
+        "star": "★", "diamond": "◆", "spade": "♠",
+        "clover": "♣", "heart": "♥",
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.map_image = None
+        self.metadata = None
+        self.entity_map = {"state": "waiting", "entities": []}
+        self.setFixedSize(560, 220)
+        self.setStyleSheet("background: #090909;")
+
+    def set_data(self, map_image, metadata, entity_map):
+        self.map_image = map_image
+        self.metadata = metadata
+        self.entity_map = entity_map or {"state": "waiting", "entities": []}
+        self.update()
+
+    def map_pixel(self, pose):
+        metadata = self.metadata
+        dx = float(pose["x"]) - metadata["origin_x"]
+        dy = float(pose["y"]) - metadata["origin_y"]
+        c = math.cos(metadata["origin_yaw"])
+        s = math.sin(metadata["origin_yaw"])
+        local_x = c * dx + s * dy
+        local_y = -s * dx + c * dy
+        return (
+            local_x / metadata["resolution"],
+            metadata["height"] - 1.0 - local_y / metadata["resolution"],
+        )
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#090909"))
+        if self.map_image is None or self.metadata is None:
+            painter.setPen(QColor("#d9d9d9"))
+            painter.drawText(self.rect(), Qt.AlignCenter, "Nav2 /map 수신 대기")
+            return
+        target_size = self.map_image.size().scaled(
+            self.contentsRect().size(), Qt.KeepAspectRatio
+        )
+        draw_rect = QRect(
+            (self.width() - target_size.width()) // 2,
+            (self.height() - target_size.height()) // 2,
+            target_size.width(), target_size.height(),
+        )
+        painter.drawImage(draw_rect, self.map_image)
+        scale_x = draw_rect.width() / max(self.metadata["width"], 1)
+        scale_y = draw_rect.height() / max(self.metadata["height"], 1)
+        painter.setPen(QPen(QColor("#00e5ff"), 2))
+        painter.setBrush(QColor("#00e5ff"))
+        for entity in self.entity_map.get("entities", []):
+            pose = entity.get("pose") if isinstance(entity, dict) else None
+            if not isinstance(pose, dict):
+                continue
+            try:
+                source_x, source_y = self.map_pixel(pose)
+                x = draw_rect.left() + source_x * scale_x
+                y = draw_rect.top() + source_y * scale_y
+                yaw = float(pose.get("yaw", 0.0)) - self.metadata["origin_yaw"]
+            except (KeyError, TypeError, ValueError):
+                continue
+            center = QPointF(x, y)
+            heading = QPointF(x + 18.0 * math.cos(yaw), y - 18.0 * math.sin(yaw))
+            painter.drawEllipse(center, 5.0, 5.0)
+            painter.drawLine(center, heading)
+            matrix = entity.get("matrix") or []
+            symbols = [self.SYMBOL_TEXT.get(str(item), str(item)[:1]) for item in matrix]
+            label = "".join(symbols[:2]) + ("/" + "".join(symbols[2:4]) if len(symbols) >= 4 else "")
+            painter.drawText(QPointF(x + 8.0, y - 7.0), f"{entity.get('id', '?')} {label}")
+        painter.setPen(QColor("#f2f2f2"))
+        state = str(self.entity_map.get("state", "waiting"))
+        count = len(self.entity_map.get("entities", []))
+        painter.drawText(draw_rect.adjusted(8, 6, -8, -6), Qt.AlignLeft | Qt.AlignTop,
+                         f"{self.metadata['frame_id']} | {state} | entities {count}")
+
+
 class TeleopWindow(QMainWindow):
     MOVEMENT_KEYS = {Qt.Key_W, Qt.Key_A, Qt.Key_S, Qt.Key_D, Qt.Key_Q, Qt.Key_E}
     FORK_KEYS = {Qt.Key_Up, Qt.Key_Down}
@@ -639,6 +774,7 @@ class TeleopWindow(QMainWindow):
         self.args = args
         self.pressed = set()
         self.last_displayed_sequence = (-1, -1, -1)
+        self.last_map_sequence = (-1, -1)
         self.writer = None
         self.record_path = None
         self.telemetry_session = None
@@ -802,6 +938,7 @@ class TeleopWindow(QMainWindow):
         """)
 
         self.video = VideoLabel("Waiting for vehicle camera…", 560, 420)
+        self.entity_map_view = EntityMapView()
         self.status = QLabel("READY")
         self.status.setObjectName("status")
         self.battery_label = QLabel("배터리: 수신 대기 | 충전 상태 판정 중")
@@ -1103,7 +1240,8 @@ class TeleopWindow(QMainWindow):
 
         vehicle_column = QVBoxLayout()
         vehicle_column.addWidget(self.video, 1)
-        vehicle_panel = QGroupBox("차량 카메라")
+        vehicle_column.addWidget(self.entity_map_view)
+        vehicle_panel = QGroupBox("차량 카메라 / 태그 엔티티 지도")
         vehicle_panel.setLayout(vehicle_column)
 
         layout = QVBoxLayout()
@@ -4529,7 +4667,22 @@ class TeleopWindow(QMainWindow):
         self.update_battery_status()
         self.update_rotation_estimate()
         self.update_mapping_label()
+        self.update_entity_map()
         self.update_frame()
+
+    def update_entity_map(self):
+        sequences = (
+            getattr(self.node, "map_sequence", 0),
+            getattr(self.node, "entity_map_sequence", 0),
+        )
+        if sequences == self.last_map_sequence:
+            return
+        self.last_map_sequence = sequences
+        self.entity_map_view.set_data(
+            getattr(self.node, "map_image", None),
+            getattr(self.node, "map_metadata", None),
+            getattr(self.node, "entity_map", None),
+        )
 
     def update_frame(self):
         sequences = (
@@ -4916,6 +5069,8 @@ def main():
     parser.add_argument("--arrival-topic", default="")
     parser.add_argument("--auto-dock-stop-topic", default="")
     parser.add_argument("--auto-dock-status-topic", default="")
+    parser.add_argument("--map-topic", default="/map")
+    parser.add_argument("--entity-map-topic", default="")
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--linear-speed", type=float, default=0.05)
     parser.add_argument("--angular-speed", type=float, default=0.35)
@@ -4964,6 +5119,8 @@ def main():
         args.auto_dock_stop_topic = f"{robot_namespace}/auto_dock/stop"
     if not args.auto_dock_status_topic:
         args.auto_dock_status_topic = f"{robot_namespace}/auto_dock/status"
+    if not args.entity_map_topic:
+        args.entity_map_topic = f"{robot_namespace}/tag_entity_map"
     if args.secondary_image_topic and (args.secondary_video_url or args.webcam_1_video_url):
         parser.error("use only one of --secondary-image-topic and --secondary-video-url")
     if args.secondary_video_url and args.webcam_1_video_url:
