@@ -967,6 +967,19 @@ class YoloSymbolSeg(Node):
             )
             entity_track = self.remember_complete_entity(candidate, pnp_pose)
             entity_id = None if entity_track is None else entity_track["id"]
+            if entity_track is not None and not any(
+                item["entity_id"] == entity_id for item in entity_observations
+            ):
+                entity_observations.append({
+                    "entity_id": entity_id,
+                    "matrix": list(entity_track["matrix"]),
+                    "pnp": pnp_pose,
+                    "odom_pose": {
+                        "x": entity_track["world_x"],
+                        "y": entity_track["world_y"],
+                        "yaw": entity_track["world_yaw"],
+                    },
+                })
             cv2.rectangle(annotated, (px1, py1), (px2, py2), (0, 255, 255), 3)
             for point in candidate["tag_centers"]:
                 cv2.circle(annotated, (round(point[0]), round(point[1])), 4, (0, 255, 255), -1)
