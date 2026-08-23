@@ -681,7 +681,7 @@ class VideoLabel(QLabel):
 
 
 class EntityMapView(QWidget):
-    """Low-cost OccupancyGrid view with persistent pallet-face markers."""
+    """Low-cost map view showing one best-visible face per grouped pallet."""
 
     SYMBOL_TEXT = {
         "star": "★", "diamond": "◆", "spade": "♠",
@@ -758,7 +758,7 @@ class EntityMapView(QWidget):
         state = str(self.entity_map.get("state", "waiting"))
         count = len(self.entity_map.get("entities", []))
         painter.drawText(draw_rect.adjusted(8, 6, -8, -6), Qt.AlignLeft | Qt.AlignTop,
-                         f"{self.metadata['frame_id']} | {state} | entities {count}")
+                         f"{self.metadata['frame_id']} | {state} | pallets {count}")
 
 
 class TeleopWindow(QMainWindow):

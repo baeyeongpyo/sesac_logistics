@@ -491,7 +491,7 @@ class YoloSymbolSeg(Node):
                     front.append(float(value))
         self.log_telemetry("scan", {"front_min_m": min(front) if front else None})
 
-    def remember_complete_entity(self, entity, pnp):
+    def remember_complete_entity(self, entity, pnp, depth_yaw=None):
         """Add/update a short-lived target map entry from a full 2x2 detection."""
         if pnp is None or pnp.get("forward_distance_cm") is None:
             return None
@@ -504,7 +504,12 @@ class YoloSymbolSeg(Node):
         left = -float(pnp.get("lateral_ratio", 0.0)) * forward
         world_x = position[0] + math.cos(yaw) * forward - math.sin(yaw) * left
         world_y = position[1] + math.sin(yaw) * forward + math.cos(yaw) * left
-        face_yaw = yaw - math.radians(float(pnp.get("yaw_deg", 0.0)))
+        relative_face_yaw = (
+            float(depth_yaw["yaw_deg"])
+            if isinstance(depth_yaw, dict) and depth_yaw.get("yaw_deg") is not None
+            else float(pnp.get("yaw_deg", 0.0))
+        )
+        face_yaw = yaw - math.radians(relative_face_yaw)
         world_yaw = math.atan2(math.sin(face_yaw), math.cos(face_yaw))
         matrix = tuple(item["class"] for item in entity["ordered_tags"])
         now = time.monotonic()
@@ -536,6 +541,20 @@ class YoloSymbolSeg(Node):
             self.next_entity_track_id += 1
             self.entity_tracks.append(track)
         return track
+
+    @staticmethod
+    def face_visibility_score(entity, pnp, depth_yaw):
+        """Rank simultaneously visible faces by size, frontal angle, and PnP fit."""
+        x1, y1, x2, y2 = entity["pallet"]["box"]
+        area = max(float(x2 - x1), 1.0) * max(float(y2 - y1), 1.0)
+        angle = (
+            float(depth_yaw["yaw_deg"])
+            if isinstance(depth_yaw, dict) and depth_yaw.get("yaw_deg") is not None
+            else float(pnp.get("yaw_deg", 0.0))
+        )
+        frontal = max(0.10, math.cos(math.radians(min(abs(angle), 89.0))))
+        reprojection = max(float(pnp.get("reprojection_error_px", 0.0)), 0.0)
+        return area * frontal / (1.0 + reprojection / 5.0)
 
     def match_partial_entity(self, detections):
         """Match only the upper target pair against the local odom-based map."""
@@ -901,13 +920,23 @@ class YoloSymbolSeg(Node):
         entity_observations = []
         for entity in map_entities:
             entity_pnp = self.estimate_target_pose(entity)
-            track = self.remember_complete_entity(entity, entity_pnp)
+            entity_depth_yaw = self.depth_yaw_from_pair(
+                entity["ordered_tags"][0], entity["ordered_tags"][1], source_stamp_ns
+            )
+            track = self.remember_complete_entity(
+                entity, entity_pnp, entity_depth_yaw
+            )
             if track is None:
                 continue
             entity_observations.append({
                 "entity_id": track["id"],
                 "matrix": list(track["matrix"]),
                 "pnp": entity_pnp,
+                "depth_yaw": entity_depth_yaw,
+                "angle_source": "depth" if entity_depth_yaw is not None else "pnp",
+                "visibility_score": self.face_visibility_score(
+                    entity, entity_pnp, entity_depth_yaw
+                ),
                 "odom_pose": {
                     "x": track["world_x"],
                     "y": track["world_y"],
@@ -965,7 +994,9 @@ class YoloSymbolSeg(Node):
             depth_yaw = self.depth_yaw_from_pair(
                 candidate["ordered_tags"][0], candidate["ordered_tags"][1], source_stamp_ns
             )
-            entity_track = self.remember_complete_entity(candidate, pnp_pose)
+            entity_track = self.remember_complete_entity(
+                candidate, pnp_pose, depth_yaw
+            )
             entity_id = None if entity_track is None else entity_track["id"]
             if entity_track is not None and not any(
                 item["entity_id"] == entity_id for item in entity_observations
@@ -974,6 +1005,11 @@ class YoloSymbolSeg(Node):
                     "entity_id": entity_id,
                     "matrix": list(entity_track["matrix"]),
                     "pnp": pnp_pose,
+                    "depth_yaw": depth_yaw,
+                    "angle_source": "depth" if depth_yaw is not None else "pnp",
+                    "visibility_score": self.face_visibility_score(
+                        candidate, pnp_pose, depth_yaw
+                    ),
                     "odom_pose": {
                         "x": entity_track["world_x"],
                         "y": entity_track["world_y"],
