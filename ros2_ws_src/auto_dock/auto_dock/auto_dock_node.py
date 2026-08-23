@@ -16,7 +16,9 @@ from pathlib import Path
 import rclpy
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Empty, String
 
@@ -105,7 +107,10 @@ class AutoDockNode(Node):
         self.fork_pub = self.create_publisher(
             String, str(self.get_parameter("fork_command_topic").value), 10
         )
-        self.status_pub = self.create_publisher(String, self.status_topic, 10)
+        status_qos = QoSProfile(depth=1)
+        status_qos.reliability = ReliabilityPolicy.RELIABLE
+        status_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.status_pub = self.create_publisher(String, self.status_topic, status_qos)
         self.create_subscription(String, self.trigger_topic, self.on_trigger, 10)
         self.create_subscription(Empty, self.stop_topic, self.on_stop, 10)
         self.create_subscription(String, self.detection_topic, self.on_detection, 10)
@@ -434,7 +439,7 @@ def main(args=None):
     node = AutoDockNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         try:

@@ -15,6 +15,18 @@ import time
 import urllib.request
 from pathlib import Path
 
+# DDS domain must be selected before importing rclpy.  Vehicle 1/2 use the
+# established domains 215/216 unless the operator explicitly overrides it.
+_bootstrap_parser = argparse.ArgumentParser(add_help=False)
+_bootstrap_parser.add_argument("--vehicle", type=int, choices=(1, 2))
+_bootstrap_parser.add_argument("--ros-domain-id", type=int, default=None)
+_bootstrap_args, _ = _bootstrap_parser.parse_known_args()
+_bootstrap_domain = _bootstrap_args.ros_domain_id
+if _bootstrap_domain is None and _bootstrap_args.vehicle in (1, 2):
+    _bootstrap_domain = 214 + _bootstrap_args.vehicle
+if _bootstrap_domain is not None:
+    os.environ["ROS_DOMAIN_ID"] = str(_bootstrap_domain)
+
 # The vehicle container defaults to the POSIX locale, which makes Qt render
 # Korean UI text and notes incorrectly even though metadata is written as UTF-8.
 for locale_variable in ("LANG", "LC_ALL"):
@@ -40,6 +52,8 @@ if not os.environ.get("VEHICLE_GUI_ROS_READY"):
             setup_commands.append(f"source {shlex.quote(str(workspace_setup))}")
         environment = os.environ.copy()
         environment["VEHICLE_GUI_ROS_READY"] = "1"
+        if _bootstrap_domain is not None:
+            environment["ROS_DOMAIN_ID"] = str(_bootstrap_domain)
         # Conda's Python and libstdc++ are incompatible with the system ROS 2
         # extension modules.  Prefer the OS Python whenever the GUI is started
         # from an activated Conda shell.
@@ -70,10 +84,10 @@ from python_qt_binding.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 from rclpy.node import Node
-from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from ros_robot_controller_msgs.msg import MotorsState
 from sensor_msgs.msg import Image, LaserScan
-from std_msgs.msg import String, UInt16
+from std_msgs.msg import Empty, String, UInt16
 
 
 class TeleopNode(Node):
@@ -148,6 +162,20 @@ class TeleopNode(Node):
         )
         self.cmd_pub = self.create_publisher(Twist, args.cmd_vel_topic, 10)
         self.fork_pub = self.create_publisher(String, args.fork_command_topic, 10)
+        self.auto_dock_status = {"state": "unknown", "reason": "no_status"}
+        self.auto_dock_status_monotonic = 0.0
+        self.auto_dock_start_pub = self.create_publisher(
+            String, args.auto_dock_trigger_topic, 10
+        )
+        self.auto_dock_stop_pub = self.create_publisher(
+            Empty, args.auto_dock_stop_topic, 10
+        )
+        status_qos = QoSProfile(depth=1)
+        status_qos.reliability = ReliabilityPolicy.RELIABLE
+        status_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.auto_dock_status_sub = self.create_subscription(
+            String, args.auto_dock_status_topic, self.on_auto_dock_status, status_qos
+        )
 
     def on_detection(self, msg):
         try:
@@ -155,6 +183,26 @@ class TeleopNode(Node):
             self.latest_detection_monotonic = time.monotonic()
         except (TypeError, ValueError):
             self.get_logger().warning("invalid detection JSON received")
+
+    def on_auto_dock_status(self, msg):
+        try:
+            status = json.loads(msg.data)
+            if not isinstance(status, dict):
+                raise ValueError("status is not an object")
+            self.auto_dock_status = status
+            self.auto_dock_status_monotonic = time.monotonic()
+        except (TypeError, ValueError, json.JSONDecodeError):
+            self.get_logger().warning("invalid auto_dock status JSON received")
+
+    def start_auto_dock(self, left, right):
+        """Ask the independent 1.2 auto_dock node to run the full cycle."""
+        self.auto_dock_start_pub.publish(
+            String(data=f"arrived {left} {right}")
+        )
+
+    def stop_auto_dock(self):
+        """Latch auto_dock idle through its stop input, not a one-shot cmd_vel."""
+        self.auto_dock_stop_pub.publish(Empty())
 
     def on_image(self, msg):
         self.frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
@@ -960,24 +1008,17 @@ class TeleopWindow(QMainWindow):
         self.approach_mode.addItem("ARC", "arc")
         self.approach_mode.addItem("\ud6a1이동 → 회전", "visual_alternating")
         self.approach_mode.setCurrentIndex(1)
-        self.arc_plan_button = QPushButton("주행 계산")
-        self.arc_plan_button.clicked.connect(self.plan_arc_approach)
-        self.arc_execute_button = QPushButton("주행 실행")
-        self.arc_execute_button.clicked.connect(self.start_arc_approach)
+        self.arc_plan_button = QPushButton("1.1 내부 계산 (사용 안 함)")
+        self.arc_plan_button.setEnabled(False)
+        self.arc_execute_button = QPushButton("1.1 내부 실행 (사용 안 함)")
         self.arc_execute_button.setEnabled(False)
         self.run_mode = QComboBox()
-        self.run_mode.addItem("원형 탐색 → 자동주행", "search")
-        self.run_mode.addItem("무제한 자동주행 → 자동 삽입", "auto")
-        self.run_mode.addItem("단일 정렬 (삽입 전 정지)", "single")
-        self.run_mode.addItem("3회 정렬 (삽입 전 정지)", "cycle3")
-        self.run_mode.setCurrentIndex(self.run_mode.findData("search"))
-        self.run_mode_button = QPushButton("선택 모드 실행")
+        self.run_mode.addItem("1.2 탐색 → 정렬 → 삽입 → 리프트", "auto_dock_1_2")
+        self.run_mode_button = QPushButton("Auto Dock 시작")
         self.run_mode_button.clicked.connect(self.run_selected_mode)
-        self.arc_cancel_button = QPushButton("취소")
-        self.arc_cancel_button.clicked.connect(
-            lambda: self.cancel_arc_approach("사용자 취소")
-        )
-        self.arc_label = QLabel("대기: 목표 검출 후 경로 계산")
+        self.arc_cancel_button = QPushButton("Auto Dock 정지")
+        self.arc_cancel_button.clicked.connect(self.stop_auto_dock_client)
+        self.arc_label = QLabel("Auto Dock 1.2 상태: 수신 대기")
         self.arc_forward_error = QDoubleSpinBox()
         self.arc_forward_error.setRange(-200.0, 200.0)
         self.arc_forward_error.setDecimals(1)
@@ -992,25 +1033,10 @@ class TeleopWindow(QMainWindow):
             f"샘플 {self.arc_result_sample_count}개 | ARC 완료 후 실제 오차 입력"
         )
         arc_layout = QGridLayout()
-        arc_layout.addWidget(QLabel("정렬 완료 거리"), 0, 0)
-        arc_layout.addWidget(self.arc_standoff, 0, 1)
-        arc_layout.addWidget(self.arc_plan_button, 0, 2)
-        arc_layout.addWidget(self.arc_execute_button, 0, 3)
+        arc_layout.addWidget(self.run_mode, 0, 0, 1, 3)
+        arc_layout.addWidget(self.run_mode_button, 0, 3)
         arc_layout.addWidget(self.arc_cancel_button, 0, 4)
-        arc_layout.addWidget(QLabel("포크 추가 삽입"), 1, 0)
-        arc_layout.addWidget(self.arc_insertion_distance, 1, 1)
-        arc_layout.addWidget(QLabel("주행 방식"), 1, 2)
-        arc_layout.addWidget(self.approach_mode, 1, 3, 1, 2)
-        arc_layout.addWidget(QLabel("자동 모드"), 2, 0)
-        arc_layout.addWidget(self.run_mode, 2, 1, 1, 3)
-        arc_layout.addWidget(self.run_mode_button, 2, 4)
-        arc_layout.addWidget(self.arc_label, 3, 0, 1, 5)
-        arc_layout.addWidget(QLabel("전후차 (+덜 감)"), 4, 0)
-        arc_layout.addWidget(self.arc_forward_error, 4, 1)
-        arc_layout.addWidget(QLabel("좌우차 (+왼쪽)"), 4, 2)
-        arc_layout.addWidget(self.arc_lateral_error, 4, 3)
-        arc_layout.addWidget(self.arc_sample_save, 4, 4)
-        arc_layout.addWidget(self.arc_sample_label, 5, 0, 1, 5)
+        arc_layout.addWidget(self.arc_label, 1, 0, 1, 5)
 
         self.memo = QPlainTextEdit()
         self.memo.setPlaceholderText("캡처 메모 (이미지와 별도 JSON으로 저장)")
@@ -1073,7 +1099,7 @@ class TeleopWindow(QMainWindow):
         mapping_panel = QGroupBox("중앙 목표 매핑")
         mapping_panel.setLayout(mapping_layout)
         control_layout.addWidget(mapping_panel)
-        arc_panel = QGroupBox("ARC 정면 진입")
+        arc_panel = QGroupBox("Auto Dock 1.2 클라이언트")
         arc_panel.setLayout(arc_layout)
         control_layout.addWidget(arc_panel)
         camera_calibration_panel = QGroupBox("카메라 2점 Calibration")
@@ -2485,6 +2511,8 @@ class TeleopWindow(QMainWindow):
             self.record.toggle()
             return
         if event.key() in self.MOVEMENT_KEYS:
+            if not event.isAutoRepeat() and not self.args.http_viewer_only:
+                self.node.stop_auto_dock()
             self.pressed.add(event.key())
             event.accept()
             return
@@ -2524,6 +2552,8 @@ class TeleopWindow(QMainWindow):
                 self.record.toggle()
                 return True
             if event.key() in self.MOVEMENT_KEYS:
+                if not event.isAutoRepeat() and not self.args.http_viewer_only:
+                    self.node.stop_auto_dock()
                 self.pressed.add(event.key())
                 return True
             if event.key() in self.FORK_KEYS:
@@ -3369,22 +3399,23 @@ class TeleopWindow(QMainWindow):
                 self.run_mode.setCurrentIndex(index)
 
     def run_selected_mode(self):
-        """Start the automatic mode selected in the ARC panel."""
-        if (
-            self.arc_active
-            or self.target_search_active
-            or self.arc_cycle_replan_due_at is not None
-        ):
-            self.arc_label.setText("주행 또는 탐색 중에는 모드 변경 불가")
+        """Request the independent ROS-only 1.2 controller to start."""
+        if self.args.http_viewer_only:
+            self.arc_label.setText("HTTP 화면 전용 모드에서는 Auto Dock 제어 불가")
             return
-        mode = self.run_mode.currentData()
-        self.set_selected_run_mode(mode)
-        if mode == "search":
-            self.start_target_search()
+        left = self.target_left.currentData()
+        right = self.target_right.currentData()
+        self.node.start_auto_dock(left, right)
+        self.arc_label.setText(f"Auto Dock 시작 요청: {left} / {right}")
+
+    def stop_auto_dock_client(self):
+        """Stop 1.2 by changing its state to idle through the stop topic."""
+        self.cancel_arc_approach("1.1 내부 제어 정리")
+        if self.args.http_viewer_only:
+            self.arc_label.setText("HTTP 화면 전용 모드에서는 Auto Dock 제어 불가")
             return
-        if not self.plan_arc_approach():
-            return
-        self.start_arc_approach()
+        self.node.stop_auto_dock()
+        self.arc_label.setText("Auto Dock 정지 요청 전송")
 
     def start_target_search(self, auto_lift_after_dock=False):
         self.cancel_arc_approach("원형 목표 탐색 시작")
@@ -4368,6 +4399,8 @@ class TeleopWindow(QMainWindow):
         self.pressed.clear()
         self.node.stop(repeats=5)
         self.node.publish_fork("STOP")
+        if not self.args.http_viewer_only:
+            self.node.stop_auto_dock()
         self.status.setText("EMERGENCY STOP")
 
     def command(self):
@@ -4501,6 +4534,15 @@ class TeleopWindow(QMainWindow):
         state += (f" | {mode} | cmd x={linear_x if active else 0.0:+.2f}, "
                   f"y={linear_y if active else 0.0:+.2f}, z={angular_z if active else 0.0:+.2f}")
         self.status.setText(state)
+        if not self.args.http_viewer_only:
+            auto_status = self.node.auto_dock_status
+            if self.node.auto_dock_status_monotonic <= 0.0:
+                self.arc_label.setText("Auto Dock 1.2 상태: 노드 응답 없음")
+            else:
+                self.arc_label.setText(
+                    f"Auto Dock 1.2: {auto_status.get('state', '?')} | "
+                    f"{auto_status.get('reason', '?')}"
+                )
         self.update_battery_status()
         self.update_rotation_estimate()
         self.update_mapping_label()
@@ -4860,6 +4902,9 @@ def main():
     parser.add_argument("--detection-topic", default="")
     parser.add_argument("--cmd-vel-topic", default="")
     parser.add_argument("--fork-command-topic", default="")
+    parser.add_argument("--auto-dock-trigger-topic", default="")
+    parser.add_argument("--auto-dock-stop-topic", default="")
+    parser.add_argument("--auto-dock-status-topic", default="")
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--linear-speed", type=float, default=0.05)
     parser.add_argument("--angular-speed", type=float, default=0.35)
@@ -4891,6 +4936,12 @@ def main():
         args.cmd_vel_topic = f"{robot_namespace}/controller/cmd_vel"
     if not args.fork_command_topic:
         args.fork_command_topic = "/fork/command"
+    if not args.auto_dock_trigger_topic:
+        args.auto_dock_trigger_topic = f"{robot_namespace}/nav2/arrival"
+    if not args.auto_dock_stop_topic:
+        args.auto_dock_stop_topic = f"{robot_namespace}/auto_dock/stop"
+    if not args.auto_dock_status_topic:
+        args.auto_dock_status_topic = f"{robot_namespace}/auto_dock/status"
     if args.secondary_image_topic and (args.secondary_video_url or args.webcam_1_video_url):
         parser.error("use only one of --secondary-image-topic and --secondary-video-url")
     if args.secondary_video_url and args.webcam_1_video_url:
@@ -4929,9 +4980,10 @@ def main():
         except (OSError, TypeError, ValueError):
             parser.error(f"invalid pose config: {pose_config_path}")
 
-    os.environ["ROS_DOMAIN_ID"] = str(
-        args.vehicle if args.ros_domain_id is None else args.ros_domain_id
+    args.ros_domain_id = (
+        214 + args.vehicle if args.ros_domain_id is None else args.ros_domain_id
     )
+    os.environ["ROS_DOMAIN_ID"] = str(args.ros_domain_id)
     os.environ["RMW_IMPLEMENTATION"] = "rmw_fastrtps_cpp"
     # Vehicle bringup currently uses normal Fast DDS discovery. Inheriting an
     # old/dead discovery-server setting isolates this GUI from every topic.

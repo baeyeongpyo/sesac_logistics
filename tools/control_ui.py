@@ -16,8 +16,10 @@ from types import SimpleNamespace
 # rclpy reads ROS_DOMAIN_ID when it initializes, so handle this option before
 # importing any ROS modules (and before the bootstrap re-exec below).
 _bootstrap_parser = argparse.ArgumentParser(add_help=False)
-_bootstrap_parser.add_argument("--ros-domain-id", type=int, default=215)
+_bootstrap_parser.add_argument("--vehicle", type=int, choices=(1, 2), default=1)
+_bootstrap_parser.add_argument("--ros-domain-id", type=int, default=None)
 _bootstrap_args, _ = _bootstrap_parser.parse_known_args()
+_bootstrap_domain = _bootstrap_args.ros_domain_id or (214 + _bootstrap_args.vehicle)
 
 
 if not os.environ.get("VEHICLE_GUI_ROS_READY"):
@@ -26,7 +28,7 @@ if not os.environ.get("VEHICLE_GUI_ROS_READY"):
     environment = os.environ.copy()
     environment["VEHICLE_GUI_ROS_READY"] = "1"
     environment["QT_QPA_PLATFORM"] = "offscreen"
-    environment["ROS_DOMAIN_ID"] = str(_bootstrap_args.ros_domain_id)
+    environment["ROS_DOMAIN_ID"] = str(_bootstrap_domain)
     os.execve(
         "/bin/bash",
         [
@@ -40,7 +42,7 @@ if not os.environ.get("VEHICLE_GUI_ROS_READY"):
     )
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ["ROS_DOMAIN_ID"] = str(_bootstrap_args.ros_domain_id)
+os.environ["ROS_DOMAIN_ID"] = str(_bootstrap_domain)
 os.environ.setdefault("ROS_LOCALHOST_ONLY", "0")
 os.environ["RMW_IMPLEMENTATION"] = "rmw_fastrtps_cpp"
 os.environ["FASTDDS_BUILTIN_TRANSPORTS"] = "UDPv4"
@@ -68,6 +70,9 @@ def runtime_args(cli):
         battery_topic="/ros_robot_controller/battery",
         detection_topic=f"/robot_{cli.vehicle}/symbol_seg/detections",
         cmd_vel_topic="/controller/cmd_vel", fork_command_topic="/fork/command",
+        auto_dock_trigger_topic=f"/robot_{cli.vehicle}/nav2/arrival",
+        auto_dock_stop_topic=f"/robot_{cli.vehicle}/auto_dock/stop",
+        auto_dock_status_topic=f"/robot_{cli.vehicle}/auto_dock/status",
         output_dir=f"/home/ubuntu/recordings/vehicle{cli.vehicle}", linear_speed=cli.speed,
         angular_speed=cli.angular_speed, camera_pitch_deg=0.0,
         friction_coefficient=1.0, pose_config=cli.pose_config,
@@ -87,17 +92,10 @@ def draw(stdscr, window, movement_name, fork_name):
     detection = window.node.latest_detection or {}
     candidate = detection.get("candidate") or {}
     pnp = candidate.get("pnp") or {}
-    if window.terminal_run_mode == "search":
-        mode_text = "원형 탐색 → 발견 시 무제한 자동"
-    elif window.terminal_run_mode == "auto":
-        mode_text = "무제한 자동 사이클 → 자동 삽입"
-    elif window.arc_cycle_limit == 3:
-        mode_text = "사이클 (최대 3회, 삽입 전 정지)"
-    else:
-        mode_text = "단일 (계산·주행 1회 후 삽입 전 정지)"
+    mode_text = "Auto Dock 1.2 ROS 클라이언트"
     lines = [
         f"control_ui 차량 {window.args.vehicle}  WASD: 전후/횡이동  Q/E: 회전  ↑/↓: 리프트  SPACE: 정지",
-        ".: 주행계산  ENTER: 탐색/주행실행  M: 모드 선택  O: 공통 설정 JSON  Z: 취소",
+        "ENTER: Auto Dock 1.2 시작  O: 공통 설정 JSON  Z/SPACE: Auto Dock 정지",
         f"목표: {window.target_left.currentData()} / {window.target_right.currentData()}",
         f"중심선 보정: {window.centerline_offset_cm:+.1f} cm (+왼쪽/-오른쪽)",
         f"추가 주행보정: 횡이동 {window.lateral_overrun_cm:.1f} cm / "
@@ -153,6 +151,8 @@ def terminal_loop(stdscr, window, app, key_timeout):
             break
         if key in movement_keys:
             qt_key, movement_name = movement_keys[key]
+            if not (window.pressed & window.MOVEMENT_KEYS):
+                window.node.stop_auto_dock()
             window.pressed.difference_update(window.MOVEMENT_KEYS)
             window.pressed.add(qt_key)
             movement_deadline = now + key_timeout
@@ -167,22 +167,13 @@ def terminal_loop(stdscr, window, app, key_timeout):
             movement_deadline = 0.0
             movement_name = ""
             fork_name = "정지"
-        elif key == ord("."):
-            window.pressed.difference_update(window.MOVEMENT_KEYS)
-            movement_name = ""
-            if window.terminal_run_mode != "search":
-                window.cancel_arc_approach("새 주행 계산")
-                window.plan_arc_approach()
         elif key in (10, 13):
             window.pressed.difference_update(window.MOVEMENT_KEYS)
             window.node.stop(repeats=3)
             movement_name = ""
-            if window.terminal_run_mode == "search":
-                window.start_target_search()
-            else:
-                window.start_arc_approach()
+            window.run_selected_mode()
         elif key in (ord("z"), ord("Z")):
-            window.cancel_arc_approach("터미널 사용자 취소")
+            window.stop_auto_dock_client()
             movement_name = ""
         elif key in (ord("o"), ord("O")):
             if window.arc_active or window.target_search_active:
@@ -199,36 +190,6 @@ def terminal_loop(stdscr, window, app, key_timeout):
                 window.arc_label.setText("공통 설정 JSON을 다시 읽음")
             except OSError as exc:
                 window.arc_label.setText(f"설정 편집기 실행 실패: {exc}")
-        elif key in (ord("m"), ord("M")):
-            if (
-                window.arc_active
-                or window.target_search_active
-                or window.arc_cycle_replan_due_at is not None
-            ):
-                window.arc_label.setText("주행 중에는 모드 변경 불가")
-            else:
-                current = window.terminal_run_mode
-                if current == "auto":
-                    window.terminal_run_mode = "single"
-                    window.arc_cycle_limit = 1
-                    window.arc_auto_insert_after_verify = False
-                    mode = "단일"
-                elif current == "single":
-                    window.terminal_run_mode = "cycle3"
-                    window.arc_cycle_limit = 3
-                    window.arc_auto_insert_after_verify = False
-                    mode = "사이클(최대 3회, 삽입 전 정지)"
-                elif current == "cycle3":
-                    window.terminal_run_mode = "search"
-                    window.arc_cycle_limit = 0
-                    window.arc_auto_insert_after_verify = True
-                    mode = "원형 탐색 → 발견 시 무제한 자동"
-                else:
-                    window.terminal_run_mode = "auto"
-                    window.arc_cycle_limit = 0
-                    window.arc_auto_insert_after_verify = True
-                    mode = "무제한 자동 사이클 → 자동 삽입"
-                window.arc_label.setText(f"주행 모드: {mode}")
         if movement_deadline and now >= movement_deadline:
             window.pressed.difference_update(window.MOVEMENT_KEYS)
             window.node.stop(repeats=3)
@@ -244,7 +205,7 @@ def terminal_loop(stdscr, window, app, key_timeout):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--vehicle", type=int, choices=(1, 2), default=1)
-    parser.add_argument("--ros-domain-id", type=int, default=_bootstrap_args.ros_domain_id)
+    parser.add_argument("--ros-domain-id", type=int, default=_bootstrap_domain)
     parser.add_argument("--left", choices=SYMBOLS, default="spade")
     parser.add_argument("--right", choices=SYMBOLS, default="spade")
     parser.add_argument("--speed", type=float, default=0.12)

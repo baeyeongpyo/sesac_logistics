@@ -67,4 +67,18 @@ ros2 launch auto_dock auto_dock.launch.py
 
 ## GUI/UI 상태
 
-기존 `control_ui.py`와 `vehicle_camera_teleop_gui.py`는 보존돼 있지만 아직 1.2 client 구조로 전환되지 않았다. 다음 변경에서는 domain으로 차량을 자동 선택하고, 자체 자동주행 대신 `arrival/stop`을 발행하고 `status/detections`를 표시하는 선택적 디버깅 client로 바꾼다.
+`control_ui.py`와 `vehicle_camera_teleop_gui.py`는 1.2의 선택적 ROS client다. 두 프로그램이 꺼져 있어도 `auto_dock` 상태머신은 독립 실행된다.
+
+```text
+GUI/UI 시작 버튼 또는 Enter
+  -> publish String("arrived LEFT RIGHT") to /robot_N/nav2/arrival
+
+GUI/UI 정지 버튼, Z/Space 또는 수동주행 시작
+  -> publish Empty to /robot_N/auto_dock/stop
+
+/auto_dock 상태 변경
+  -> publish JSON String to /robot_N/auto_dock/status
+  -> GUI/UI에 state와 reason 표시
+```
+
+GUI/UI에서는 1.1 내부 탐색·정렬 실행 기능을 노출하지 않는다. 차량 번호를 고르면 DDS domain도 자동으로 `1 -> 215`, `2 -> 216`으로 정한다. 상태 토픽은 상태가 바뀔 때만 발행하고 `TRANSIENT_LOCAL` QoS로 마지막 상태 하나를 보존하므로, GUI/UI를 나중에 실행해도 현재 상태를 받을 수 있다.
