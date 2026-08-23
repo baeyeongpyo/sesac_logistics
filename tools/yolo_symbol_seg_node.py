@@ -48,6 +48,53 @@ def overlap_depth(first_box, second_box):
     return overlap_area / max(overlap_width, 1), overlap_area
 
 
+def box_overlap_ratio(first_box, second_box):
+    """Intersection area normalized by the smaller box area."""
+    x1 = max(first_box[0], second_box[0])
+    y1 = max(first_box[1], second_box[1])
+    x2 = min(first_box[2], second_box[2])
+    y2 = min(first_box[3], second_box[3])
+    intersection = max(0, x2 - x1) * max(0, y2 - y1)
+    first_area = max(1, first_box[2] - first_box[0]) * max(
+        1, first_box[3] - first_box[1]
+    )
+    second_area = max(1, second_box[2] - second_box[0]) * max(
+        1, second_box[3] - second_box[1]
+    )
+    return intersection / min(first_area, second_area)
+
+
+def assign_frame_pallet_groups(entities, minimum_overlap_ratio=0.02):
+    """Group simultaneously visible pallet faces whose image boxes overlap."""
+    parents = list(range(len(entities)))
+
+    def find(index):
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(first, second):
+        first_root, second_root = find(first), find(second)
+        if first_root != second_root:
+            parents[second_root] = first_root
+
+    for first in range(len(entities)):
+        for second in range(first + 1, len(entities)):
+            if box_overlap_ratio(
+                entities[first]["pallet"]["box"],
+                entities[second]["pallet"]["box"],
+            ) >= minimum_overlap_ratio:
+                union(first, second)
+
+    group_ids = {}
+    for index, entity in enumerate(entities):
+        root = find(index)
+        if root not in group_ids:
+            group_ids[root] = len(group_ids) + 1
+        entity["frame_pallet_group"] = group_ids[root]
+
+
 def ordered_grid(tags):
     by_y = sorted(tags, key=lambda item: detection_center(item)[1])
     top = sorted(by_y[:2], key=lambda item: detection_center(item)[0])
@@ -888,6 +935,7 @@ class YoloSymbolSeg(Node):
             and abs(float(entity.get("top_row_error", 999.0))) <= 0.8
             and abs(float(entity.get("bottom_row_error", 999.0))) <= 0.8
         ]
+        assign_frame_pallet_groups(map_entities)
         entities = pallet_entities(results, self.target_top)
         complete_entities = [
             entity for entity in entities
@@ -937,6 +985,8 @@ class YoloSymbolSeg(Node):
                 "visibility_score": self.face_visibility_score(
                     entity, entity_pnp, entity_depth_yaw
                 ),
+                "frame_pallet_group": entity.get("frame_pallet_group"),
+                "image_pallet_box": list(entity["pallet"]["box"]),
                 "odom_pose": {
                     "x": track["world_x"],
                     "y": track["world_y"],

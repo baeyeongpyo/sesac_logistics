@@ -162,6 +162,7 @@ class TagEntityMapper(Node):
         changed = False
         source_stamp_ns = int(detection.get("source_stamp_ns", 0) or 0)
         observed_unix = time.time()
+        frame_pallets = {}
         for observation in observations:
             matrix = observation.get("matrix") if isinstance(observation, dict) else None
             odom_pose = observation.get("odom_pose") if isinstance(observation, dict) else None
@@ -179,7 +180,8 @@ class TagEntityMapper(Node):
                 )
             except (TypeError, ValueError):
                 visibility_score = 0.0
-            self.merge_observation(
+            frame_group = observation.get("frame_pallet_group")
+            pallet = self.merge_observation(
                 matrix=matrix,
                 pose=map_pose,
                 source_id=observation.get("entity_id"),
@@ -187,7 +189,10 @@ class TagEntityMapper(Node):
                 visibility_score=visibility_score,
                 source_stamp_ns=source_stamp_ns,
                 observed_unix=observed_unix,
+                preferred_pallet_id=frame_pallets.get(frame_group),
             )
+            if frame_group is not None and pallet is not None:
+                frame_pallets[frame_group] = pallet["id"]
             changed = True
         if changed:
             self.last_state = "mapping"
@@ -196,7 +201,7 @@ class TagEntityMapper(Node):
 
     def merge_observation(
         self, matrix, pose, source_id, angle_source="pnp", visibility_score=0.0,
-        source_stamp_ns=0, observed_unix=None,
+        source_stamp_ns=0, observed_unix=None, preferred_pallet_id=None,
     ):
         center = pallet_center_from_face(pose, self.face_to_center_m)
         candidates = []
@@ -210,6 +215,7 @@ class TagEntityMapper(Node):
             except (KeyError, TypeError, ValueError):
                 continue
             face_matches = []
+            all_face_distances = []
             for face in pallet.get("faces") or []:
                 face_pose = face.get("pose") or {}
                 try:
@@ -220,6 +226,7 @@ class TagEntityMapper(Node):
                     angle_error = right_angle_error(face_pose["yaw"], pose["yaw"])
                 except (KeyError, TypeError, ValueError):
                     continue
+                all_face_distances.append(face_distance)
                 depth_pair = (
                     angle_source == "depth" and face.get("angle_source") == "depth"
                 )
@@ -229,6 +236,22 @@ class TagEntityMapper(Node):
                 )
                 if angle_matches or pnp_duplicate:
                     face_matches.append((face_distance, angle_error))
+            nearest_face_distance = min(all_face_distances, default=math.inf)
+            preferred_spatial_match = (
+                pallet.get("id") == preferred_pallet_id
+                and (
+                    center_distance <= self.pallet_merge_distance_m
+                    or nearest_face_distance <= self.face_group_distance_m
+                )
+            )
+            if preferred_spatial_match:
+                candidates.append((
+                    0,
+                    min(center_distance, nearest_face_distance),
+                    0.0,
+                    pallet,
+                ))
+                continue
             if not face_matches:
                 continue
             face_distance, angle_error = min(face_matches)
@@ -237,11 +260,16 @@ class TagEntityMapper(Node):
                 or face_distance <= self.face_group_distance_m
             )
             if spatial_matches:
-                candidates.append((min(center_distance, face_distance), angle_error, pallet))
+                candidates.append((
+                    1,
+                    min(center_distance, face_distance),
+                    angle_error,
+                    pallet,
+                ))
 
         now = time.time() if observed_unix is None else float(observed_unix)
         if candidates:
-            pallet = min(candidates, key=lambda item: (item[0], item[1]))[2]
+            pallet = min(candidates, key=lambda item: (item[0], item[1], item[2]))[3]
             current = pallet["center"]
             alpha = 0.20
             current["x"] = (1.0 - alpha) * float(current["x"]) + alpha * center["x"]
@@ -342,6 +370,7 @@ class TagEntityMapper(Node):
         ):
             pallet["latest_stamp_ns"] = source_stamp_ns
             pallet["representative_face_id"] = face["id"]
+        return pallet
 
     def visible_entities(self):
         entities = []
