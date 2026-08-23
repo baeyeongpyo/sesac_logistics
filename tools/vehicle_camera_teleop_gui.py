@@ -221,7 +221,7 @@ class DevControlClientNode(Node):
             1.0 - 2.0 * (orientation.y * orientation.y + orientation.z * orientation.z),
         )
         self.map_image = QImage(
-            grayscale.data, width, height, width, QImage.Format_Grayscale8
+            grayscale.tobytes(), width, height, width, QImage.Format_Grayscale8
         ).copy()
         self.map_metadata = {
             "width": width,
