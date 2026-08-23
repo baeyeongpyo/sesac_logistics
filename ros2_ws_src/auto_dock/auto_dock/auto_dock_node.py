@@ -361,7 +361,7 @@ class AutoDockNode(Node):
         candidate, _pnp = self.selected_candidate()
         now = time.monotonic()
         if candidate is not None and self.candidate_stop_due_at is None:
-            delay = self.number("candidate_stop_delay_sec", 1.0, 0.0, 5.0)
+            delay = self.number("candidate_stop_delay_sec", 0.5, 0.0, 5.0)
             self.candidate_stop_due_at = now + delay
             self.publish_status(
                 "running", "candidate_stop_scheduled", delay_sec=delay
