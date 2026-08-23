@@ -59,6 +59,8 @@ class AutoDockNode(Node):
         self.declare_parameter("entry_complete_topic", "")
         self.declare_parameter("lift_up_complete_topic", "")
         self.declare_parameter("drive_ready_topic", "")
+        self.declare_parameter("target_found_topic", "")
+        self.declare_parameter("nav_approach_result_topic", "")
         self.declare_parameter("detection_topic", "")
         self.declare_parameter("scan_topic", "/scan_raw")
         self.declare_parameter("odom_topic", "/odom_raw")
@@ -99,6 +101,12 @@ class AutoDockNode(Node):
         self.drive_ready_topic = self.topic_or_default(
             "drive_ready_topic", f"{robot}/auto_dock/drive_ready"
         )
+        self.target_found_topic = self.topic_or_default(
+            "target_found_topic", f"{robot}/auto_dock/target_found"
+        )
+        self.nav_approach_result_topic = self.topic_or_default(
+            "nav_approach_result_topic", f"{robot}/nav2/approach_result"
+        )
         self.detection_topic = self.topic_or_default(
             "detection_topic", f"{robot}/symbol_seg/detections"
         )
@@ -125,6 +133,7 @@ class AutoDockNode(Node):
         self.insert_start_position = None
         self.post_lift_reverse_start = None
         self.turn_target_yaw = None
+        self.nav_approach_completed = False
         self.backoff_until = None
         self.backoff_command = (0.0, 0.0)
         self.was_docking_before_interrupt = False
@@ -145,10 +154,16 @@ class AutoDockNode(Node):
         self.drive_ready_pub = self.create_publisher(
             Empty, self.drive_ready_topic, 10
         )
+        self.target_found_pub = self.create_publisher(
+            String, self.target_found_topic, 10
+        )
         self.create_subscription(String, self.trigger_topic, self.on_trigger, 10)
         self.create_subscription(Empty, self.stop_topic, self.on_stop, 10)
         self.create_subscription(
             Empty, self.lift_up_complete_topic, self.on_lift_up_complete, 10
+        )
+        self.create_subscription(
+            String, self.nav_approach_result_topic, self.on_nav_approach_result, 10
         )
         self.create_subscription(String, self.detection_topic, self.on_detection, 10)
         self.create_subscription(
@@ -251,6 +266,7 @@ class AutoDockNode(Node):
         self.insert_start_position = None
         self.post_lift_reverse_start = None
         self.turn_target_yaw = None
+        self.nav_approach_completed = False
         self.candidate_stop_due_at = None
         self.send_yolo_target()
         self.state = "search"
@@ -277,6 +293,21 @@ class AutoDockNode(Node):
         self.state = "reversing_after_lift"
         self.publish_status("running", "lift_up_complete_reversing")
 
+    def on_nav_approach_result(self, msg):
+        if self.state != "waiting_nav_approach":
+            return
+        try:
+            result = json.loads(msg.data)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            self.cancel("invalid_nav_approach_result")
+            return
+        if result.get("status") != "succeeded":
+            self.cancel(f"nav_approach_{result.get('status', 'failed')}")
+            return
+        self.nav_approach_completed = True
+        self.state = "confirm"
+        self.publish_status("running", "nav_approach_complete_confirming")
+
     def cancel(self, reason):
         self.state = "idle"
         self.reason = reason
@@ -284,6 +315,7 @@ class AutoDockNode(Node):
         self.candidate_stop_due_at = None
         self.post_lift_reverse_start = None
         self.turn_target_yaw = None
+        self.nav_approach_completed = False
         self.stop_drive(10)
         self.fork_pub.publish(String(data="STOP"))
         self.publish_status("cancelled", reason)
@@ -393,7 +425,9 @@ class AutoDockNode(Node):
         return c * dx + s * dy, -s * dx + c * dy, normalize_angle(self.target_world["yaw"] - self.odom_yaw)
 
     def interrupt_for_lidar(self):
-        if self.state in {"idle", "waiting_lift_up", "safety_backoff"}:
+        if self.state in {
+            "idle", "waiting_lift_up", "waiting_nav_approach", "safety_backoff"
+        }:
             return False
         legacy_clearance = self.number("lidar_stop_distance_m", 0.35, 0.05, 2.0)
         violations = []
@@ -447,6 +481,8 @@ class AutoDockNode(Node):
             self.tick_inserting()
         elif self.state == "waiting_lift_up":
             self.stop_drive()
+        elif self.state == "waiting_nav_approach":
+            return
         elif self.state == "reversing_after_lift":
             self.tick_reversing_after_lift()
         elif self.state == "turning_for_drive":
@@ -489,6 +525,23 @@ class AutoDockNode(Node):
         if not self.update_world_target(candidate, pnp):
             self.cancel("odom_missing")
             return
+        if not self.nav_approach_completed:
+            self.stop_drive(5)
+            self.target_found_pub.publish(String(data=json.dumps({
+                "source_stamp_ns": int(
+                    (self.latest_detection or {}).get("source_stamp_ns", 0) or 0
+                ),
+                "frame_id": "odom",
+                "target": dict(self.target_world),
+                "matrix": list(candidate.get("matrix") or []),
+                "approach_standoff_m": self.number(
+                    "nav_approach_standoff_m", 0.45, 0.20, 2.0
+                ),
+            }, ensure_ascii=False)))
+            self.state = "waiting_nav_approach"
+            self.publish_status("waiting", "target_found_waiting_nav2")
+            return
+        self.nav_approach_completed = False
         self.state = "docking"
         self.publish_status("running", "virtual_target_docking")
 

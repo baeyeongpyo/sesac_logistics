@@ -25,3 +25,10 @@
 - Auto Dock receives lift completion, reverses clear of the pallet location, then turns using odometry and publishes `std_msgs/msg/Empty` on `/robot_2/auto_dock/drive_ready` when the turn is within tolerance.
 - Runtime config keys are `post_lift_reverse_distance_cm` (default `30.0`), `post_lift_reverse_speed_m_s` (default `0.05`), `post_lift_turn_deg` (default `180.0`), `post_lift_turn_speed_rad_s` (default `0.30`), and `post_lift_turn_tolerance_deg` (default `3.0`).
 - A rear LiDAR violation pauses the reverse; an all-direction violation pauses the subsequent turn. Neither case issues a translational safety backoff.
+
+## Nav2 approach handoff
+
+- After a stable target measurement, Auto Dock publishes the target pose as JSON on `/robot_2/auto_dock/target_found` and stops its own drive output.
+- The separate `/target_nav_bridge` converts the odom target into `map`, offsets `nav_approach_standoff_m` (default `0.45 m`) in front of the tagged face, and sends that pose to Nav2's `/navigate_to_pose` action.
+- The bridge publishes JSON on `/robot_2/nav2/approach_result`; only a `succeeded` result lets Auto Dock resume camera-based final alignment and insertion.
+- This bridge is part of `auto_dock.launch.py`, not the vehicle bringup.

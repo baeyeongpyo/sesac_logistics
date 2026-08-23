@@ -21,6 +21,7 @@ setup(
         "console_scripts": [
             "auto_dock_node = auto_dock.auto_dock_node:main",
             "tag_entity_mapper = auto_dock.tag_entity_mapper:main",
+            "target_nav_bridge = auto_dock.target_nav_bridge:main",
         ],
     },
 )
