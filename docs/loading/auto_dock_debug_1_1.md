@@ -64,6 +64,77 @@ runner는 매 `arrival` 트리거 시 JSON config를 다시 읽는다.
 6. 근거리에서 다시 정지·재검출해 최종 정렬한 뒤 삽입하고, 성공으로 판정되면 `/fork/command`에 `UP`을 보낸다.
 7. LiDAR가 설정 안전거리 안으로 들어오면 현재 자동 동작을 interrupt하고, 짧게 이격한 뒤 가상 목표를 재계산해 재시도한다.
 
+## 노드·토픽·UDP 통신선
+
+아래 그림의 각 화살표에는 **전송 방식 / 이름 / 데이터 형태 / 발행 조건**을 같이 적었다.
+
+```text
+[Nav2 또는 테스트 터미널]
+  │  # ROS2 publish: 사람이 테스트를 시작하거나 Nav2가 목표 도착을 알림
+  │  # topic: /robot_1/nav2/arrival
+  │  # type: std_msgs/String
+  │  # data: "arrived clover heart"
+  ▼
+[auto_dock 노드]
+  │  # UDP datagram: 같은 차량 컨테이너의 YOLO 제어 포트로 목표 태그 전달
+  │  # destination: 127.0.0.1:8091
+  │  # JSON: {"type":"target","top_left":"clover","top_right":"heart"}
+  │  # condition: arrival을 받아 태그 쌍이 유효할 때 한 번 전송
+  ▼
+[yolo_symbol_seg 노드]  ◀── ROS2 RGB/Depth/CameraInfo ── [Depth Camera]
+  │                         # camera topic: RGB, depth, 내부파라미터
+  │                         # condition: 카메라가 프레임을 계속 제공할 때
+  │
+  │  # ROS2 publish: YOLO+PnP+depth 결과
+  │  # topic: /robot_1/symbol_seg/detections
+  │  # type: std_msgs/String(JSON)
+  │  # data: target_top, detections, candidate, PnP, depth_yaw 등
+  │  # condition: 처리 가능한 RGB/depth 프레임마다 (기본 최대 4Hz)
+  ▼
+[auto_dock 노드]  ◀── ROS2 /scan_raw ── [LiDAR]
+  │                    # LaserScan: 안전거리 interrupt 판단용
+  │
+  │                 ◀── ROS2 /odom_raw ── [Odom]
+  │                    # Odometry: 가상 목표 좌표를 현재 차량 좌표로 변환
+  │
+  │  # ROS2 publish: 탐색·정렬·삽입 이동 명령
+  │  # topic: /controller/cmd_vel
+  │  # type: geometry_msgs/Twist
+  │  # data: linear.x(전후), linear.y(좌우), angular.z(회전)
+  │  # condition: 자동 탐색/정렬/삽입/LiDAR 이격 중 반복 발행; 취소 시 0속도 발행
+  ▼
+[차량 주행 Controller]
+
+[auto_dock 노드]
+  │  # ROS2 publish: 포크 제어 명령
+  │  # topic: /fork/command
+  │  # type: std_msgs/String
+  │  # data: "UP" 또는 "STOP"
+  │  # condition: 삽입 완료 판정 시 UP; 취소·종료 시 STOP
+  ▼
+[fork_controller]
+
+[auto_dock 노드]
+  │  # ROS2 publish: 상태 변화 알림
+  │  # topic: /robot_1/auto_dock/status
+  │  # type: std_msgs/String(JSON)
+  │  # data: state, reason, stamp_monotonic 등
+  │  # condition: idle/탐색/복구/완료/취소처럼 상태 또는 이유가 변할 때만
+  ▼
+[Foxglove 또는 상태 확인 프로그램]
+```
+
+### 사용하지 않는 예전 UDP 중계선
+
+아래 경로는 YOLO 코드에는 남아 있지만 현재 auto_dock 흐름은 사용하지 않는다.
+
+```text
+[GUI] ── UDP 127.0.0.1:8091 ──> [yolo_symbol_seg]
+ # JSON {"type":"drive", ...} 또는 {"type":"fork","command":"UP"}
+ # YOLO가 ROS2 /controller/cmd_vel 또는 /fork/command로 중계하던 이전 방식
+ # 현재는 auto_dock가 두 ROS2 토픽을 직접 발행하므로 이 경로는 비활성
+```
+
 ## 정지 주의
 
 `/controller/cmd_vel`에 0값을 한 번 발행해도 다른 주행 노드가 연속 발행 중이면 곧바로 덮어써질 수 있다. 디버깅 중에는 auto_dock launch 터미널에서 `Ctrl+C`로 runner를 종료한 뒤, Nav2 등 다른 `/controller/cmd_vel` 발행 노드도 없는지 확인한다.
