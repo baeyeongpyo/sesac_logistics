@@ -126,7 +126,7 @@ class TagEntityMapper(Node):
             if payload.get("frame_id") != self.map_frame:
                 return
             pallets = payload.get("pallets")
-            if payload.get("schema_version") == 4 and isinstance(pallets, list):
+            if payload.get("schema_version") == 5 and isinstance(pallets, list):
                 self.pallets = [item for item in pallets if isinstance(item, dict)]
                 numeric_ids = [
                     int(str(item.get("id", "0")).rsplit("_", 1)[-1])
@@ -302,6 +302,7 @@ class TagEntityMapper(Node):
             pnp_duplicate = (
                 angle_source != "depth"
                 and distance <= self.duplicate_face_distance_m
+                and face.get("matrix") == list(matrix)
             )
             if yaw_error <= self.face_merge_yaw_rad or pnp_duplicate:
                 face_candidates.append((yaw_error, distance, face))
@@ -402,7 +403,7 @@ class TagEntityMapper(Node):
 
     def payload(self):
         return {
-            "schema_version": 4,
+            "schema_version": 5,
             "frame_id": self.map_frame,
             "state": self.last_state,
             "updated_unix": time.time(),
