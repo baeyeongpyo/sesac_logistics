@@ -67,11 +67,11 @@ class TagEntityMapper(Node):
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("odom_frame", "odom")
         self.declare_parameter("storage_path", "/shared/tag_entity_map.json")
-        self.declare_parameter("pallet_face_to_center_m", 0.55)
-        self.declare_parameter("pallet_merge_distance_m", 0.45)
-        self.declare_parameter("pallet_face_group_distance_m", 0.35)
-        self.declare_parameter("pallet_duplicate_face_distance_m", 0.12)
-        self.declare_parameter("duplicate_pallet_distance_m", 0.20)
+        self.declare_parameter("pallet_face_to_center_m", 0.065)
+        self.declare_parameter("pallet_merge_distance_m", 0.12)
+        self.declare_parameter("pallet_face_group_distance_m", 0.18)
+        self.declare_parameter("pallet_duplicate_face_distance_m", 0.06)
+        self.declare_parameter("duplicate_pallet_distance_m", 0.08)
         self.declare_parameter("pallet_angle_tolerance_deg", 35.0)
         self.declare_parameter("face_merge_yaw_deg", 40.0)
         self.declare_parameter("min_publish_observations", 3)
@@ -142,7 +142,7 @@ class TagEntityMapper(Node):
             if payload.get("frame_id") != self.map_frame:
                 return
             pallets = payload.get("pallets")
-            if payload.get("schema_version") == 8 and isinstance(pallets, list):
+            if payload.get("schema_version") == 9 and isinstance(pallets, list):
                 self.pallets = [item for item in pallets if isinstance(item, dict)]
                 numeric_ids = [
                     int(str(item.get("id", "0")).rsplit("_", 1)[-1])
@@ -503,7 +503,7 @@ class TagEntityMapper(Node):
 
     def payload(self):
         return {
-            "schema_version": 8,
+            "schema_version": 9,
             "frame_id": self.map_frame,
             "state": self.last_state,
             "updated_unix": time.time(),
