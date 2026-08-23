@@ -95,6 +95,20 @@ def assign_frame_pallet_groups(entities, minimum_overlap_ratio=0.02):
         entity["frame_pallet_group"] = group_ids[root]
 
 
+def matching_frame_pallet_group(entity, grouped_entities, minimum_overlap_ratio=0.02):
+    """Attach a target-filtered fallback face to an existing image group."""
+    box = entity["pallet"]["box"]
+    matches = [
+        (box_overlap_ratio(box, item["pallet"]["box"]), item)
+        for item in grouped_entities
+        if item.get("frame_pallet_group") is not None
+    ]
+    if not matches:
+        return None
+    ratio, match = max(matches, key=lambda item: item[0])
+    return match["frame_pallet_group"] if ratio >= minimum_overlap_ratio else None
+
+
 def ordered_grid(tags):
     by_y = sorted(tags, key=lambda item: detection_center(item)[1])
     top = sorted(by_y[:2], key=lambda item: detection_center(item)[0])
@@ -1060,6 +1074,10 @@ class YoloSymbolSeg(Node):
                     "visibility_score": self.face_visibility_score(
                         candidate, pnp_pose, depth_yaw
                     ),
+                    "frame_pallet_group": matching_frame_pallet_group(
+                        candidate, map_entities
+                    ),
+                    "image_pallet_box": list(candidate["pallet"]["box"]),
                     "odom_pose": {
                         "x": entity_track["world_x"],
                         "y": entity_track["world_y"],

@@ -45,11 +45,10 @@ def pallet_center_from_face(pose, face_to_center_m):
     }
 
 
-def right_angle_error(first_yaw, second_yaw):
-    """Return distance from the nearest 90-degree multiple."""
+def same_face_axis_error(first_yaw, second_yaw):
+    """Compare one tagged face while tolerating a flipped surface normal."""
     difference = abs(normalize_angle(float(first_yaw) - float(second_yaw)))
-    quarter_turn = math.pi / 2.0
-    return abs(difference - round(difference / quarter_turn) * quarter_turn)
+    return min(difference, abs(math.pi - difference))
 
 
 class TagEntityMapper(Node):
@@ -126,7 +125,7 @@ class TagEntityMapper(Node):
             if payload.get("frame_id") != self.map_frame:
                 return
             pallets = payload.get("pallets")
-            if payload.get("schema_version") == 5 and isinstance(pallets, list):
+            if payload.get("schema_version") == 6 and isinstance(pallets, list):
                 self.pallets = [item for item in pallets if isinstance(item, dict)]
                 numeric_ids = [
                     int(str(item.get("id", "0")).rsplit("_", 1)[-1])
@@ -223,7 +222,10 @@ class TagEntityMapper(Node):
                         (float(face_pose["x"]), float(face_pose["y"])),
                         (pose["x"], pose["y"]),
                     )
-                    angle_error = right_angle_error(face_pose["yaw"], pose["yaw"])
+                    same_matrix = face.get("matrix") == list(matrix)
+                    angle_error = same_face_axis_error(
+                        face_pose["yaw"], pose["yaw"]
+                    )
                 except (KeyError, TypeError, ValueError):
                     continue
                 all_face_distances.append(face_distance)
@@ -232,9 +234,11 @@ class TagEntityMapper(Node):
                 )
                 angle_matches = angle_error <= self.pallet_angle_tolerance_rad
                 pnp_duplicate = (
-                    not depth_pair and face_distance <= self.duplicate_face_distance_m
+                    same_matrix
+                    and not depth_pair
+                    and face_distance <= self.duplicate_face_distance_m
                 )
-                if angle_matches or pnp_duplicate:
+                if same_matrix and (angle_matches or pnp_duplicate):
                     face_matches.append((face_distance, angle_error))
             nearest_face_distance = min(all_face_distances, default=math.inf)
             preferred_spatial_match = (
@@ -304,7 +308,8 @@ class TagEntityMapper(Node):
                 and distance <= self.duplicate_face_distance_m
                 and face.get("matrix") == list(matrix)
             )
-            if yaw_error <= self.face_merge_yaw_rad or pnp_duplicate:
+            same_matrix = face.get("matrix") == list(matrix)
+            if same_matrix and (yaw_error <= self.face_merge_yaw_rad or pnp_duplicate):
                 face_candidates.append((yaw_error, distance, face))
 
         if not face_candidates and len(faces) >= 4:
@@ -403,7 +408,7 @@ class TagEntityMapper(Node):
 
     def payload(self):
         return {
-            "schema_version": 5,
+            "schema_version": 6,
             "frame_id": self.map_frame,
             "state": self.last_state,
             "updated_unix": time.time(),
