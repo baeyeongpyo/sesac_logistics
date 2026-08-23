@@ -67,7 +67,7 @@ class TagEntityMapper(Node):
         self.declare_parameter("pallet_merge_distance_m", 0.45)
         self.declare_parameter("pallet_face_group_distance_m", 0.35)
         self.declare_parameter("pallet_duplicate_face_distance_m", 0.12)
-        self.declare_parameter("pallet_angle_tolerance_deg", 20.0)
+        self.declare_parameter("pallet_angle_tolerance_deg", 35.0)
         self.declare_parameter("face_merge_yaw_deg", 40.0)
 
         requested_vehicle = int(self.get_parameter("vehicle").value)
@@ -126,7 +126,7 @@ class TagEntityMapper(Node):
             if payload.get("frame_id") != self.map_frame:
                 return
             pallets = payload.get("pallets")
-            if payload.get("schema_version") == 3 and isinstance(pallets, list):
+            if payload.get("schema_version") == 4 and isinstance(pallets, list):
                 self.pallets = [item for item in pallets if isinstance(item, dict)]
                 numeric_ids = [
                     int(str(item.get("id", "0")).rsplit("_", 1)[-1])
@@ -373,7 +373,7 @@ class TagEntityMapper(Node):
 
     def payload(self):
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "frame_id": self.map_frame,
             "state": self.last_state,
             "updated_unix": time.time(),
