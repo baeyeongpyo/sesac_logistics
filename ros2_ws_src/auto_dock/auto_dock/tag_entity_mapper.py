@@ -51,6 +51,11 @@ def same_face_axis_error(first_yaw, second_yaw):
     return min(difference, abs(math.pi - difference))
 
 
+def matrix_signature(matrix):
+    """Identify a face despite 2x2 ordering changes caused by perspective."""
+    return tuple(sorted(str(item) for item in matrix))
+
+
 class TagEntityMapper(Node):
     """Fuse YOLO 2x2 faces into pallets and publish one representative face."""
 
@@ -68,6 +73,8 @@ class TagEntityMapper(Node):
         self.declare_parameter("pallet_duplicate_face_distance_m", 0.12)
         self.declare_parameter("pallet_angle_tolerance_deg", 35.0)
         self.declare_parameter("face_merge_yaw_deg", 40.0)
+        self.declare_parameter("min_publish_observations", 3)
+        self.declare_parameter("provisional_ttl_sec", 5.0)
 
         requested_vehicle = int(self.get_parameter("vehicle").value)
         domain_vehicle = {215: 1, 216: 2}.get(
@@ -103,6 +110,12 @@ class TagEntityMapper(Node):
         self.face_merge_yaw_rad = math.radians(max(
             1.0, float(self.get_parameter("face_merge_yaw_deg").value)
         ))
+        self.min_publish_observations = max(
+            1, int(self.get_parameter("min_publish_observations").value)
+        )
+        self.provisional_ttl_sec = max(
+            1.0, float(self.get_parameter("provisional_ttl_sec").value)
+        )
         self.pallets = []
         self.next_id = 1
         self.last_state = "waiting_for_map_tf"
@@ -125,7 +138,7 @@ class TagEntityMapper(Node):
             if payload.get("frame_id") != self.map_frame:
                 return
             pallets = payload.get("pallets")
-            if payload.get("schema_version") == 6 and isinstance(pallets, list):
+            if payload.get("schema_version") == 7 and isinstance(pallets, list):
                 self.pallets = [item for item in pallets if isinstance(item, dict)]
                 numeric_ids = [
                     int(str(item.get("id", "0")).rsplit("_", 1)[-1])
@@ -194,6 +207,12 @@ class TagEntityMapper(Node):
                 frame_pallets[frame_group] = pallet["id"]
             changed = True
         if changed:
+            self.pallets = [
+                pallet for pallet in self.pallets
+                if int(pallet.get("observations", 0)) >= self.min_publish_observations
+                or observed_unix - float(pallet.get("last_seen_unix", 0.0))
+                <= self.provisional_ttl_sec
+            ]
             self.last_state = "mapping"
             self.save_map()
             self.publish_map()
@@ -222,7 +241,10 @@ class TagEntityMapper(Node):
                         (float(face_pose["x"]), float(face_pose["y"])),
                         (pose["x"], pose["y"]),
                     )
-                    same_matrix = face.get("matrix") == list(matrix)
+                    same_matrix = (
+                        matrix_signature(face.get("matrix", []))
+                        == matrix_signature(matrix)
+                    )
                     angle_error = same_face_axis_error(
                         face_pose["yaw"], pose["yaw"]
                     )
@@ -232,7 +254,11 @@ class TagEntityMapper(Node):
                 depth_pair = (
                     angle_source == "depth" and face.get("angle_source") == "depth"
                 )
-                angle_matches = angle_error <= self.pallet_angle_tolerance_rad
+                mixed_angle_sources = angle_source != face.get("angle_source")
+                angle_matches = (
+                    angle_error <= self.pallet_angle_tolerance_rad
+                    or (same_matrix and mixed_angle_sources)
+                )
                 pnp_duplicate = (
                     same_matrix
                     and not depth_pair
@@ -296,7 +322,7 @@ class TagEntityMapper(Node):
         for face in faces:
             current = face.get("pose") or {}
             try:
-                yaw_error = abs(normalize_angle(float(current["yaw"]) - pose["yaw"]))
+                yaw_error = same_face_axis_error(current["yaw"], pose["yaw"])
                 distance = math.dist(
                     (float(current["x"]), float(current["y"])),
                     (pose["x"], pose["y"]),
@@ -306,10 +332,19 @@ class TagEntityMapper(Node):
             pnp_duplicate = (
                 angle_source != "depth"
                 and distance <= self.duplicate_face_distance_m
-                and face.get("matrix") == list(matrix)
+                and matrix_signature(face.get("matrix", []))
+                == matrix_signature(matrix)
             )
-            same_matrix = face.get("matrix") == list(matrix)
-            if same_matrix and (yaw_error <= self.face_merge_yaw_rad or pnp_duplicate):
+            same_matrix = (
+                matrix_signature(face.get("matrix", []))
+                == matrix_signature(matrix)
+            )
+            mixed_angle_sources = angle_source != face.get("angle_source")
+            if same_matrix and (
+                yaw_error <= self.face_merge_yaw_rad
+                or mixed_angle_sources
+                or pnp_duplicate
+            ):
                 face_candidates.append((yaw_error, distance, face))
 
         if not face_candidates and len(faces) >= 4:
@@ -381,6 +416,8 @@ class TagEntityMapper(Node):
     def visible_entities(self):
         entities = []
         for pallet in self.pallets:
+            if int(pallet.get("observations", 0)) < self.min_publish_observations:
+                continue
             faces = pallet.get("faces") or []
             representative = next(
                 (face for face in faces if face.get("id") == pallet.get("representative_face_id")),
@@ -408,7 +445,7 @@ class TagEntityMapper(Node):
 
     def payload(self):
         return {
-            "schema_version": 6,
+            "schema_version": 7,
             "frame_id": self.map_frame,
             "state": self.last_state,
             "updated_unix": time.time(),
