@@ -91,6 +91,7 @@ class AutoDockNode(Node):
         self.target_right = "spade"
         self.latest_detection = None
         self.latest_detection_at = 0.0
+        self.candidate_stop_due_at = None
         self.odom_position = None
         self.odom_yaw = None
         self.nearest_range = math.inf
@@ -212,6 +213,7 @@ class AutoDockNode(Node):
         self.load_config()
         self.target_world = None
         self.insert_start_position = None
+        self.candidate_stop_due_at = None
         self.send_yolo_target()
         self.state = "search"
         self.reason = "search_started"
@@ -224,6 +226,7 @@ class AutoDockNode(Node):
         self.state = "idle"
         self.reason = reason
         self.backoff_until = None
+        self.candidate_stop_due_at = None
         self.stop_drive(10)
         self.fork_pub.publish(String(data="STOP"))
         self.publish_status("cancelled", reason)
@@ -330,6 +333,7 @@ class AutoDockNode(Node):
         if self.nearest_range >= stop_distance:
             return False
         self.was_docking_before_interrupt = self.state in {"docking", "inserting"}
+        self.candidate_stop_due_at = None
         angle = self.nearest_angle or 0.0
         self.backoff_command = (-0.08 * math.cos(angle), -0.08 * math.sin(angle))
         self.backoff_until = time.monotonic() + 0.7
@@ -355,7 +359,15 @@ class AutoDockNode(Node):
 
     def tick_search(self):
         candidate, _pnp = self.selected_candidate()
-        if candidate is not None:
+        now = time.monotonic()
+        if candidate is not None and self.candidate_stop_due_at is None:
+            delay = self.number("candidate_stop_delay_sec", 1.0, 0.0, 5.0)
+            self.candidate_stop_due_at = now + delay
+            self.publish_status(
+                "running", "candidate_stop_scheduled", delay_sec=delay
+            )
+        if self.candidate_stop_due_at is not None and now >= self.candidate_stop_due_at:
+            self.candidate_stop_due_at = None
             self.stop_drive(5)
             self.state = "confirm"
             self.publish_status("running", "candidate_paused_for_confirmation")
