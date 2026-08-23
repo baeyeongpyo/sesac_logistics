@@ -71,6 +71,7 @@ class TagEntityMapper(Node):
         self.declare_parameter("pallet_merge_distance_m", 0.45)
         self.declare_parameter("pallet_face_group_distance_m", 0.35)
         self.declare_parameter("pallet_duplicate_face_distance_m", 0.12)
+        self.declare_parameter("duplicate_pallet_distance_m", 0.20)
         self.declare_parameter("pallet_angle_tolerance_deg", 35.0)
         self.declare_parameter("face_merge_yaw_deg", 40.0)
         self.declare_parameter("min_publish_observations", 3)
@@ -103,6 +104,9 @@ class TagEntityMapper(Node):
         self.duplicate_face_distance_m = max(
             0.02,
             float(self.get_parameter("pallet_duplicate_face_distance_m").value),
+        )
+        self.duplicate_pallet_distance_m = max(
+            0.05, float(self.get_parameter("duplicate_pallet_distance_m").value)
         )
         self.pallet_angle_tolerance_rad = math.radians(max(
             1.0, float(self.get_parameter("pallet_angle_tolerance_deg").value)
@@ -138,7 +142,7 @@ class TagEntityMapper(Node):
             if payload.get("frame_id") != self.map_frame:
                 return
             pallets = payload.get("pallets")
-            if payload.get("schema_version") == 7 and isinstance(pallets, list):
+            if payload.get("schema_version") == 8 and isinstance(pallets, list):
                 self.pallets = [item for item in pallets if isinstance(item, dict)]
                 numeric_ids = [
                     int(str(item.get("id", "0")).rsplit("_", 1)[-1])
@@ -411,7 +415,61 @@ class TagEntityMapper(Node):
         ):
             pallet["latest_stamp_ns"] = source_stamp_ns
             pallet["representative_face_id"] = face["id"]
+        self.coalesce_duplicate_pallets(pallet)
         return pallet
+
+    def coalesce_duplicate_pallets(self, target):
+        """Remove stale IDs created by pose-angle jumps of an already known face."""
+        target_faces = target.get("faces") or []
+        duplicates = []
+        for other in self.pallets:
+            if other is target:
+                continue
+            matched = False
+            for target_face in target_faces:
+                target_pose = target_face.get("pose") or {}
+                target_signature = matrix_signature(target_face.get("matrix", []))
+                for other_face in other.get("faces") or []:
+                    if matrix_signature(other_face.get("matrix", [])) != target_signature:
+                        continue
+                    other_pose = other_face.get("pose") or {}
+                    try:
+                        distance = math.dist(
+                            (float(target_pose["x"]), float(target_pose["y"])),
+                            (float(other_pose["x"]), float(other_pose["y"])),
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if distance <= self.duplicate_pallet_distance_m:
+                        matched = True
+                        break
+                if matched:
+                    break
+            if matched:
+                duplicates.append(other)
+
+        for duplicate in duplicates:
+            for duplicate_face in duplicate.get("faces") or []:
+                signature = matrix_signature(duplicate_face.get("matrix", []))
+                existing = next(
+                    (
+                        face for face in target_faces
+                        if matrix_signature(face.get("matrix", [])) == signature
+                    ),
+                    None,
+                )
+                if existing is None and len(target_faces) < 4:
+                    copied = dict(duplicate_face)
+                    copied["id"] = f"{target['id']}_face_{len(target_faces) + 1}"
+                    target_faces.append(copied)
+            target["observations"] = int(target.get("observations", 0)) + int(
+                duplicate.get("observations", 0)
+            )
+            target["last_seen_unix"] = max(
+                float(target.get("last_seen_unix", 0.0)),
+                float(duplicate.get("last_seen_unix", 0.0)),
+            )
+            self.pallets.remove(duplicate)
 
     def visible_entities(self):
         entities = []
@@ -445,7 +503,7 @@ class TagEntityMapper(Node):
 
     def payload(self):
         return {
-            "schema_version": 7,
+            "schema_version": 8,
             "frame_id": self.map_frame,
             "state": self.last_state,
             "updated_unix": time.time(),
