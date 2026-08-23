@@ -8,6 +8,7 @@ state machine directly; GUI/UI programs are optional ROS clients.
 
 import json
 import math
+import os
 import socket
 import time
 from pathlib import Path
@@ -36,7 +37,8 @@ class AutoDockNode(Node):
 
     def __init__(self):
         super().__init__("auto_dock")
-        self.declare_parameter("vehicle", 1)
+        # 0 means infer the vehicle namespace from the DDS domain.
+        self.declare_parameter("vehicle", 0)
         self.declare_parameter("pose_config", "/shared/vehicle_pose_config.json")
         self.declare_parameter("config_overrides", "{}")
         self.declare_parameter("search_linear_speed_m_s", 0.0)
@@ -51,7 +53,16 @@ class AutoDockNode(Node):
         self.declare_parameter("control_host", "127.0.0.1")
         self.declare_parameter("control_port", 8091)
 
-        self.vehicle = int(self.get_parameter("vehicle").value)
+        requested_vehicle = int(self.get_parameter("vehicle").value)
+        domain_vehicle = {215: 1, 216: 2}.get(
+            int(os.environ.get("ROS_DOMAIN_ID", "0") or 0)
+        )
+        self.vehicle = requested_vehicle or domain_vehicle
+        if self.vehicle not in (1, 2):
+            raise RuntimeError(
+                "vehicle must be 1/2, or ROS_DOMAIN_ID must be 215 (vehicle 1) "
+                "or 216 (vehicle 2) when vehicle=0"
+            )
         robot = f"/robot_{self.vehicle}"
         self.pose_config_path = Path(str(self.get_parameter("pose_config").value))
         self.config_overrides = self.parse_overrides(

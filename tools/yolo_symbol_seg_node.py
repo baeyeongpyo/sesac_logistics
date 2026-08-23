@@ -185,12 +185,19 @@ def letterbox(image, size):
 
 class YoloSymbolSeg(Node):
     def __init__(self):
-        super().__init__("yolo_symbol_seg")
+        super().__init__("yolo_tag")
+        domain_id = int(os.environ.get("ROS_DOMAIN_ID", "0") or 0)
+        vehicle = {215: 1, 216: 2}.get(domain_id)
+        if vehicle is None:
+            raise RuntimeError(
+                "ROS_DOMAIN_ID must be 215 (vehicle 1) or 216 (vehicle 2)"
+            )
+        robot_namespace = f"/robot_{vehicle}"
         self.declare_parameter("image_topic", "/ascamera/camera_publisher/rgb0/image")
         self.declare_parameter("depth_image_topic", "/ascamera/camera_publisher/depth0/image_raw")
         self.declare_parameter("camera_info_topic", "/ascamera/camera_publisher/rgb0/camera_info")
-        self.declare_parameter("result_topic", "/robot_1/symbol_seg/detections")
-        self.declare_parameter("annotated_topic", "/robot_1/symbol_seg/annotated")
+        self.declare_parameter("result_topic", f"{robot_namespace}/symbol_seg/detections")
+        self.declare_parameter("annotated_topic", f"{robot_namespace}/symbol_seg/annotated")
         self.declare_parameter("model", "/shared/best_ncnn_model")
         self.declare_parameter("input_size", 320)
         self.declare_parameter("max_inference_fps", 4.0)
