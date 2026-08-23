@@ -403,8 +403,9 @@ class HttpViewerSource:
             self.start_mjpeg_command(args.primary_video_command)
         else:
             self.start_mjpeg_stream(args.primary_video_url, "primary")
-        self.start_mjpeg_stream(args.webcam_1_video_url, "secondary")
-        self.start_mjpeg_stream(args.webcam_2_video_url, "tertiary")
+        if not args.disable_external_webcams:
+            self.start_mjpeg_stream(args.webcam_1_video_url, "secondary")
+            self.start_mjpeg_stream(args.webcam_2_video_url, "tertiary")
         if self.control_url or self.control_command:
             thread = threading.Thread(target=self.send_control_http, daemon=True)
             thread.start()
@@ -4925,7 +4926,18 @@ def main():
     parser.add_argument("--safety-min-valid-range", type=float, default=0.25)
     parser.add_argument("--record-fps", type=float, default=15.0)
     parser.add_argument("--viewer-only", action="store_true")
-    parser.add_argument("--disable-external-webcams", action="store_true")
+    webcam_group = parser.add_mutually_exclusive_group()
+    webcam_group.add_argument(
+        "--disable-external-webcams",
+        action="store_true",
+        dest="disable_external_webcams",
+    )
+    webcam_group.add_argument(
+        "--enable-external-webcams",
+        action="store_false",
+        dest="disable_external_webcams",
+    )
+    parser.set_defaults(disable_external_webcams=None)
     parser.add_argument("--http-viewer-only", action="store_true")
     args = parser.parse_args()
     explicit_image_topic = bool(args.image_topic)
@@ -4987,8 +4999,14 @@ def main():
             args.friction_coefficient = float(
                 pose_config.get("friction_coefficient", args.friction_coefficient)
             )
+            if args.disable_external_webcams is None:
+                args.disable_external_webcams = bool(
+                    pose_config.get("disable_external_webcams", True)
+                )
         except (OSError, TypeError, ValueError):
             parser.error(f"invalid pose config: {pose_config_path}")
+    if args.disable_external_webcams is None:
+        args.disable_external_webcams = True
 
     args.ros_domain_id = (
         214 + args.vehicle if args.ros_domain_id is None else args.ros_domain_id

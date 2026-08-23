@@ -385,7 +385,9 @@ class AutoDockNode(Node):
                 self.publish_status("running", "candidate_lost_resume_search")
                 return
             self.stop_drive()
-            self.publish_status("running", "candidate_confirmation", reason=reason)
+            self.publish_status(
+                "running", "candidate_confirmation", measurement_reason=reason
+            )
             return
         if not self.update_world_target(candidate, pnp):
             self.cancel("odom_missing")
