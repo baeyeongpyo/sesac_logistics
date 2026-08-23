@@ -83,15 +83,17 @@ from python_qt_binding.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 from rclpy.node import Node
-from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from ros_robot_controller_msgs.msg import MotorsState
 from sensor_msgs.msg import Image, LaserScan
-from std_msgs.msg import String, UInt16
+from std_msgs.msg import Empty, String, UInt16
 
 
-class TeleopNode(Node):
+class DevControlClientNode(Node):
+    """ROS I/O client for the optional development GUI/UI."""
+
     def __init__(self, args):
-        super().__init__(getattr(args, "node_name", "vehicle_camera_teleop_gui"))
+        super().__init__(getattr(args, "node_name", "dev_control_client"))
         self.viewer_only = args.viewer_only
         self.bridge = CvBridge()
         self.frame = None
@@ -162,9 +164,30 @@ class TeleopNode(Node):
         self.cmd_pub = self.create_publisher(Twist, args.cmd_vel_topic, 10)
         self.fork_pub = self.create_publisher(String, args.fork_command_topic, 10)
         self.arrival_pub = self.create_publisher(String, args.arrival_topic, 10)
+        self.auto_dock_stop_pub = self.create_publisher(
+            Empty, args.auto_dock_stop_topic, 10
+        )
+        status_qos = QoSProfile(depth=1)
+        status_qos.reliability = ReliabilityPolicy.RELIABLE
+        status_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.auto_dock_status = {"state": "unknown", "reason": "no_status"}
+        self.auto_dock_status_sub = self.create_subscription(
+            String, args.auto_dock_status_topic, self.on_auto_dock_status, status_qos
+        )
 
     def publish_arrival(self, left, right):
         self.arrival_pub.publish(String(data=f"arrived {left} {right}"))
+
+    def publish_auto_dock_stop(self):
+        self.auto_dock_stop_pub.publish(Empty())
+
+    def on_auto_dock_status(self, msg):
+        try:
+            status = json.loads(msg.data)
+            if isinstance(status, dict):
+                self.auto_dock_status = status
+        except (TypeError, ValueError):
+            self.get_logger().warning("invalid auto_dock status JSON received")
 
     def on_detection(self, msg):
         try:
@@ -335,8 +358,13 @@ class TeleopNode(Node):
         return False
 
 
+# Compatibility for the archived 1.1 headless runner. New GUI/UI code uses the
+# role-specific name above.
+TeleopNode = DevControlClientNode
+
+
 class HttpViewerSource:
-    """Three MJPEG inputs with the same frame interface as TeleopNode."""
+    """Three MJPEG inputs with the same frame interface as DevControlClientNode."""
 
     def __init__(self, args):
         self.frame = None
@@ -986,6 +1014,9 @@ class TeleopWindow(QMainWindow):
         )
         self.arrival_button = QPushButton("1.2 arrival 토픽 발행")
         self.arrival_button.clicked.connect(self.publish_arrival_trigger)
+        self.auto_dock_stop_button = QPushButton("1.2 stop 토픽 발행")
+        self.auto_dock_stop_button.clicked.connect(self.publish_auto_dock_stop)
+        self.auto_dock_status_label = QLabel("1.2 상태: 수신 대기")
         self.arc_label = QLabel("대기: 목표 검출 후 경로 계산")
         self.arc_forward_error = QDoubleSpinBox()
         self.arc_forward_error.setRange(-200.0, 200.0)
@@ -1013,14 +1044,16 @@ class TeleopWindow(QMainWindow):
         arc_layout.addWidget(QLabel("자동 모드"), 2, 0)
         arc_layout.addWidget(self.run_mode, 2, 1, 1, 3)
         arc_layout.addWidget(self.run_mode_button, 2, 4)
-        arc_layout.addWidget(self.arrival_button, 3, 0, 1, 5)
-        arc_layout.addWidget(self.arc_label, 4, 0, 1, 5)
-        arc_layout.addWidget(QLabel("전후차 (+덜 감)"), 5, 0)
-        arc_layout.addWidget(self.arc_forward_error, 5, 1)
-        arc_layout.addWidget(QLabel("좌우차 (+왼쪽)"), 5, 2)
-        arc_layout.addWidget(self.arc_lateral_error, 5, 3)
-        arc_layout.addWidget(self.arc_sample_save, 5, 4)
-        arc_layout.addWidget(self.arc_sample_label, 6, 0, 1, 5)
+        arc_layout.addWidget(self.arrival_button, 3, 0, 1, 3)
+        arc_layout.addWidget(self.auto_dock_stop_button, 3, 3, 1, 2)
+        arc_layout.addWidget(self.auto_dock_status_label, 4, 0, 1, 5)
+        arc_layout.addWidget(self.arc_label, 5, 0, 1, 5)
+        arc_layout.addWidget(QLabel("전후차 (+덜 감)"), 6, 0)
+        arc_layout.addWidget(self.arc_forward_error, 6, 1)
+        arc_layout.addWidget(QLabel("좌우차 (+왼쪽)"), 6, 2)
+        arc_layout.addWidget(self.arc_lateral_error, 6, 3)
+        arc_layout.addWidget(self.arc_sample_save, 6, 4)
+        arc_layout.addWidget(self.arc_sample_label, 7, 0, 1, 5)
 
         self.memo = QPlainTextEdit()
         self.memo.setPlaceholderText("캡처 메모 (이미지와 별도 JSON으로 저장)")
@@ -3400,6 +3433,13 @@ class TeleopWindow(QMainWindow):
         self.node.publish_arrival(left, right)
         self.arc_label.setText(f"1.2 arrival 발행: {left} / {right}")
 
+    def publish_auto_dock_stop(self):
+        if self.args.http_viewer_only:
+            self.arc_label.setText("HTTP 화면 전용 모드에서는 stop 발행 불가")
+            return
+        self.node.publish_auto_dock_stop()
+        self.auto_dock_status_label.setText("1.2 stop 요청 전송")
+
     def start_target_search(self, auto_lift_after_dock=False):
         self.cancel_arc_approach("원형 목표 탐색 시작")
         self.last_arc_stop_reason = None
@@ -4344,6 +4384,8 @@ class TeleopWindow(QMainWindow):
         self.pressed.clear()
         self.node.stop(repeats=5)
         self.node.publish_fork("STOP")
+        if not self.args.http_viewer_only:
+            self.node.publish_auto_dock_stop()
         self.status.setText("EMERGENCY STOP")
 
     def command(self):
@@ -4477,6 +4519,12 @@ class TeleopWindow(QMainWindow):
         state += (f" | {mode} | cmd x={linear_x if active else 0.0:+.2f}, "
                   f"y={linear_y if active else 0.0:+.2f}, z={angular_z if active else 0.0:+.2f}")
         self.status.setText(state)
+        if not self.args.http_viewer_only:
+            auto_status = self.node.auto_dock_status
+            self.auto_dock_status_label.setText(
+                f"1.2 상태: {auto_status.get('state', '?')} | "
+                f"{auto_status.get('reason', '?')}"
+            )
         self.update_battery_status()
         self.update_rotation_estimate()
         self.update_mapping_label()
@@ -4499,7 +4547,35 @@ class TeleopWindow(QMainWindow):
             self.writer.write(recording_frame)
             self.recorded_frames += 1
             self.record_label.setText(f"REC {self.recorded_frames} frames → {self.record_path}")
-        self.show_frame(frame, self.video)
+        self.show_frame(self.render_detection_overlay(frame), self.video)
+
+    def render_detection_overlay(self, frame):
+        """Draw the existing detection JSON over the original camera frame."""
+        if frame is None:
+            return None
+        detection = self.node.latest_detection or {}
+        if time.monotonic() - self.node.latest_detection_monotonic > 1.0:
+            return frame
+        for item in detection.get("detections", []):
+            box = item.get("box") or []
+            if len(box) != 4:
+                continue
+            x1, y1, x2, y2 = (int(round(value)) for value in box)
+            label = str(item.get("class", "?"))
+            confidence = float(item.get("confidence", 0.0))
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 220, 0), 2)
+            cv2.putText(
+                frame, f"{label} {confidence:.2f}", (x1, max(18, y1 - 6)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 220, 0), 2,
+            )
+        candidate = detection.get("candidate") or {}
+        for point in candidate.get("tag_centers", []):
+            if len(point) == 2:
+                cv2.circle(
+                    frame, (int(round(point[0])), int(round(point[1]))),
+                    5, (0, 255, 255), -1,
+                )
+        return frame
 
     @staticmethod
     def show_frame(frame, label):
@@ -4837,6 +4913,8 @@ def main():
     parser.add_argument("--cmd-vel-topic", default="")
     parser.add_argument("--fork-command-topic", default="")
     parser.add_argument("--arrival-topic", default="")
+    parser.add_argument("--auto-dock-stop-topic", default="")
+    parser.add_argument("--auto-dock-status-topic", default="")
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--linear-speed", type=float, default=0.05)
     parser.add_argument("--angular-speed", type=float, default=0.35)
@@ -4870,6 +4948,10 @@ def main():
         args.fork_command_topic = "/fork/command"
     if not args.arrival_topic:
         args.arrival_topic = f"{robot_namespace}/nav2/arrival"
+    if not args.auto_dock_stop_topic:
+        args.auto_dock_stop_topic = f"{robot_namespace}/auto_dock/stop"
+    if not args.auto_dock_status_topic:
+        args.auto_dock_status_topic = f"{robot_namespace}/auto_dock/status"
     if args.secondary_image_topic and (args.secondary_video_url or args.webcam_1_video_url):
         parser.error("use only one of --secondary-image-topic and --secondary-video-url")
     if args.secondary_video_url and args.webcam_1_video_url:
@@ -4922,7 +5004,7 @@ def main():
         node = HttpViewerSource(args)
     else:
         rclpy.init()
-        node = TeleopNode(args)
+        node = DevControlClientNode(args)
     app = QApplication([])
     window = TeleopWindow(node, args)
     app.installEventFilter(window)

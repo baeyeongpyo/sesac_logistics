@@ -53,7 +53,7 @@ import rclpy
 from python_qt_binding.QtCore import Qt
 from python_qt_binding.QtWidgets import QApplication
 
-from vehicle_camera_teleop_gui import TeleopNode, TeleopWindow
+from vehicle_camera_teleop_gui import DevControlClientNode, TeleopWindow
 
 
 SYMBOLS = ("star", "diamond", "spade", "clover", "heart")
@@ -71,6 +71,8 @@ def runtime_args(cli):
         detection_topic=f"/robot_{cli.vehicle}/symbol_seg/detections",
         cmd_vel_topic="/controller/cmd_vel", fork_command_topic="/fork/command",
         arrival_topic=f"/robot_{cli.vehicle}/nav2/arrival",
+        auto_dock_stop_topic=f"/robot_{cli.vehicle}/auto_dock/stop",
+        auto_dock_status_topic=f"/robot_{cli.vehicle}/auto_dock/status",
         output_dir=f"/home/ubuntu/recordings/vehicle{cli.vehicle}", linear_speed=cli.speed,
         angular_speed=cli.angular_speed, camera_pitch_deg=0.0,
         friction_coefficient=1.0, pose_config=cli.pose_config,
@@ -100,7 +102,7 @@ def draw(stdscr, window, movement_name, fork_name):
         mode_text = "단일 (계산·주행 1회 후 삽입 전 정지)"
     lines = [
         f"control_ui 차량 {window.args.vehicle}  WASD: 전후/횡이동  Q/E: 회전  ↑/↓: 리프트  SPACE: 정지",
-        ".: 주행계산  ENTER: 탐색/주행실행  P: 1.2 arrival 발행  M: 모드 선택  O: 설정  Z: 취소",
+        ".: 주행계산  ENTER: 탐색/주행실행  P: 1.2 arrival  K: 1.2 stop  M: 모드  O: 설정  Z: 취소",
         f"목표: {window.target_left.currentData()} / {window.target_right.currentData()}",
         f"중심선 보정: {window.centerline_offset_cm:+.1f} cm (+왼쪽/-오른쪽)",
         f"추가 주행보정: 횡이동 {window.lateral_overrun_cm:.1f} cm / "
@@ -115,6 +117,7 @@ def draw(stdscr, window, movement_name, fork_name):
         f"거리={pnp.get('forward_distance_cm', '-')} cm  "
         f"reproj={pnp.get('reprojection_error_px', '-')} px",
         f"상태: {window.arc_label.text()}",
+        f"1.2: {window.auto_dock_status_label.text()}",
         f"시스템: {window.status.text()}",
     ]
     stdscr.erase()
@@ -189,6 +192,8 @@ def terminal_loop(stdscr, window, app, key_timeout):
             movement_name = ""
         elif key in (ord("p"), ord("P")):
             window.publish_arrival_trigger()
+        elif key in (ord("k"), ord("K")):
+            window.publish_auto_dock_stop()
         elif key in (ord("o"), ord("O")):
             if window.arc_active or window.target_search_active:
                 window.arc_label.setText("주행 또는 탐색 중에는 설정 파일을 열 수 없음")
@@ -259,7 +264,7 @@ def main():
     cli = parser.parse_args()
     args = runtime_args(cli)
     rclpy.init()
-    node = TeleopNode(args)
+    node = DevControlClientNode(args)
     app = QApplication([])
     window = TeleopWindow(node, args)
     window.timer.stop()

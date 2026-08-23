@@ -69,9 +69,17 @@ ros2 launch auto_dock auto_dock.launch.py
 
 `control_ui.py`와 `vehicle_camera_teleop_gui.py`는 개발·디버깅 기준인 `1.1`의 기능과 화면을 그대로 유지한다. `auto_dock` 1.2 상태머신은 GUI/UI가 없어도 독립 실행된다.
 
+GUI와 control_ui 프로세스는 각각 `DevControlClientNode` 하나를 실행한다. 이 노드는 자동주행 상태머신을 소유하지 않고 기존 원본 카메라, detections, auto_dock status를 구독하며 arrival, stop, 수동주행, 리프트 명령만 발행한다. GUI의 검출 박스와 중심점은 별도 영상 서버 없이 원본 카메라 프레임과 detections JSON을 로컬에서 합성한다.
+
 ```text
 GUI의 `1.2 arrival 토픽 발행` 버튼 또는 control_ui의 `P`
   -> publish String("arrived LEFT RIGHT") to /robot_N/nav2/arrival
+
+GUI의 `1.2 stop 토픽 발행` 버튼 또는 control_ui의 `K`
+  -> publish Empty to /robot_N/auto_dock/stop
+
+/robot_N/auto_dock/status
+  -> GUI/UI에서 현재 state와 reason 표시
 ```
 
 기존 주행 계산, 원형 탐색, 단일/3회/무제한 자동주행, ARC 샘플, Calibration 기능은 변경하지 않는다. 추가 버튼은 현재 선택된 좌·우 태그를 arrival 문자열에 넣기만 하며 GUI 내부 1.1 상태를 시작하거나 정지하지 않는다. 차량 번호를 고르면 DDS domain은 `1 -> 215`, `2 -> 216`으로 정하고, 공통 차량 내부 토픽은 `/scan_raw`, `/odom_raw`, `/controller/cmd_vel`, `/fork/command`를 사용한다.
