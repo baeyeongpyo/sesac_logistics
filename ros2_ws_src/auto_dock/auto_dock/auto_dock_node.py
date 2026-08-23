@@ -408,8 +408,12 @@ class AutoDockNode(Node):
         self.publish_status("running", "lidar_replanned_virtual_dock" if self.state == "docking" else "lidar_recovery_search")
 
     def destroy_node(self):
-        self.stop_drive(10)
-        self.fork_pub.publish(String(data="STOP"))
+        # ROS shutdown may already have invalidated publishers when launch
+        # delivers SIGINT.  Do not turn an otherwise clean shutdown into an
+        # exception; normal cancel paths still send STOP while ROS is alive.
+        if rclpy.ok():
+            self.stop_drive(10)
+            self.fork_pub.publish(String(data="STOP"))
         self.control_socket.close()
         return super().destroy_node()
 
@@ -422,8 +426,14 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            node.destroy_node()
+        except KeyboardInterrupt:
+            # launch may deliver a second SIGINT while rclpy destroys the
+            # publisher handles; shutdown is already in progress.
+            pass
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

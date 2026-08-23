@@ -1,7 +1,9 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, SetEnvironmentVariable
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -9,6 +11,10 @@ def generate_launch_description():
         DeclareLaunchArgument("vehicle", default_value="1"),
         DeclareLaunchArgument("ros_domain_id", default_value="215"),
         DeclareLaunchArgument("pose_config", default_value="/shared/vehicle_pose_config.json"),
+        DeclareLaunchArgument(
+            "start_yolo", default_value="true",
+            description="Start yolo_symbol_seg with this launch; set false when it is already running.",
+        ),
         DeclareLaunchArgument(
             "search_linear_speed_m_s", default_value="0.0",
             description="Temporary search speed override in m/s; 0 uses pose config.",
@@ -24,6 +30,7 @@ def generate_launch_description():
         # tag pair through the existing local UDP target-control interface.
         ExecuteProcess(
             cmd=["/usr/bin/python3", "/shared/yolo_symbol_seg_node.py"],
+            condition=IfCondition(LaunchConfiguration("start_yolo")),
             output="screen",
         ),
         Node(
@@ -34,7 +41,11 @@ def generate_launch_description():
             parameters=[{
                 "vehicle": LaunchConfiguration("vehicle"),
                 "pose_config": LaunchConfiguration("pose_config"),
-                "config_overrides": LaunchConfiguration("config_overrides"),
+                # ROS launch otherwise YAML-parses `{}` into a dict before it
+                # reaches rclpy; the controller intentionally parses JSON.
+                "config_overrides": ParameterValue(
+                    LaunchConfiguration("config_overrides"), value_type=str
+                ),
                 # Keep the short speed override for quick field tests; it is
                 # merged by launch into the same JSON override mechanism.
                 "search_linear_speed_m_s": LaunchConfiguration("search_linear_speed_m_s"),
