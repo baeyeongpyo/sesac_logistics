@@ -136,10 +136,11 @@ def pallet_entities(detections, target_top=None):
             pallet_width = max(1, x2 - x1)
             pallet_height = max(1, y2 - y1)
             margin = pallet_width * 0.12
-            if x1 - margin <= symbol_x <= x2 + margin and y1 - 3.0 * pallet_height <= symbol_y <= y2:
+            vertical_reach = max(4.0 * pallet_height, 0.9 * pallet_width)
+            if x1 - margin <= symbol_x <= x2 + margin and y1 - vertical_reach <= symbol_y <= y2:
                 pallet_x, _ = detection_center(pallet)
                 horizontal_error = abs(symbol_x - pallet_x) / pallet_width
-                vertical_error = abs(symbol_y - y1) / pallet_height
+                vertical_error = abs(symbol_y - y1) / vertical_reach
                 # Adjacent visible pallet faces overlap in x.  Horizontal
                 # distance alone lets the wider face steal the other face's
                 # tags, so also prefer the pallet immediately below the tag.
