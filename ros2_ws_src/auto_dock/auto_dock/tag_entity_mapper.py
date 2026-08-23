@@ -561,6 +561,7 @@ class TagEntityMapper(Node):
                 "id": pallet.get("id"),
                 "matrix": representative.get("matrix", []),
                 "pose": pose,
+                "face_pose": dict(representative.get("pose") or {}),
                 "face_count": len(faces),
                 "representative_face_id": representative.get("id"),
                 "angle_source": representative.get("angle_source", "pnp"),

@@ -1,0 +1,630 @@
+{
+  "load_state": "unloaded",
+  "camera_pitch_deg": -10.014533087751868,
+  "yaw_bias_deg": 1.8022258697585385,
+  "friction_coefficient": 0.9354206504963717,
+  "rotation_calibration_samples": [
+    {
+      "captured_at": "2026-08-20T02:03:49+0000",
+      "actual_deg": 360.0,
+      "odom_deg": -395.98173479952226,
+      "scale": 0.9091328421556133
+    },
+    {
+      "captured_at": "2026-08-20T02:04:30+0000",
+      "actual_deg": 360.0,
+      "odom_deg": 385.8975902334414,
+      "scale": 0.9328899923480343
+    },
+    {
+      "captured_at": "2026-08-20T02:04:55+0000",
+      "actual_deg": 360.0,
+      "odom_deg": -394.777769158298,
+      "scale": 0.9119054519395878
+    },
+    {
+      "captured_at": "2026-08-20T02:37:48+0000",
+      "actual_deg": 360.0,
+      "command_deg": -373.0079331485327,
+      "scale": 0.9651269262861686
+    },
+    {
+      "captured_at": "2026-08-20T03:44:53+0000",
+      "actual_deg": 360.0,
+      "command_deg": -393.02426750201545,
+      "scale": 0.9159739735362624,
+      "angular_speed_rad_s": 0.35,
+      "set_motor": {
+        "event_count": 199,
+        "mean_abs_rps": 0.2411564668480157,
+        "max_abs_rps": 0.24115646684801184
+      },
+      "difference_vs_previous_percent": -1.4831540654615005
+    },
+    {
+      "load_state": "unloaded",
+      "actual_deg": 360.0,
+      "command_deg": -378.25049021590536,
+      "scale": 0.9517502536335433,
+      "angular_speed_rad_s": 0.55,
+      "set_motor": {
+        "event_count": 145,
+        "mean_abs_rps": 0.37896016218973466,
+        "max_abs_rps": 0.3789601621897329
+      },
+      "difference_vs_previous_percent": 2.669283772120745
+    },
+    {
+      "captured_at": "2026-08-20T03:58:59+0000",
+      "load_state": "unloaded",
+      "actual_deg": 360.0,
+      "command_deg": -384.4277856275444,
+      "scale": 0.9364567636866618,
+      "angular_speed_rad_s": 0.55,
+      "set_motor": {
+        "event_count": 125,
+        "mean_abs_rps": 0.37896016218973394,
+        "max_abs_rps": 0.3789601621897329
+      },
+      "difference_vs_previous_percent": 0.572085269600997
+    },
+    {
+      "captured_at": "2026-08-20T03:59:15+0000",
+      "load_state": "unloaded",
+      "actual_deg": 360.0,
+      "command_deg": -374.9496159949405,
+      "scale": 0.9601290003851018,
+      "angular_speed_rad_s": 0.55,
+      "set_motor": {
+        "event_count": 120,
+        "mean_abs_rps": 0.3789601621897338,
+        "max_abs_rps": 0.3789601621897329
+      },
+      "difference_vs_previous_percent": 3.030195334658936
+    }
+  ],
+  "rotation_convention": "vehicle CCW positive; target face yaw is opposite vehicle rotation",
+  "distance_coefficient": 0.8326736041500737,
+  "distance_convention": "calibrated odom path length; W/S forward/reverse",
+  "distance_calibration_samples": [
+    {
+      "captured_at": "2026-08-20T02:38:48+0000",
+      "actual_cm": 50.0,
+      "command_cm": 58.992415129996544,
+      "scale": 0.847566587837085
+    },
+    {
+      "captured_at": "2026-08-20T02:39:29+0000",
+      "actual_cm": 50.0,
+      "command_cm": 57.57323277998694,
+      "scale": 0.868459136054985
+    },
+    {
+      "captured_at": "2026-08-20T03:30:34+0000",
+      "actual_cm": 50.0,
+      "command_cm": 55.215118668013,
+      "scale": 0.9055490815953965,
+      "linear_speed_m_s": 0.12,
+      "set_motor": {
+        "event_count": 47,
+        "mean_abs_rps": 0.5876490206469963,
+        "max_abs_rps": 0.5876490206469981
+      },
+      "difference_vs_previous_percent": 5.540268888457667
+    },
+    {
+      "captured_at": "2026-08-20T03:47:27+0000",
+      "actual_cm": 50.0,
+      "command_cm": 58.79196325198427,
+      "scale": 0.8504563759114213,
+      "linear_speed_m_s": 0.12,
+      "set_motor": {
+        "event_count": 52,
+        "mean_abs_rps": 0.5876490206469961,
+        "max_abs_rps": 0.5876490206469981
+      },
+      "difference_vs_previous_percent": -2.6779963557113984
+    },
+    {
+      "captured_at": "2026-08-20T03:48:00+0000",
+      "actual_cm": 50.0,
+      "command_cm": 52.700432565015966,
+      "scale": 0.9487588159417009,
+      "linear_speed_m_s": 0.17,
+      "set_motor": {
+        "event_count": 32,
+        "mean_abs_rps": 0.8325027792499115,
+        "max_abs_rps": 0.8325027792499141
+      },
+      "difference_vs_previous_percent": 9.303029422615294
+    },
+    {
+      "captured_at": "2026-08-20T03:48:11+0000",
+      "actual_cm": 50.0,
+      "command_cm": 54.41900994400387,
+      "scale": 0.9187965758923041,
+      "linear_speed_m_s": 0.17,
+      "set_motor": {
+        "event_count": 33,
+        "mean_abs_rps": 0.8325027792499113,
+        "max_abs_rps": 0.8325027792499141
+      },
+      "difference_vs_previous_percent": 3.9176907798180727
+    },
+    {
+      "captured_at": "2026-08-20T03:48:19+0000",
+      "actual_cm": 50.0,
+      "command_cm": 54.38550268898869,
+      "scale": 0.9193626523217444,
+      "linear_speed_m_s": 0.17,
+      "set_motor": {
+        "event_count": 33,
+        "mean_abs_rps": 0.8325027792499113,
+        "max_abs_rps": 0.8325027792499141
+      },
+      "difference_vs_previous_percent": 3.3071725362185944
+    },
+    {
+      "captured_at": "2026-08-20T08:37:24+0000",
+      "load_state": "unloaded",
+      "actual_cm": 5.0,
+      "command_cm": 9.645794243999264,
+      "scale": 0.5183606319521635,
+      "linear_speed_m_s": 0.12,
+      "set_motor": {
+        "event_count": 12,
+        "mean_abs_rps": 0.5876490206469981,
+        "max_abs_rps": 0.5876490206469981
+      },
+      "difference_vs_previous_percent": -42.026619918080534
+    },
+    {
+      "captured_at": "2026-08-20T08:37:34+0000",
+      "load_state": "unloaded",
+      "actual_cm": 5.0,
+      "command_cm": 9.593628852013355,
+      "scale": 0.5211792197850849,
+      "linear_speed_m_s": 0.12,
+      "set_motor": {
+        "event_count": 15,
+        "mean_abs_rps": 0.5876490206469981,
+        "max_abs_rps": 0.5876490206469981
+      },
+      "difference_vs_previous_percent": -38.479517006848106
+    },
+    {
+      "captured_at": "2026-08-20T08:37:42+0000",
+      "load_state": "unloaded",
+      "actual_cm": 5.0,
+      "command_cm": 4.808597879993612,
+      "scale": 1.0398041434911256,
+      "linear_speed_m_s": 0.12,
+      "set_motor": {
+        "event_count": 5,
+        "mean_abs_rps": 0.587649020646998,
+        "max_abs_rps": 0.5876490206469981
+      },
+      "difference_vs_previous_percent": 28.221570140275066
+    },
+    {
+      "captured_at": "2026-08-20T08:37:49+0000",
+      "load_state": "unloaded",
+      "actual_cm": 5.0,
+      "command_cm": 6.089270471973579,
+      "scale": 0.8211164248677989,
+      "linear_speed_m_s": 0.12,
+      "set_motor": {
+        "event_count": 19,
+        "mean_abs_rps": 0.5876490206469986,
+        "max_abs_rps": 0.5876490206469981
+      },
+      "difference_vs_previous_percent": -1.5246402199931786
+    }
+  ],
+  "lateral_coefficient": 0.8468390229653254,
+  "lateral_convention": "vehicle right positive; A is left and D is right",
+  "lateral_calibration_samples": [
+    {
+      "captured_at": "2026-08-20T02:41:38+0000",
+      "actual_cm": 30.0,
+      "command_cm": 35.98259343999419,
+      "scale": 0.8337364578800867
+    },
+    {
+      "captured_at": "2026-08-20T02:42:05+0000",
+      "actual_cm": 30.0,
+      "command_cm": 34.00925441500474,
+      "scale": 0.8821128400499167
+    },
+    {
+      "captured_at": "2026-08-20T03:30:55+0000",
+      "actual_cm": 50.0,
+      "command_cm": 56.408360159999575,
+      "scale": 0.8863934327850947
+    },
+    {
+      "captured_at": "2026-08-20T03:45:10+0000",
+      "actual_cm": 50.0,
+      "command_cm": 44.396455092013625,
+      "scale": 1.1262160435190778
+    },
+    {
+      "captured_at": "2026-08-20T08:38:21+0000",
+      "load_state": "unloaded",
+      "actual_cm": 6.0,
+      "command_cm": 12.026768063980855,
+      "scale": 0.4988871464121345
+    },
+    {
+      "captured_at": "2026-08-20T08:38:38+0000",
+      "load_state": "unloaded",
+      "actual_cm": 6.0,
+      "command_cm": 6.006446808001783,
+      "scale": 0.9989266852420644
+    },
+    {
+      "captured_at": "2026-08-20T08:38:43+0000",
+      "load_state": "unloaded",
+      "actual_cm": 6.0,
+      "command_cm": 7.205298696000681,
+      "scale": 0.8327205093288242
+    },
+    {
+      "captured_at": "2026-08-20T08:38:50+0000",
+      "load_state": "unloaded",
+      "actual_cm": 6.0,
+      "command_cm": 8.383177511994294,
+      "scale": 0.7157190685054032
+    }
+  ],
+  "camera_distance_scale_cm_per_pnp_unit": 7.645297790849042,
+  "camera_distance_offset_cm": -29.233645338420743,
+  "camera_distance_reference": "fork tip to target front face",
+  "camera_calibration_samples": [
+    {
+      "sample": 1,
+      "captured_at": "2026-08-20T03:23:12+0000",
+      "image": "sample_001.jpg",
+      "fork_tip_to_target_cm": 50.0,
+      "translation_x_units": 0.4413953578626774,
+      "translation_y_units": -2.2628163484235477,
+      "translation_z_units": 10.124470044024298,
+      "raw_camera_pitch_deg": -12.358047137736268,
+      "reprojection_error_px": 0.03119177743792534,
+      "target_top": [
+        "spade",
+        "clover"
+      ],
+      "note": "",
+      "pnp_forward_units": 10.363709499093497
+    },
+    {
+      "sample": 2,
+      "captured_at": "2026-08-20T03:23:41+0000",
+      "image": "sample_002.jpg",
+      "fork_tip_to_target_cm": 30.0,
+      "translation_x_units": 0.6059420299529986,
+      "translation_y_units": -0.688634897973502,
+      "translation_z_units": 7.745990668895002,
+      "raw_camera_pitch_deg": -7.67101903776747,
+      "reprojection_error_px": 0.7301886081695557,
+      "target_top": [
+        "spade",
+        "clover"
+      ],
+      "note": "",
+      "pnp_forward_units": 7.747722450958003
+    }
+  ],
+  "active_calibration_preset": "unloaded",
+  "calibration_presets": {
+    "unloaded": {
+      "name": "unloaded",
+      "friction_coefficient": 0.9354206504963717,
+      "rotation_calibration_samples": [
+        {
+          "captured_at": "2026-08-20T02:03:49+0000",
+          "actual_deg": 360.0,
+          "odom_deg": -395.98173479952226,
+          "scale": 0.9091328421556133
+        },
+        {
+          "captured_at": "2026-08-20T02:04:30+0000",
+          "actual_deg": 360.0,
+          "odom_deg": 385.8975902334414,
+          "scale": 0.9328899923480343
+        },
+        {
+          "captured_at": "2026-08-20T02:04:55+0000",
+          "actual_deg": 360.0,
+          "odom_deg": -394.777769158298,
+          "scale": 0.9119054519395878
+        },
+        {
+          "captured_at": "2026-08-20T02:37:48+0000",
+          "actual_deg": 360.0,
+          "command_deg": -373.0079331485327,
+          "scale": 0.9651269262861686
+        },
+        {
+          "captured_at": "2026-08-20T03:44:53+0000",
+          "actual_deg": 360.0,
+          "command_deg": -393.02426750201545,
+          "scale": 0.9159739735362624,
+          "angular_speed_rad_s": 0.35,
+          "set_motor": {
+            "event_count": 199,
+            "mean_abs_rps": 0.2411564668480157,
+            "max_abs_rps": 0.24115646684801184
+          },
+          "difference_vs_previous_percent": -1.4831540654615005
+        },
+        {
+          "captured_at": "2026-08-20T03:56:57+0000",
+          "load_state": "unloaded",
+          "actual_deg": 360.0,
+          "command_deg": -378.25049021590536,
+          "scale": 0.9517502536335433,
+          "angular_speed_rad_s": 0.55,
+          "set_motor": {
+            "event_count": 145,
+            "mean_abs_rps": 0.37896016218973466,
+            "max_abs_rps": 0.3789601621897329
+          },
+          "difference_vs_previous_percent": 2.669283772120745
+        },
+        {
+          "captured_at": "2026-08-20T03:58:59+0000",
+          "load_state": "unloaded",
+          "actual_deg": 360.0,
+          "command_deg": -384.4277856275444,
+          "scale": 0.9364567636866618,
+          "angular_speed_rad_s": 0.55,
+          "set_motor": {
+            "event_count": 125,
+            "mean_abs_rps": 0.37896016218973394,
+            "max_abs_rps": 0.3789601621897329
+          },
+          "difference_vs_previous_percent": 0.572085269600997
+        },
+        {
+          "captured_at": "2026-08-20T03:59:15+0000",
+          "load_state": "unloaded",
+          "actual_deg": 360.0,
+          "command_deg": -374.9496159949405,
+          "scale": 0.9601290003851018,
+          "angular_speed_rad_s": 0.55,
+          "set_motor": {
+            "event_count": 120,
+            "mean_abs_rps": 0.3789601621897338,
+            "max_abs_rps": 0.3789601621897329
+          },
+          "difference_vs_previous_percent": 3.030195334658936
+        }
+      ],
+      "rotation_friction_by_speed": {
+        "0.35": {
+          "coefficient": 0.9159739735362624,
+          "sample_count": 1
+        },
+        "0.55": {
+          "coefficient": 0.9494453392351022,
+          "sample_count": 3
+        }
+      },
+      "distance_coefficient": 0.8326736041500737,
+      "distance_calibration_samples": [
+        {
+          "captured_at": "2026-08-20T02:38:48+0000",
+          "actual_cm": 50.0,
+          "command_cm": 58.992415129996544,
+          "scale": 0.847566587837085
+        },
+        {
+          "captured_at": "2026-08-20T02:39:29+0000",
+          "actual_cm": 50.0,
+          "command_cm": 57.57323277998694,
+          "scale": 0.868459136054985
+        },
+        {
+          "captured_at": "2026-08-20T03:30:34+0000",
+          "actual_cm": 50.0,
+          "command_cm": 55.215118668013,
+          "scale": 0.9055490815953965,
+          "linear_speed_m_s": 0.12,
+          "set_motor": {
+            "event_count": 47,
+            "mean_abs_rps": 0.5876490206469963,
+            "max_abs_rps": 0.5876490206469981
+          },
+          "difference_vs_previous_percent": 5.540268888457667
+        },
+        {
+          "captured_at": "2026-08-20T03:47:27+0000",
+          "actual_cm": 50.0,
+          "command_cm": 58.79196325198427,
+          "scale": 0.8504563759114213,
+          "linear_speed_m_s": 0.12,
+          "set_motor": {
+            "event_count": 52,
+            "mean_abs_rps": 0.5876490206469961,
+            "max_abs_rps": 0.5876490206469981
+          },
+          "difference_vs_previous_percent": -2.6779963557113984
+        },
+        {
+          "captured_at": "2026-08-20T03:48:00+0000",
+          "actual_cm": 50.0,
+          "command_cm": 52.700432565015966,
+          "scale": 0.9487588159417009,
+          "linear_speed_m_s": 0.17,
+          "set_motor": {
+            "event_count": 32,
+            "mean_abs_rps": 0.8325027792499115,
+            "max_abs_rps": 0.8325027792499141
+          },
+          "difference_vs_previous_percent": 9.303029422615294
+        },
+        {
+          "captured_at": "2026-08-20T03:48:11+0000",
+          "actual_cm": 50.0,
+          "command_cm": 54.41900994400387,
+          "scale": 0.9187965758923041,
+          "linear_speed_m_s": 0.17,
+          "set_motor": {
+            "event_count": 33,
+            "mean_abs_rps": 0.8325027792499113,
+            "max_abs_rps": 0.8325027792499141
+          },
+          "difference_vs_previous_percent": 3.9176907798180727
+        },
+        {
+          "captured_at": "2026-08-20T03:48:19+0000",
+          "actual_cm": 50.0,
+          "command_cm": 54.38550268898869,
+          "scale": 0.9193626523217444,
+          "linear_speed_m_s": 0.17,
+          "set_motor": {
+            "event_count": 33,
+            "mean_abs_rps": 0.8325027792499113,
+            "max_abs_rps": 0.8325027792499141
+          },
+          "difference_vs_previous_percent": 3.3071725362185944
+        },
+        {
+          "captured_at": "2026-08-20T08:37:24+0000",
+          "load_state": "unloaded",
+          "actual_cm": 5.0,
+          "command_cm": 9.645794243999264,
+          "scale": 0.5183606319521635,
+          "linear_speed_m_s": 0.12,
+          "set_motor": {
+            "event_count": 12,
+            "mean_abs_rps": 0.5876490206469981,
+            "max_abs_rps": 0.5876490206469981
+          },
+          "difference_vs_previous_percent": -42.026619918080534
+        },
+        {
+          "captured_at": "2026-08-20T08:37:34+0000",
+          "load_state": "unloaded",
+          "actual_cm": 5.0,
+          "command_cm": 9.593628852013355,
+          "scale": 0.5211792197850849,
+          "linear_speed_m_s": 0.12,
+          "set_motor": {
+            "event_count": 15,
+            "mean_abs_rps": 0.5876490206469981,
+            "max_abs_rps": 0.5876490206469981
+          },
+          "difference_vs_previous_percent": -38.479517006848106
+        },
+        {
+          "captured_at": "2026-08-20T08:37:42+0000",
+          "load_state": "unloaded",
+          "actual_cm": 5.0,
+          "command_cm": 4.808597879993612,
+          "scale": 1.0398041434911256,
+          "linear_speed_m_s": 0.12,
+          "set_motor": {
+            "event_count": 5,
+            "mean_abs_rps": 0.587649020646998,
+            "max_abs_rps": 0.5876490206469981
+          },
+          "difference_vs_previous_percent": 28.221570140275066
+        },
+        {
+          "captured_at": "2026-08-20T08:37:49+0000",
+          "load_state": "unloaded",
+          "actual_cm": 5.0,
+          "command_cm": 6.089270471973579,
+          "scale": 0.8211164248677989,
+          "linear_speed_m_s": 0.12,
+          "set_motor": {
+            "event_count": 19,
+            "mean_abs_rps": 0.5876490206469986,
+            "max_abs_rps": 0.5876490206469981
+          },
+          "difference_vs_previous_percent": -1.5246402199931786
+        }
+      ],
+      "forward_friction_by_speed": {
+        "0.12": {
+          "coefficient": 0.776077646267165,
+          "sample_count": 6
+        },
+        "0.17": {
+          "coefficient": 0.9289726813852498,
+          "sample_count": 3
+        }
+      },
+      "lateral_coefficient": 0.8468390229653254,
+      "lateral_calibration_samples": [
+        {
+          "captured_at": "2026-08-20T02:41:38+0000",
+          "actual_cm": 30.0,
+          "command_cm": 35.98259343999419,
+          "scale": 0.8337364578800867
+        },
+        {
+          "captured_at": "2026-08-20T02:42:05+0000",
+          "actual_cm": 30.0,
+          "command_cm": 34.00925441500474,
+          "scale": 0.8821128400499167
+        },
+        {
+          "captured_at": "2026-08-20T03:30:55+0000",
+          "actual_cm": 50.0,
+          "command_cm": 56.408360159999575,
+          "scale": 0.8863934327850947
+        },
+        {
+          "captured_at": "2026-08-20T03:45:10+0000",
+          "actual_cm": 50.0,
+          "command_cm": 44.396455092013625,
+          "scale": 1.1262160435190778
+        },
+        {
+          "captured_at": "2026-08-20T08:38:21+0000",
+          "load_state": "unloaded",
+          "actual_cm": 6.0,
+          "command_cm": 12.026768063980855,
+          "scale": 0.4988871464121345
+        },
+        {
+          "captured_at": "2026-08-20T08:38:38+0000",
+          "load_state": "unloaded",
+          "actual_cm": 6.0,
+          "command_cm": 6.006446808001783,
+          "scale": 0.9989266852420644
+        },
+        {
+          "captured_at": "2026-08-20T08:38:43+0000",
+          "load_state": "unloaded",
+          "actual_cm": 6.0,
+          "command_cm": 7.205298696000681,
+          "scale": 0.8327205093288242
+        },
+        {
+          "captured_at": "2026-08-20T08:38:50+0000",
+          "load_state": "unloaded",
+          "actual_cm": 6.0,
+          "command_cm": 8.383177511994294,
+          "scale": 0.7157190685054032
+        }
+      ],
+      "lateral_friction_by_speed": {}
+    }
+  },
+  "centerline_offset_cm": 0.0,
+  "insertion_distance_cm": 9.0,
+  "near_center_check_distance_cm": 25.0,
+  "search_linear_speed_m_s": 0.08,
+  "disable_external_webcams": true,
+  "candidate_stop_delay_sec": 0.5,
+  "lidar_front_clearance_m": 0.2,
+  "lidar_rear_clearance_m": 0.08,
+  "lidar_left_clearance_m": 0.08,
+  "lidar_right_clearance_m": 0.08,
+  "nav_approach_standoff_m": 0.45
+}

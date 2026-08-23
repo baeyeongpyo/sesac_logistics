@@ -4,7 +4,7 @@ package_name = "auto_dock"
 
 setup(
     name=package_name,
-    version="1.2.0",
+    version="1.3.0",
     packages=[package_name],
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/auto_dock"]),
@@ -21,7 +21,6 @@ setup(
         "console_scripts": [
             "auto_dock_node = auto_dock.auto_dock_node:main",
             "tag_entity_mapper = auto_dock.tag_entity_mapper:main",
-            "target_nav_bridge = auto_dock.target_nav_bridge:main",
         ],
     },
 )

@@ -28,7 +28,6 @@
 
 ## Nav2 approach handoff
 
-- After a stable target measurement, Auto Dock publishes the target pose as JSON on `/robot_2/auto_dock/target_found` and stops its own drive output.
-- The separate `/target_nav_bridge` converts the odom target into `map`, offsets `nav_approach_standoff_m` (default `0.45 m`) in front of the tagged face, and sends that pose to Nav2's `/navigate_to_pose` action.
-- The bridge publishes JSON on `/robot_2/nav2/approach_result`; only a `succeeded` result lets Auto Dock resume camera-based final alignment and insertion.
-- This bridge is part of `auto_dock.launch.py`, not the vehicle bringup.
+- After a stable target measurement, Auto Dock selects the matching entity from `/robot_2/tag_entity_map`, offsets `nav_approach_standoff_m` (default `0.45 m`) in front of its mapped face, and publishes a `map`-frame `geometry_msgs/msg/PoseStamped` on `/robot_2/nav2/approach_goal`.
+- The Nav2 owner consumes that goal and publishes JSON on `/robot_2/nav2/approach_result`; only a `succeeded` result lets Auto Dock resume camera-based final alignment and insertion.
+- No local Nav2 bridge is used, and the vehicle bringup remains unchanged.

@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 import rclpy
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -59,7 +59,8 @@ class AutoDockNode(Node):
         self.declare_parameter("entry_complete_topic", "")
         self.declare_parameter("lift_up_complete_topic", "")
         self.declare_parameter("drive_ready_topic", "")
-        self.declare_parameter("target_found_topic", "")
+        self.declare_parameter("entity_map_topic", "")
+        self.declare_parameter("nav_approach_goal_topic", "")
         self.declare_parameter("nav_approach_result_topic", "")
         self.declare_parameter("detection_topic", "")
         self.declare_parameter("scan_topic", "/scan_raw")
@@ -101,8 +102,11 @@ class AutoDockNode(Node):
         self.drive_ready_topic = self.topic_or_default(
             "drive_ready_topic", f"{robot}/auto_dock/drive_ready"
         )
-        self.target_found_topic = self.topic_or_default(
-            "target_found_topic", f"{robot}/auto_dock/target_found"
+        self.entity_map_topic = self.topic_or_default(
+            "entity_map_topic", f"{robot}/tag_entity_map"
+        )
+        self.nav_approach_goal_topic = self.topic_or_default(
+            "nav_approach_goal_topic", f"{robot}/nav2/approach_goal"
         )
         self.nav_approach_result_topic = self.topic_or_default(
             "nav_approach_result_topic", f"{robot}/nav2/approach_result"
@@ -120,6 +124,7 @@ class AutoDockNode(Node):
         self.target_right = "spade"
         self.latest_detection = None
         self.latest_detection_at = 0.0
+        self.latest_entity_map = None
         self.candidate_stop_due_at = None
         self.odom_position = None
         self.odom_yaw = None
@@ -154,8 +159,8 @@ class AutoDockNode(Node):
         self.drive_ready_pub = self.create_publisher(
             Empty, self.drive_ready_topic, 10
         )
-        self.target_found_pub = self.create_publisher(
-            String, self.target_found_topic, 10
+        self.nav_approach_goal_pub = self.create_publisher(
+            PoseStamped, self.nav_approach_goal_topic, 10
         )
         self.create_subscription(String, self.trigger_topic, self.on_trigger, 10)
         self.create_subscription(Empty, self.stop_topic, self.on_stop, 10)
@@ -166,6 +171,7 @@ class AutoDockNode(Node):
             String, self.nav_approach_result_topic, self.on_nav_approach_result, 10
         )
         self.create_subscription(String, self.detection_topic, self.on_detection, 10)
+        self.create_subscription(String, self.entity_map_topic, self.on_entity_map, 10)
         self.create_subscription(
             LaserScan, str(self.get_parameter("scan_topic").value), self.on_scan, 10
         )
@@ -326,6 +332,52 @@ class AutoDockNode(Node):
             self.latest_detection_at = time.monotonic()
         except (TypeError, ValueError, json.JSONDecodeError):
             self.get_logger().warning("invalid detection JSON")
+
+    def on_entity_map(self, msg):
+        try:
+            payload = json.loads(msg.data)
+            if payload.get("frame_id") == "map":
+                self.latest_entity_map = payload
+        except (TypeError, ValueError, json.JSONDecodeError):
+            self.get_logger().warning("invalid tag entity map JSON")
+
+    def publish_nav_approach_goal(self, candidate):
+        entities = (self.latest_entity_map or {}).get("entities") or []
+        matrix = tuple(candidate.get("matrix") or [])
+        matches = [
+            entity for entity in entities
+            if tuple(entity.get("matrix") or []) == matrix
+        ]
+        if not matches:
+            return False
+        entity = max(
+            matches, key=lambda item: float(item.get("last_seen_unix", 0.0))
+        )
+        center_pose = entity.get("pose") or {}
+        face_pose = entity.get("face_pose")
+        try:
+            yaw = float(center_pose["yaw"])
+            if isinstance(face_pose, dict):
+                face_x = float(face_pose["x"])
+                face_y = float(face_pose["y"])
+            else:
+                face_to_center = self.number(
+                    "pallet_face_to_center_m", 0.065, 0.01, 0.50
+                )
+                face_x = float(center_pose["x"]) - face_to_center * math.cos(yaw)
+                face_y = float(center_pose["y"]) - face_to_center * math.sin(yaw)
+        except (KeyError, TypeError, ValueError):
+            return False
+        standoff = self.number("nav_approach_standoff_m", 0.45, 0.20, 2.0)
+        goal = PoseStamped()
+        goal.header.frame_id = "map"
+        goal.header.stamp = self.get_clock().now().to_msg()
+        goal.pose.position.x = face_x - standoff * math.cos(yaw)
+        goal.pose.position.y = face_y - standoff * math.sin(yaw)
+        goal.pose.orientation.z = math.sin(yaw * 0.5)
+        goal.pose.orientation.w = math.cos(yaw * 0.5)
+        self.nav_approach_goal_pub.publish(goal)
+        return True
 
     def on_scan(self, msg):
         self.nearest_range = math.inf
@@ -527,19 +579,11 @@ class AutoDockNode(Node):
             return
         if not self.nav_approach_completed:
             self.stop_drive(5)
-            self.target_found_pub.publish(String(data=json.dumps({
-                "source_stamp_ns": int(
-                    (self.latest_detection or {}).get("source_stamp_ns", 0) or 0
-                ),
-                "frame_id": "odom",
-                "target": dict(self.target_world),
-                "matrix": list(candidate.get("matrix") or []),
-                "approach_standoff_m": self.number(
-                    "nav_approach_standoff_m", 0.45, 0.20, 2.0
-                ),
-            }, ensure_ascii=False)))
+            if not self.publish_nav_approach_goal(candidate):
+                self.publish_status("waiting", "target_found_waiting_tag_map")
+                return
             self.state = "waiting_nav_approach"
-            self.publish_status("waiting", "target_found_waiting_nav2")
+            self.publish_status("waiting", "map_goal_sent_waiting_nav2")
             return
         self.nav_approach_completed = False
         self.state = "docking"

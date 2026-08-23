@@ -86,11 +86,4 @@ def generate_launch_description():
             output="screen",
             parameters=[{"vehicle": LaunchConfiguration("vehicle")}],
         ),
-        Node(
-            package="auto_dock",
-            executable="target_nav_bridge",
-            name="target_nav_bridge",
-            output="screen",
-            parameters=[{"vehicle": LaunchConfiguration("vehicle")}],
-        ),
     ])
