@@ -34,6 +34,15 @@ def normalize_angle(angle):
     return math.atan2(math.sin(angle), math.cos(angle))
 
 
+def scan_direction(angle):
+    """Return the dominant body direction for a LiDAR bearing."""
+    x = math.cos(angle)
+    y = math.sin(angle)
+    if abs(x) >= abs(y):
+        return "front" if x >= 0.0 else "rear"
+    return "left" if y >= 0.0 else "right"
+
+
 class AutoDockNode(Node):
     """ROS-only docking controller; no Qt widget or UI state is used."""
 
@@ -96,6 +105,10 @@ class AutoDockNode(Node):
         self.odom_yaw = None
         self.nearest_range = math.inf
         self.nearest_angle = None
+        self.nearest_by_direction = {
+            direction: (math.inf, None)
+            for direction in ("front", "rear", "left", "right")
+        }
         self.target_world = None
         self.insert_start_position = None
         self.backoff_until = None
@@ -241,15 +254,24 @@ class AutoDockNode(Node):
     def on_scan(self, msg):
         self.nearest_range = math.inf
         self.nearest_angle = None
+        self.nearest_by_direction = {
+            direction: (math.inf, None)
+            for direction in ("front", "rear", "left", "right")
+        }
         self_filter = self.number("lidar_self_filter_distance_m", 0.25, 0.05, 1.0)
         for index, distance in enumerate(msg.ranges):
             if not math.isfinite(distance) or distance < max(msg.range_min, self_filter):
                 continue
-            if distance > msg.range_max or distance >= self.nearest_range:
+            if distance > msg.range_max:
                 continue
-            self.nearest_range = distance
             angle = msg.angle_min + index * msg.angle_increment
-            self.nearest_angle = normalize_angle(angle)
+            angle = normalize_angle(angle)
+            direction = scan_direction(angle)
+            if distance < self.nearest_by_direction[direction][0]:
+                self.nearest_by_direction[direction] = (distance, angle)
+            if distance < self.nearest_range:
+                self.nearest_range = distance
+                self.nearest_angle = angle
 
     def on_odom(self, msg):
         pose = msg.pose.pose
@@ -329,16 +351,31 @@ class AutoDockNode(Node):
     def interrupt_for_lidar(self):
         if self.state in {"idle", "safety_backoff"}:
             return False
-        stop_distance = self.number("lidar_stop_distance_m", 0.35, 0.05, 2.0)
-        if self.nearest_range >= stop_distance:
+        legacy_clearance = self.number("lidar_stop_distance_m", 0.35, 0.05, 2.0)
+        violations = []
+        for direction, (distance, angle) in self.nearest_by_direction.items():
+            clearance = self.number(
+                f"lidar_{direction}_clearance_m", legacy_clearance, 0.05, 2.0
+            )
+            if distance < clearance:
+                violations.append(
+                    (distance - clearance, direction, distance, angle, clearance)
+                )
+        if not violations:
             return False
+        _margin, direction, distance, angle, clearance = min(violations)
+        self.nearest_range = distance
+        self.nearest_angle = angle
         self.was_docking_before_interrupt = self.state in {"docking", "inserting"}
         self.candidate_stop_due_at = None
-        angle = self.nearest_angle or 0.0
+        angle = angle or 0.0
         self.backoff_command = (-0.08 * math.cos(angle), -0.08 * math.sin(angle))
         self.backoff_until = time.monotonic() + 0.7
         self.state = "safety_backoff"
-        self.publish_status("recovering", "lidar_backoff")
+        self.publish_status(
+            "recovering", "lidar_backoff", direction=direction,
+            range_m=round(distance, 3), clearance_m=round(clearance, 3),
+        )
         return True
 
     def tick(self):
