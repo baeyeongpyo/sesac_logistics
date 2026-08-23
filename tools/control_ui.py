@@ -70,9 +70,7 @@ def runtime_args(cli):
         battery_topic="/ros_robot_controller/battery",
         detection_topic=f"/robot_{cli.vehicle}/symbol_seg/detections",
         cmd_vel_topic="/controller/cmd_vel", fork_command_topic="/fork/command",
-        auto_dock_trigger_topic=f"/robot_{cli.vehicle}/nav2/arrival",
-        auto_dock_stop_topic=f"/robot_{cli.vehicle}/auto_dock/stop",
-        auto_dock_status_topic=f"/robot_{cli.vehicle}/auto_dock/status",
+        arrival_topic=f"/robot_{cli.vehicle}/nav2/arrival",
         output_dir=f"/home/ubuntu/recordings/vehicle{cli.vehicle}", linear_speed=cli.speed,
         angular_speed=cli.angular_speed, camera_pitch_deg=0.0,
         friction_coefficient=1.0, pose_config=cli.pose_config,
@@ -92,10 +90,17 @@ def draw(stdscr, window, movement_name, fork_name):
     detection = window.node.latest_detection or {}
     candidate = detection.get("candidate") or {}
     pnp = candidate.get("pnp") or {}
-    mode_text = "Auto Dock 1.2 ROS 클라이언트"
+    if window.terminal_run_mode == "search":
+        mode_text = "원형 탐색 → 발견 시 무제한 자동"
+    elif window.terminal_run_mode == "auto":
+        mode_text = "무제한 자동 사이클 → 자동 삽입"
+    elif window.arc_cycle_limit == 3:
+        mode_text = "사이클 (최대 3회, 삽입 전 정지)"
+    else:
+        mode_text = "단일 (계산·주행 1회 후 삽입 전 정지)"
     lines = [
         f"control_ui 차량 {window.args.vehicle}  WASD: 전후/횡이동  Q/E: 회전  ↑/↓: 리프트  SPACE: 정지",
-        "ENTER: Auto Dock 1.2 시작  O: 공통 설정 JSON  Z/SPACE: Auto Dock 정지",
+        ".: 주행계산  ENTER: 탐색/주행실행  P: 1.2 arrival 발행  M: 모드 선택  O: 설정  Z: 취소",
         f"목표: {window.target_left.currentData()} / {window.target_right.currentData()}",
         f"중심선 보정: {window.centerline_offset_cm:+.1f} cm (+왼쪽/-오른쪽)",
         f"추가 주행보정: 횡이동 {window.lateral_overrun_cm:.1f} cm / "
@@ -151,8 +156,6 @@ def terminal_loop(stdscr, window, app, key_timeout):
             break
         if key in movement_keys:
             qt_key, movement_name = movement_keys[key]
-            if not (window.pressed & window.MOVEMENT_KEYS):
-                window.node.stop_auto_dock()
             window.pressed.difference_update(window.MOVEMENT_KEYS)
             window.pressed.add(qt_key)
             movement_deadline = now + key_timeout
@@ -167,14 +170,25 @@ def terminal_loop(stdscr, window, app, key_timeout):
             movement_deadline = 0.0
             movement_name = ""
             fork_name = "정지"
+        elif key == ord("."):
+            window.pressed.difference_update(window.MOVEMENT_KEYS)
+            movement_name = ""
+            if window.terminal_run_mode != "search":
+                window.cancel_arc_approach("새 주행 계산")
+                window.plan_arc_approach()
         elif key in (10, 13):
             window.pressed.difference_update(window.MOVEMENT_KEYS)
             window.node.stop(repeats=3)
             movement_name = ""
-            window.run_selected_mode()
+            if window.terminal_run_mode == "search":
+                window.start_target_search()
+            else:
+                window.start_arc_approach()
         elif key in (ord("z"), ord("Z")):
-            window.stop_auto_dock_client()
+            window.cancel_arc_approach("터미널 사용자 취소")
             movement_name = ""
+        elif key in (ord("p"), ord("P")):
+            window.publish_arrival_trigger()
         elif key in (ord("o"), ord("O")):
             if window.arc_active or window.target_search_active:
                 window.arc_label.setText("주행 또는 탐색 중에는 설정 파일을 열 수 없음")
@@ -190,6 +204,36 @@ def terminal_loop(stdscr, window, app, key_timeout):
                 window.arc_label.setText("공통 설정 JSON을 다시 읽음")
             except OSError as exc:
                 window.arc_label.setText(f"설정 편집기 실행 실패: {exc}")
+        elif key in (ord("m"), ord("M")):
+            if (
+                window.arc_active
+                or window.target_search_active
+                or window.arc_cycle_replan_due_at is not None
+            ):
+                window.arc_label.setText("주행 중에는 모드 변경 불가")
+            else:
+                current = window.terminal_run_mode
+                if current == "auto":
+                    window.terminal_run_mode = "single"
+                    window.arc_cycle_limit = 1
+                    window.arc_auto_insert_after_verify = False
+                    mode = "단일"
+                elif current == "single":
+                    window.terminal_run_mode = "cycle3"
+                    window.arc_cycle_limit = 3
+                    window.arc_auto_insert_after_verify = False
+                    mode = "사이클(최대 3회, 삽입 전 정지)"
+                elif current == "cycle3":
+                    window.terminal_run_mode = "search"
+                    window.arc_cycle_limit = 0
+                    window.arc_auto_insert_after_verify = True
+                    mode = "원형 탐색 → 발견 시 무제한 자동"
+                else:
+                    window.terminal_run_mode = "auto"
+                    window.arc_cycle_limit = 0
+                    window.arc_auto_insert_after_verify = True
+                    mode = "무제한 자동 사이클 → 자동 삽입"
+                window.arc_label.setText(f"주행 모드: {mode}")
         if movement_deadline and now >= movement_deadline:
             window.pressed.difference_update(window.MOVEMENT_KEYS)
             window.node.stop(repeats=3)
