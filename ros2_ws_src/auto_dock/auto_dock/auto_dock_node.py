@@ -263,9 +263,11 @@ class AutoDockNode(Node):
         if detection.get("target_top") != [self.target_left, self.target_right]:
             return None, None
         candidate = detection.get("candidate")
-        pnp = candidate.get("pnp") if isinstance(candidate, dict) else None
-        if not isinstance(pnp, dict):
+        if not isinstance(candidate, dict):
             return None, None
+        pnp = candidate.get("pnp")
+        if not isinstance(pnp, dict):
+            pnp = None
         return candidate, pnp
 
     def valid_measurement(self):
@@ -275,6 +277,8 @@ class AutoDockNode(Node):
         frames = int(self.number("stable_detection_frames", 5, 1, 30))
         if int(candidate.get("streak", 0)) < frames:
             return None, None, "unstable_detection"
+        if pnp is None:
+            return None, None, "invalid_pnp"
         try:
             forward_cm = float(pnp["forward_distance_cm"])
             reprojection = float(pnp.get("reprojection_error_px", 999.0))
