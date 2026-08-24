@@ -150,3 +150,18 @@ def test_search_locks_virtual_target_before_stopping():
 
     assert fake.state == "docking"
     assert fake.nav_approach_completed is False
+
+
+def test_insertion_uses_configured_speed_before_distance_is_reached():
+    fake = type("FakeDock", (), {})()
+    fake.insert_start_position = (0.0, 0.0)
+    fake.odom_position = (0.05, 0.0)
+    commands = []
+    values = {"insertion_distance_cm": 15.0, "insertion_speed_m_s": 0.08}
+    fake.number = lambda key, *_args: values[key]
+    fake.cancel = lambda reason: pytest.fail(reason)
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+
+    AutoDockNode.tick_inserting(fake)
+
+    assert commands == [(0.08, 0.0, 0.0)]

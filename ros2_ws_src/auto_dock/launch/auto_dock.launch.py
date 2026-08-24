@@ -56,6 +56,14 @@ def generate_launch_description():
             description="Temporary search speed override in m/s; 0 uses pose config.",
         ),
         DeclareLaunchArgument(
+            "insertion_distance_cm", default_value="0.0",
+            description="Temporary insertion distance override in cm; 0 uses pose config.",
+        ),
+        DeclareLaunchArgument(
+            "insertion_speed_m_s", default_value="0.0",
+            description="Temporary insertion speed override in m/s; 0 uses pose config.",
+        ),
+        DeclareLaunchArgument(
             "config_overrides", default_value="{}",
             description="Temporary JSON object merged over pose config for this run only.",
         ),
@@ -82,6 +90,8 @@ def generate_launch_description():
                 # Keep the short speed override for quick field tests; it is
                 # merged by launch into the same JSON override mechanism.
                 "search_linear_speed_m_s": LaunchConfiguration("search_linear_speed_m_s"),
+                "insertion_distance_cm": LaunchConfiguration("insertion_distance_cm"),
+                "insertion_speed_m_s": LaunchConfiguration("insertion_speed_m_s"),
             }],
         ),
         Node(
