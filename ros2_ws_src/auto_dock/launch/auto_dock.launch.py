@@ -3,6 +3,7 @@ import time
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, OpaqueFunction
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -58,6 +59,10 @@ def generate_launch_description():
             "config_overrides", default_value="{}",
             description="Temporary JSON object merged over pose config for this run only.",
         ),
+        DeclareLaunchArgument(
+            "use_tag_entity_mapper", default_value="false",
+            description="Start the map-based tag entity mapper.",
+        ),
         # YOLO stays an independent node; auto_dock sends only its selected
         # tag pair through the existing local UDP target-control interface.
         OpaqueFunction(function=yolo_process),
@@ -85,5 +90,6 @@ def generate_launch_description():
             name="tag_entity_mapper",
             output="screen",
             parameters=[{"vehicle": LaunchConfiguration("vehicle")}],
+            condition=IfCondition(LaunchConfiguration("use_tag_entity_mapper")),
         ),
     ])

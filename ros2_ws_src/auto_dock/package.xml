@@ -1,19 +1,22 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>auto_dock</name>
-  <version>1.3.0</version>
+  <version>1.4.0</version>
   <description>Headless pallet search, alignment, insertion, and lift runner.</description>
   <maintainer email="robotics@example.com">sesac</maintainer>
   <license>Apache-2.0</license>
 
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

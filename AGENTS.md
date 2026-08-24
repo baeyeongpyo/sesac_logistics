@@ -95,3 +95,26 @@ Use this state sequence when interpreting or planning tasks:
 
 Do not reject a task merely because forward motion from the work pose is
 blocked. First evaluate the straight reverse escape and its complete swept area.
+
+## Vehicle ROS 2 access and DDS domains
+
+Use the existing interactive Bash functions when inspecting the real vehicles.
+When a non-interactive tool shell does not know these functions, invoke them as
+`bash -ic 'ros21'` or `bash -ic 'ros22'`.
+
+| Vehicle | Shell command | SSH host | Docker shell command | ROS domain |
+| --- | --- | --- | --- | --- |
+| Vehicle 1 | `ros21` | `intelions@192.168.100.38` | `cd "$HOME/docker" && exec ./exec_shell.sh` | `215` |
+| Vehicle 2 | `ros22` | `intelions@192.168.100.35` | `cd "$HOME/docker" && exec ./exec_shell.sh` | `216` |
+
+The `auto_dock`, `fork_controller`, and `tag_entity_mapper` nodes map DDS domain
+`215` to vehicle 1 and `216` to vehicle 2 when their `vehicle` parameter is
+zero. Set or verify the appropriate `ROS_DOMAIN_ID` when running ROS commands;
+do not infer the vehicle from the SSH hostname alone.
+
+The two vehicles use separate DDS domains. Therefore the absolute topic
+`/fork/command` is intentionally shared as a name and does not need a
+`/robot_N` prefix: each vehicle sees only the copy in its own DDS domain.
+Vehicle-specific workflow, result, and status topics may still use the explicit
+`/robot_1/...` or `/robot_2/...` form. A leading `/` makes a topic absolute, so
+a ROS node namespace does not alter `/fork/command`.
