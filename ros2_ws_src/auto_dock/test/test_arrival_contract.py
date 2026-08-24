@@ -130,3 +130,23 @@ def test_fork_completion_starts_reverse(fork_state, expected_load):
     assert fake.load_state == expected_load
     assert fake.post_lift_reverse_start == (1.0, 2.0)
     assert fake.state == "reversing_after_lift"
+
+
+def test_search_locks_virtual_target_before_stopping():
+    fake = type("FakeDock", (), {})()
+    candidate = {"tag_id": 7}
+    pnp = {"forward": 0.6, "lateral": 0.1, "yaw": 0.0}
+    fake.candidate_stop_due_at = 0.0
+    fake.valid_measurement = lambda: (candidate, pnp, "ok")
+    fake.update_world_target = lambda got_candidate, got_pnp: (
+        got_candidate == candidate and got_pnp == pnp
+    )
+    fake.boolean = lambda key, default: False if key == "use_nav_approach" else default
+    fake.stop_drive = lambda *_args: None
+    fake.publish_status = lambda *_args, **_kwargs: None
+    fake.nav_approach_completed = True
+
+    AutoDockNode.tick_search(fake)
+
+    assert fake.state == "docking"
+    assert fake.nav_approach_completed is False

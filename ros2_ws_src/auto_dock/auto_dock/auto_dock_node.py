@@ -969,7 +969,7 @@ class AutoDockNode(Node):
             self.tick_backoff()
 
     def tick_search(self):
-        candidate, _pnp = self.selected_candidate()
+        candidate, _pnp, _reason = self.valid_measurement()
         now = time.monotonic()
         if candidate is not None and self.candidate_stop_due_at is None:
             delay = self.number("candidate_stop_delay_sec", 0.5, 0.0, 5.0)
@@ -979,10 +979,30 @@ class AutoDockNode(Node):
             )
         if self.candidate_stop_due_at is not None and now >= self.candidate_stop_due_at:
             self.candidate_stop_due_at = None
-            self.stop_drive(5)
-            self.state = "confirm"
-            self.publish_status("running", "candidate_paused_for_confirmation")
-            return
+            candidate, pnp, reason = self.valid_measurement()
+            if candidate is None:
+                self.publish_status(
+                    "running", "candidate_validation_lost_resume_search",
+                    measurement_reason=reason,
+                )
+            elif not self.update_world_target(candidate, pnp):
+                self.cancel("odom_missing")
+                return
+            elif not self.boolean("use_nav_approach", True):
+                self.stop_drive(5)
+                self.nav_approach_completed = False
+                self.state = "docking"
+                self.publish_status("running", "virtual_target_locked_docking")
+                return
+            else:
+                self.stop_drive(5)
+                if self.publish_nav_approach_goal(candidate):
+                    self.state = "waiting_nav_approach"
+                    self.publish_status("waiting", "map_goal_sent_waiting_nav2")
+                else:
+                    self.state = "confirm"
+                    self.publish_status("waiting", "target_found_waiting_tag_map")
+                return
         fallback_speed = self.number("search_linear_speed_m_s", 0.03, 0.01, 0.30)
         lateral_speed = self.number(
             "search_lateral_speed_m_s", fallback_speed, 0.01, 0.30
