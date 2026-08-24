@@ -174,6 +174,45 @@ def test_first_matching_frame_schedules_stop_after_point_two_seconds(monkeypatch
     assert commands == [(0.0, 0.08, 0.0)]
 
 
+def test_stable_target_uses_depth_when_pnp_quality_is_bad():
+    fake = type("FakeDock", (), {})()
+    candidate = {
+        "streak": 10,
+        "center_error": 0.24,
+        "frontal_error": -0.43,
+        "depth_yaw": {"forward_distance_cm": 15.9, "yaw_deg": 4.1},
+    }
+    pnp = {
+        "reprojection_error_px": 35.8,
+        "lateral_ratio": 0.10,
+        "yaw_deg": -13.8,
+    }
+    fake.selected_candidate = lambda: (candidate, pnp)
+    fake.number = lambda key, *_args: 2 if key == "stable_detection_frames" else 0
+
+    got_candidate, got_pnp, reason = AutoDockNode.valid_measurement(fake)
+
+    assert got_candidate == candidate
+    assert reason is None
+    assert got_pnp["depth_fallback"] is True
+    assert got_pnp["lateral_ratio"] == pytest.approx(0.12)
+
+
+def test_close_valid_target_can_start_insertion():
+    fake = type("FakeDock", (), {})()
+    fake.valid_measurement = lambda: (None, None, "not_visible")
+    fake.target_in_body = lambda: (0.159, 0.0, 0.0)
+    fake.number = lambda key, *_args: 0.20 if key == "dock_standoff_m" else 0.0
+    fake.stop_drive = lambda *_args: None
+    fake.odom_position = (1.0, 2.0)
+    fake.publish_status = lambda *_args, **_kwargs: None
+
+    AutoDockNode.tick_docking(fake)
+
+    assert fake.state == "inserting"
+    assert fake.insert_start_position == (1.0, 2.0)
+
+
 def test_insertion_uses_configured_speed_before_distance_is_reached():
     fake = type("FakeDock", (), {})()
     fake.insert_start_position = (0.0, 0.0)

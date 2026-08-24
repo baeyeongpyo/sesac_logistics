@@ -768,6 +768,7 @@ class AutoDockNode(Node):
             return None, None, "depth_distance_unavailable"
         try:
             forward_cm = float(depth_measurement["forward_distance_cm"])
+            depth_yaw_deg = float(depth_measurement["yaw_deg"])
             reprojection = float(pnp.get("reprojection_error_px", 999.0))
             frontal = abs(float(candidate.get("frontal_error", 999.0)))
         except (KeyError, TypeError, ValueError):
@@ -775,7 +776,20 @@ class AutoDockNode(Node):
         if not 10.0 <= forward_cm <= 300.0:
             return None, None, "invalid_depth_distance"
         if reprojection > 3.0 or frontal > 0.35:
-            return None, None, "invalid_pnp"
+            try:
+                center_error = float(candidate["center_error"])
+            except (KeyError, TypeError, ValueError):
+                return None, None, "invalid_pnp"
+            if (
+                not math.isfinite(depth_yaw_deg)
+                or abs(depth_yaw_deg) > 45.0
+                or not math.isfinite(center_error)
+                or abs(center_error) > 1.0
+            ):
+                return None, None, "invalid_pnp"
+            pnp = dict(pnp)
+            pnp["lateral_ratio"] = clamp(0.5 * center_error, -0.5, 0.5)
+            pnp["depth_fallback"] = True
         return candidate, pnp, None
 
     def update_world_target(self, candidate, pnp, blend_existing=False):
@@ -785,9 +799,12 @@ class AutoDockNode(Node):
         forward = float(depth_measurement["forward_distance_cm"]) / 100.0
         lateral = -float(pnp.get("lateral_ratio", 0.0)) * forward
         lateral += self.number("centerline_offset_cm", 0.0) / 100.0
-        yaw_deg = -float(pnp.get("yaw_deg", 0.0))
         depth_yaw = candidate.get("depth_yaw") or {}
-        if depth_yaw.get("yaw_deg") is not None:
+        if pnp.get("depth_fallback"):
+            yaw_deg = float(depth_yaw.get("yaw_deg", 0.0))
+        else:
+            yaw_deg = -float(pnp.get("yaw_deg", 0.0))
+        if not pnp.get("depth_fallback") and depth_yaw.get("yaw_deg") is not None:
             yaw_deg = 0.5 * yaw_deg + 0.5 * float(depth_yaw["yaw_deg"])
         c, s = math.cos(self.odom_yaw), math.sin(self.odom_yaw)
         observed = {
@@ -903,7 +920,12 @@ class AutoDockNode(Node):
                 self.cancel("odom_missing")
                 return
             self.state = "docking"
-            self.publish_status("running", "virtual_target_locked_docking")
+            self.publish_status(
+                "running", "virtual_target_locked_docking",
+                measurement_source=(
+                    "depth_fallback" if pnp.get("depth_fallback") else "pnp_depth"
+                ),
+            )
             return
         fallback_speed = self.number("search_linear_speed_m_s", 0.03, 0.01, 0.30)
         lateral_speed = self.number(
@@ -938,7 +960,12 @@ class AutoDockNode(Node):
             self.cancel("odom_missing")
             return
         self.state = "docking"
-        self.publish_status("running", "virtual_target_locked_docking")
+        self.publish_status(
+            "running", "virtual_target_locked_docking",
+            measurement_source=(
+                "depth_fallback" if pnp.get("depth_fallback") else "pnp_depth"
+            ),
+        )
 
     def tick_docking(self):
         candidate, pnp, _ = self.valid_measurement()
@@ -950,8 +977,8 @@ class AutoDockNode(Node):
             return
         forward, lateral, yaw = target
         standoff = self.number("dock_standoff_m", 0.20, 0.03, 1.0)
-        forward_error = forward - standoff
-        if abs(forward_error) < 0.035 and abs(lateral) < 0.025 and abs(yaw) < math.radians(3.0):
+        distance_ready = 0.10 <= forward <= standoff + 0.035
+        if distance_ready and abs(lateral) < 0.025 and abs(yaw) < math.radians(3.0):
             self.stop_drive(5)
             self.insert_start_position = self.odom_position
             self.state = "inserting"
