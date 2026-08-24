@@ -18,7 +18,11 @@ Fleet Bridge는 Foxglove `clientPublish`로 단방향 취소 토픽을 발행하
 - 명령 접수와 실제 작업 종료를 구분한다.
 - 취소 성공은 Nav2 또는 비전 작업의 종료와 최종 이동 출력 0이 모두 확인된
   경우에만 선언한다.
-- 취소 명령 재전송은 같은 `request_id`를 사용하며 차량에서 멱등하게 처리한다.
+- 모든 API 명령의 `command_id`는 서버가 생성한다. 클라이언트는 일반 명령에서
+  UUID를 만들거나 전달하지 않는다.
+- 취소 명령 재전송은 같은 `command_id`를 사용하며 차량에서 멱등하게 처리한다.
+- 특정 이전 명령을 지정할 때만 클라이언트가 서버가 반환했던 UUID를
+  `target_command_id`로 전달한다.
 - 수동 입력은 자동 작업보다 우선한다. 수동 입력이 들어오면 자동 작업을 중단하고
   수동 입력 종료 후 자동으로 재개하지 않는다.
 - 수동 개입 직전의 작업 상태와 작업 식별자를 보존한다. 후속 재주행 판단 로직은
@@ -85,8 +89,8 @@ vehicles:
       max_hold_ms: 1000
       publish_rate_hz: 10
     navigation:
-      goal_topic: /goal_pose
-      goal_type: geometry_msgs/msg/PoseStamped
+      goal_topic: /navigation/goal
+      goal_type: std_msgs/msg/String
       cancel_topic: /navigation/cancel
       cancel_type: std_msgs/msg/String
       status_topic: /operation/status
@@ -100,6 +104,8 @@ vehicles:
 
 | 설정 | 의미 | 기본값 | 유효 범위 |
 |---|---|---:|---:|
+| `goal_topic` | command ID와 PoseStamped 데이터를 담은 Nav2 goal command 토픽 | `/navigation/goal` | 유효한 절대 ROS 토픽 |
+| `goal_type` | Nav2 goal command envelope 메시지 타입 | `std_msgs/msg/String` | 고정 |
 | `cancel_topic` | Fleet Bridge가 취소 요청을 발행하는 토픽 | `/navigation/cancel` | 유효한 절대 ROS 토픽 |
 | `cancel_type` | 취소 요청 메시지 타입 | `std_msgs/msg/String` | 고정 |
 | `status_topic` | 차량이 통합 상태를 발행하는 토픽 | `/operation/status` | 유효한 절대 ROS 토픽 |
@@ -113,13 +119,80 @@ loader가 누락된 값에는 기본값을 적용하고, 범위를 벗어난 값
 `ConfigError`로 거부한다. 운영자는 `fleet.yaml`만 수정하고 Fleet Bridge를
 재시작해 정책을 바꿀 수 있다.
 
-기존 `cancel_service`와 `cancel_service_type` 설정은 `cancel_topic`과
-`cancel_type`으로 교체한다. 모든 차량 설정과 loader 테스트를 같은 변경에서
-갱신해 서비스 기반 경로가 실수로 다시 선택되지 않게 한다.
+기존 `geometry_msgs/msg/PoseStamped` goal 발행 계약은 command ID를 전달할 수 있는
+`std_msgs/msg/String` goal command envelope로 교체한다. 기존 `cancel_service`와
+`cancel_service_type` 설정도 `cancel_topic`과 `cancel_type`으로 교체한다. 모든
+차량 설정과 loader 테스트를 같은 변경에서 갱신해 서비스 기반 경로나 식별자 없는
+goal 경로가 실수로 다시 선택되지 않게 한다.
 
 차량은 각 취소 메시지에 포함된 `max_attempts`와
 `confirmation_timeout_ms`를 사용한다. 이로써 중앙 정책과 차량 측 실패 판정이
 서로 다른 값을 사용하는 것을 방지한다.
+
+## UUID 소유권과 명령 지정 규칙
+
+API 서버가 명령 식별자의 단일 생성자다. schema validation을 통과한 모든 명령은
+API가 접수할 때 UUID v4 `command_id`를 하나 생성하고 응답에 포함한다. Nav2와
+향후 상차·하차처럼 장기 실행되는 명령은 차량으로 보내는 command envelope와
+상태에도 같은 값을 사용한다.
+
+| 식별자 | 생성 주체 | 용도 |
+|---|---|---|
+| `command_id` | API 서버 | 현재 API 명령 자체의 식별자 |
+| `target_command_id` | API 서버가 과거에 생성, 클라이언트가 선택적으로 재전달 | 취소·정지 대상인 이전 명령 지정 |
+| `operation_id` | 상위 Fleet/RMF 작업 계층 | 여러 하위 명령을 묶는 물류 작업 식별자 |
+
+클라이언트는 goal, cmd_vel, cancel, stop의 `command_id`를 요청 body에 넣지 않는다.
+서버가 응답으로 반환한 값을 저장했다가 특정 명령을 취소해야 할 때만
+`target_command_id`로 전달한다. cancel에서 target을 생략하면 해당 로봇의 현재
+활성 자동 명령을 대상으로 하고, stop에서 생략하면 모든 활성 이동을 대상으로
+한다.
+
+취소 명령 자체도 별도의 `command_id`를 가진다. 예를 들어 goal 명령 ID가 `G1`인
+상태에서 이를 취소하면 서버는 취소 명령 ID `C1`을 새로 생성하고, payload에는
+`command_id=C1`, `target_command_id=G1`을 넣는다. C1의 N회 재시도에서는 새로운
+UUID를 만들지 않는다.
+
+차량 supervisor는 현재 활성 Nav2·비전 작업의 `command_id`를 보관한다. 지정된
+target이 활성 명령과 다르면 다른 작업을 취소하지 않고
+`TARGET_COMMAND_NOT_ACTIVE`를 반환한다. target이 이미 terminal 상태라면
+`TARGET_ALREADY_TERMINAL`로 멱등 성공 처리한다.
+
+기존 `geometry_msgs/msg/Twist` 형식을 유지하는 bounded cmd_vel API도 서버가
+command ID를 생성해 응답하지만, UUID를 Twist 데이터에 삽입하지 않는다. 서버의
+로봇별 command registry가 publish loop와 command ID를 연결하므로 활성 cmd_vel을
+target으로 지정하면 해당 loop를 중단하고 zero Twist를 보낸다. 장기 실행 명령은
+차량 supervisor까지 ID가 전달되므로 API 서버가 재시작해도 transient-local 최신
+상태를 통해 현재 command ID를 다시 확인할 수 있다.
+
+## Nav2 goal 명령 토픽 계약
+
+Nav2 goal API는 서버가 생성한 command ID와 기존 PoseStamped 형태를 하나의
+`std_msgs/msg/String.data` JSON envelope로 차량에 전달한다.
+
+```json
+{
+  "version": 1,
+  "command_id": "42dc49df-a591-4298-99e8-e78af80c1089",
+  "command": "NAVIGATE_TO_POSE",
+  "operation_id": "delivery-20260824-0042",
+  "pose": {
+    "header": {
+      "stamp": {"sec": 1787541418, "nanosec": 880201225},
+      "frame_id": "map"
+    },
+    "pose": {
+      "position": {"x": 1.5, "y": 0.0, "z": 0.0},
+      "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
+    }
+  }
+}
+```
+
+차량 goal bridge는 envelope를 검증하고 `command_id`를 active goal handle과 함께
+보관한 뒤 내부적으로 `NavigateToPose.Goal`을 만든다. accepted, result, cancel 상태
+모두 같은 command ID와 연결한다. `operation_id`는 상위 물류 작업이 제공한 경우에만
+사용하며, 없으면 `null`이다.
 
 ## 취소 명령 토픽 계약
 
@@ -128,7 +201,8 @@ loader가 누락된 값에는 기본값을 적용하고, 범위를 벗어난 값
 ```json
 {
   "version": 1,
-  "request_id": "f83a3b7b-30d9-4c38-a887-f5f48d281998",
+  "command_id": "f83a3b7b-30d9-4c38-a887-f5f48d281998",
+  "target_command_id": "42dc49df-a591-4298-99e8-e78af80c1089",
   "command": "CANCEL_NAVIGATION",
   "attempt": 1,
   "max_attempts": 3,
@@ -142,14 +216,15 @@ loader가 누락된 값에는 기본값을 적용하고, 범위를 벗어난 값
 | 필드 | 규칙 |
 |---|---|
 | `version` | 초기 계약은 정수 `1` |
-| `request_id` | API 요청마다 새 UUID를 만들고 모든 재시도에서 동일하게 유지 |
+| `command_id` | API 서버가 취소 명령에 부여하고 모든 재시도에서 유지하는 UUID |
+| `target_command_id` | 특정 이전 명령 대상이면 해당 명령 UUID, 현재 활성 명령 대상이면 `null` |
 | `command` | `CANCEL_NAVIGATION` 또는 `STOP` |
 | `attempt` | `1`부터 시작하며 발행할 때마다 1 증가 |
 | `max_attempts` | 해당 로봇의 `cancel_max_attempts` 설정값 |
 | `confirmation_timeout_ms` | 해당 로봇의 최종 확인 제한시간 설정값 |
 | `requested_at_ns` | 최초 API 요청 시각을 nanosecond로 기록하고 재시도에서 유지 |
 
-차량은 같은 `request_id`를 다시 받아도 병렬 Nav2 cancel 요청을 만들지 않는다.
+차량은 같은 `command_id`를 다시 받아도 병렬 Nav2 cancel 요청을 만들지 않는다.
 진행 중이면 최신 `attempt`만 기록하고 `CANCELING`을 다시 발행한다. 이미 완료된
 요청이면 같은 최종 상태를 다시 발행한다. 최근 완료 요청 ID는 제한된 크기의
 메모리 캐시에 보관한다.
@@ -157,7 +232,7 @@ loader가 누락된 값에는 기본값을 적용하고, 범위를 벗어난 값
 잘못된 JSON, 지원하지 않는 `version` 또는 `command`, 범위를 벗어난 attempt는
 실행하지 않는다. supervisor는 현재 작업 상태를 유지하면서 diagnostic 상태
 메시지의 `detail`에 `INVALID_CANCEL_REQUEST`를 기록한다. 파싱할 수 있는
-`request_id`가 있으면 그대로 포함하고, 없으면 `null`을 사용한다.
+`command_id`가 있으면 그대로 포함하고, 없으면 `null`을 사용한다.
 
 ## 통합 상태 토픽 계약
 
@@ -170,8 +245,10 @@ loader가 누락된 값에는 기본값을 적용하고, 범위를 벗어난 값
   "state": "MANUAL",
   "previous_state": "NAVIGATING",
   "source": "MANUAL",
+  "command_id": null,
+  "previous_command_id": "42dc49df-a591-4298-99e8-e78af80c1089",
+  "target_command_id": null,
   "operation_id": "delivery-20260824-0042",
-  "request_id": null,
   "attempt": null,
   "interrupted_by": "MANUAL",
   "resume_decision_required": true,
@@ -187,8 +264,10 @@ loader가 누락된 값에는 기본값을 적용하고, 범위를 벗어난 값
 | `state` | 아래에 정의한 현재 외부 상태 |
 | `previous_state` | 현재 상태 직전의 의미 있는 상태. 수동 개입 시 중단된 자동 작업 상태를 보존 |
 | `source` | `SYSTEM`, `NAV2`, `MANUAL`, `VISION_PICK`, `VISION_PLACE`, `SAFETY` 중 하나 |
+| `command_id` | 차량까지 ID가 전달된 현재 API 명령 ID. 로컬 명령이나 raw Twist이면 `null` |
+| `previous_command_id` | 수동 개입 등으로 중단된 직전 API 명령 ID, 없으면 `null` |
+| `target_command_id` | 취소·정지 상태이면 대상 명령 ID, 아니면 `null` |
 | `operation_id` | Fleet 또는 작업 제어기가 부여한 작업 식별자. 없으면 `null` |
-| `request_id` | 취소 요청과 관련된 상태이면 요청 UUID, 아니면 `null` |
 | `attempt` | 취소 요청과 관련된 가장 최근 발행 횟수, 아니면 `null` |
 | `interrupted_by` | 수동 개입이면 `MANUAL`, 그 외에는 `null` |
 | `resume_decision_required` | 자동 재개 여부를 별도 로직이 판단해야 하면 `true` |
@@ -197,7 +276,8 @@ loader가 누락된 값에는 기본값을 적용하고, 범위를 벗어난 값
 
 상태 publisher는 `reliable`, `transient_local`, depth 1 QoS를 사용한다. 새
 subscriber는 가장 최근 상태를 받을 수 있지만, Fleet Bridge는 과거의 terminal
-상태를 현재 취소 요청의 성공으로 오인하지 않도록 반드시 `request_id`를 비교한다.
+상태를 현재 취소 요청의 성공으로 오인하지 않도록 반드시 취소 명령의
+`command_id`를 비교한다.
 
 ## 상태 정의
 
@@ -238,7 +318,7 @@ subscriber는 가장 최근 상태를 받을 수 있지만, Fleet Bridge는 과�
 ### `COMPLETED`
 
 - Nav2, 상차 또는 하차 작업이 실제 성공 결과를 반환했다.
-- 어떤 작업이 완료됐는지는 `source`와 `operation_id`로 구분한다.
+- 어떤 작업이 완료됐는지는 `source`, `command_id`, `operation_id`로 구분한다.
 - 다음 명령이 들어올 때까지 유지하는 terminal 상태다.
 
 ### `CANCELING`
@@ -251,7 +331,8 @@ subscriber는 가장 최근 상태를 받을 수 있지만, Fleet Bridge는 과�
 ### `CANCELED`
 
 - 취소 대상 Nav2·비전 작업이 종료됐고 이동 출력이 0이다.
-- `request_id`가 현재 요청과 일치해야 Fleet Bridge가 성공으로 인정한다.
+- `command_id`가 현재 취소 명령과 일치해야 Fleet Bridge가 성공으로 인정한다.
+- 특정 명령 취소에서는 `target_command_id`도 요청값과 일치해야 한다.
 - 다음 명령이 들어올 때까지 유지하는 terminal 상태다.
 
 ### `CANCEL_FAILED`
@@ -266,7 +347,7 @@ subscriber는 가장 최근 상태를 받을 수 있지만, Fleet Bridge는 과�
 | 현재 상태 | 이벤트 | 다음 상태 | 필수 처리 |
 |---|---|---|---|
 | 시작 전 | supervisor 정상 시작 | `STOPPED` | zero 출력 확인 |
-| `STOPPED`, `COMPLETED`, `CANCELED` | Nav2 goal accepted | `NAVIGATING` | 새 `operation_id` 연결 |
+| `STOPPED`, `COMPLETED`, `CANCELED` | Nav2 goal accepted | `NAVIGATING` | 새 `command_id`와 선택적 `operation_id` 연결 |
 | `NAVIGATING` | Nav2 success | `COMPLETED` | `source=NAV2` |
 | `NAVIGATING` | Nav2 rejected 또는 aborted | `STOPPED` | `detail=NAV_REJECTED` 또는 `NAV_ABORTED` |
 | `STOPPED`, `COMPLETED` | 비전 상차 작업 accepted | `PICKING` | `source=VISION_PICK` |
@@ -274,11 +355,11 @@ subscriber는 가장 최근 상태를 받을 수 있지만, Fleet Bridge는 과�
 | `PICKING`, `PLACING` | 비전 작업 success | `COMPLETED` | 작업 source 유지 |
 | `PICKING`, `PLACING` | 비전 작업 failed | `STOPPED` | `detail=PICK_FAILED` 또는 `PLACE_FAILED` |
 | 자동 작업 상태 | 외부 cancel | `CANCELING` | 작업 취소와 zero 출력 시작 |
-| `CANCELING` | 작업 종료와 zero 출력 확인 | `CANCELED` | 요청 ID와 attempt 포함 |
+| `CANCELING` | 작업 종료와 zero 출력 확인 | `CANCELED` | 취소 command ID, target ID와 attempt 포함 |
 | `CANCELING` | 횟수·시간 소진 | `CANCEL_FAILED` | 자동 출력 차단 유지 |
 | 자동 또는 수동 작업 상태 | 외부 stop | `CANCELING` | 자동 작업 취소와 safety stop 동시 실행 |
 | `CANCELING` | stop 조건 모두 확인 | `STOPPED` | `detail=STOP_CONFIRMED` |
-| 활성 작업 없음 | 외부 cancel | `CANCELING` 후 `CANCELED` | zero 출력 확인 후 같은 요청 ID로 즉시 확인 |
+| 활성 작업 없음 | 외부 cancel | `CANCELING` 후 `CANCELED` | zero 출력 확인 후 같은 command ID로 즉시 확인 |
 | 모든 상태 | 새 명시적 작업 명령 accepted | 해당 작업 상태 | 이전 terminal 상태 해제 |
 
 `COMPLETED`, `CANCELED`, `CANCEL_FAILED`는 결과 관찰을 위해 다음 명시적 명령이
@@ -311,6 +392,7 @@ NAVIGATING / PICKING / PLACING
 `STOPPED`가 된다.
 
 - `previous_state`: 중단된 `NAVIGATING`, `PICKING` 또는 `PLACING`
+- `previous_command_id`: 중단된 API 명령 ID
 - `operation_id`: 중단된 작업 식별자
 - `interrupted_by`: `MANUAL`
 - `resume_decision_required`: `true`
@@ -336,9 +418,9 @@ NAVIGATING / PICKING / PLACING
 
 Fleet Bridge는 다음 알고리즘을 사용한다.
 
-1. 새 `request_id`를 만들고 `attempt=1`을 발행한다.
+1. API 서버가 취소 명령의 새 `command_id`를 만들고 `attempt=1`을 발행한다.
 2. 같은 WebSocket 연결에서 상태 토픽을 구독한다.
-3. `CANCEL_NAVIGATION`은 현재 요청 ID의 `CANCELED`, `STOP`은 현재 요청 ID의
+3. `CANCEL_NAVIGATION`은 현재 command ID의 `CANCELED`, `STOP`은 현재 command ID의
    `STOPPED`를 받으면 성공으로 종료한다.
 4. `cancel_retry_interval_ms` 동안 확인 상태가 없으면 attempt를 증가시켜 같은
    요청을 다시 발행한다.
@@ -347,8 +429,8 @@ Fleet Bridge는 다음 알고리즘을 사용한다.
 6. 제한시간 안에 현재 요청의 성공 상태가 없으면 실패로 종료한다.
 
 `CANCEL_NAVIGATION`의 성공 상태는 `CANCELED`, `STOP`의 성공 상태는
-`STOPPED`다. 다른 request ID, 오래된 transient-local terminal 상태, 잘못된 JSON은
-성공 판정에서 제외한다.
+`STOPPED`다. 다른 command ID, 다른 target ID, 오래된 transient-local terminal
+상태, 잘못된 JSON은 성공 판정에서 제외한다.
 
 차량은 첫 요청에서 실제 취소를 시작하고 `CANCELING`을 발행한다. 같은 요청의
 재전송은 진행 중인 취소 future를 복제하지 않는다. 마지막 attempt를 받은 뒤에도
@@ -366,16 +448,55 @@ Foxglove 연결 실패, status channel 미광고 또는 CDR 발행 실패는 API
 {
   "robot_id": "robot_2",
   "command": "nav2_cancel",
-  "request_id": "f83a3b7b-30d9-4c38-a887-f5f48d281998",
+  "command_id": "f83a3b7b-30d9-4c38-a887-f5f48d281998",
+  "target_command_id": "42dc49df-a591-4298-99e8-e78af80c1089",
   "final_state": "CANCELED",
   "attempts": 2
 }
 ```
 
+일반 명령 요청에는 command UUID를 받지 않는다. 예를 들어 Nav2 goal 요청 body는
+기존 PoseStamped JSON과 선택적인 상위 `operation_id`만 받으며, 서버가 생성한
+`command_id`를 응답에 추가한다.
+
+```json
+{
+  "robot_id": "robot_2",
+  "command": "nav2_goal_pose",
+  "command_id": "42dc49df-a591-4298-99e8-e78af80c1089",
+  "delivery_state": "PUBLISHED"
+}
+```
+
+`PUBLISHED`는 차량 토픽 전달 완료를 뜻할 뿐 Nav2 goal accepted나 목적지 도착을
+뜻하지 않는다. 실제 실행 상태는 같은 `command_id`가 포함된 operation status로
+확인한다.
+
+cancel과 stop은 body를 생략할 수 있다. 특정 이전 명령만 대상으로 할 때는 서버가
+그 명령의 응답으로 반환했던 ID를 전달한다.
+
+```json
+{
+  "target_command_id": "42dc49df-a591-4298-99e8-e78af80c1089"
+}
+```
+
+- cancel body가 없거나 `target_command_id=null`이면 현재 활성 자동 명령을
+  취소한다.
+- stop body가 없거나 `target_command_id=null`이면 해당 로봇의 자동·수동 이동을
+  모두 정지한다.
+- target이 현재 활성 명령과 일치하면 해당 명령만 취소한다.
+- target이 이미 terminal이면 멱등 성공과 `TARGET_ALREADY_TERMINAL`을 반환한다.
+- target이 존재하지 않거나 현재 활성 명령과 다르면 다른 명령을 건드리지 않고
+  HTTP 409와 `TARGET_COMMAND_NOT_ACTIVE`를 반환한다.
+- 클라이언트가 일반 명령 body에 `command_id`를 임의로 넣으면 422로 거부한다.
+
 - 유효 요청을 발행하고 확인 상태를 받으면 기존 API와 동일하게 202를 반환한다.
 - 설정 오류나 입력 오류는 4xx로 반환한다.
 - 연결·발행·확인 실패와 `CANCEL_FAILED`는 503으로 반환한다.
-- `/stop`은 cancel 토픽의 `command=STOP`과 safety stop을 함께 사용한다.
+- target 없는 `/stop`은 cancel 토픽의 `command=STOP`과 global safety stop을 함께
+  사용한다. targeted stop은 선택한 명령 source만 중단하며 target 불일치 시 global
+  safety stop을 발행하지 않는다.
 
 ## Foxglove Bridge 설정
 
@@ -389,7 +510,7 @@ ros2 launch foxglove_bridge foxglove_bridge_launch.xml \
   address:=0.0.0.0 \
   port:=8765 \
   topic_whitelist:='["^/(tf|tf_static|robot_description|joint_states|amcl_pose|odom|ros_robot_controller/battery|operation/status)$"]' \
-  client_topic_whitelist:='["^/(goal_pose|cmd_vel|navigation/cancel|safety/stop)$"]' \
+  client_topic_whitelist:='["^/(navigation/goal|cmd_vel|navigation/cancel|safety/stop)$"]' \
   service_whitelist:='["(?!)"]' \
   param_whitelist:='["(?!)"]' \
   capabilities:='[clientPublish]' \
@@ -403,9 +524,12 @@ robot namespace를 포함한 정규식을 사용한다.
 
 ### Fleet Bridge
 
+- 모든 API 명령의 UUID v4 `command_id` 생성과 응답 포함
+- 선택적 `target_command_id` request validation과 차량 전달
+- 로봇별 active/recent-terminal command registry와 bounded cmd_vel publish loop 관리
 - 로봇별 cancel/status 토픽과 재시도 설정 로드·검증
 - String JSON CDR 직렬화·역직렬화
-- 상태 channel 구독과 request ID 기반 확인
+- 상태 channel 구독과 command ID·target command ID 기반 확인
 - 설정값에 따른 재발행과 최종 timeout
 - REST 응답과 실패 코드 변환
 - operation status를 telemetry worker 설정에 추가해
@@ -414,6 +538,7 @@ robot namespace를 포함한 정규식을 사용한다.
 ### 차량 operation supervisor
 
 - 외부 cancel 요청 검증과 멱등 처리
+- 활성·최근 terminal command ID를 제한된 크기로 관리하고 target 일치 여부 확인
 - Nav2·비전 취소 요청 조정
 - cmd_vel mux의 최종 zero/제어권 확인
 - 단일 통합 상태 publisher 역할
@@ -422,7 +547,9 @@ robot namespace를 포함한 정규식을 사용한다.
 
 ### Nav2 goal bridge
 
-- PoseStamped를 NavigateToPose action으로 전달
+- String goal command envelope의 command ID와 PoseStamped 데이터를 검증
+- 검증한 PoseStamped를 NavigateToPose action으로 전달
+- active goal handle과 command ID를 함께 보관
 - 자신이 소유한 active goal handle 취소
 - cancel future와 action result가 확인되기 전에 성공을 선언하지 않음
 - accepted, succeeded, canceled, aborted 내부 이벤트 발행
@@ -452,21 +579,31 @@ robot namespace를 포함한 정규식을 사용한다.
 - 타입, topic, 최소·최대 범위를 검증한다.
 - robot_1과 robot_2에 서로 다른 retry 정책을 적용할 수 있다.
 - 기존 cancel service 설정이 남아 있으면 허용하지 않고 migration 오류를 제공한다.
+- goal type이 `std_msgs/msg/String`이 아니면 거부한다.
 
 ### Fleet Bridge 단위 테스트
 
-- cancel String CDR payload가 같은 request ID와 증가하는 attempt를 가진다.
+- 일반 API 명령마다 서버가 UUID v4 command ID를 생성해 응답한다.
+- 일반 명령 body에 클라이언트 command ID가 있으면 422로 거부한다.
+- cancel String CDR payload가 같은 command ID와 증가하는 attempt를 가진다.
+- cancel 재시도는 같은 command ID를 사용한다.
+- target command ID가 payload와 API 응답에 유지된다.
+- target이 active, terminal, unknown인 경우를 각각 검증한다.
+- targeted bounded cmd_vel은 해당 publish loop만 중단하고 zero Twist를 보낸다.
 - 성공 상태를 받으면 최대 횟수 전에 재시도를 중단한다.
-- 다른 request ID와 과거 terminal 상태를 무시한다.
+- 다른 command ID·target command ID와 과거 terminal 상태를 무시한다.
 - 최대 횟수와 최종 확인시간을 정확히 적용한다.
 - 연결, channel 광고, malformed status, `CANCEL_FAILED`를 503으로 변환한다.
-- `/stop`은 safety stop 경로도 실패 여부와 무관하게 시도한다.
+- target 없는 `/stop`은 safety stop 경로도 Nav2 취소 실패 여부와 무관하게
+  시도한다.
+- target 불일치 stop은 global safety stop을 발행하지 않는다.
 
 ### 차량 상태 머신 테스트
 
+- goal command ID가 active goal handle과 상태에 연결된다.
 - 문서의 모든 상태 전이를 표 기반 단위 테스트로 검증한다.
 - 취소 접수만으로 `CANCELED`를 발행하지 않는다.
-- 중복 request ID가 병렬 cancel future를 만들지 않는다.
+- 중복 command ID가 병렬 cancel future를 만들지 않는다.
 - Nav2 취소 결과와 zero 출력이 모두 있어야 `CANCELED`가 된다.
 - timeout 시 `CANCEL_FAILED`가 되고 자동 출력 차단을 유지한다.
 - terminal 상태가 다음 명시적 명령 전까지 유지된다.
@@ -475,7 +612,8 @@ robot namespace를 포함한 정규식을 사용한다.
 
 - `NAVIGATING -> MANUAL`에서 Nav2 출력이 즉시 차단된다.
 - `PICKING/PLACING -> MANUAL`에서 비전 작업 취소가 시작된다.
-- `previous_state`, `operation_id`, `resume_decision_required`가 보존된다.
+- `previous_state`, `previous_command_id`, `operation_id`,
+  `resume_decision_required`가 보존된다.
 - 수동 deadman timeout 후 자동 작업이 재개되지 않는다.
 - 자동 취소 실패 시 수동 종료 후 `CANCEL_FAILED`가 된다.
 - 모든 경로에서 포크 명령을 발행하지 않는다.
@@ -510,3 +648,6 @@ robot namespace를 포함한 정규식을 사용한다.
 5. 중단 이전 상태와 작업 ID가 후속 판단을 위해 보존된다.
 6. cancel, stop, manual takeover가 포크 높이를 변경하지 않는다.
 7. retry 정책은 코드 수정 없이 로봇별 `fleet.yaml` 변경으로 조정할 수 있다.
+8. 모든 API 명령 UUID는 서버가 생성하며 일반 명령 요청 body는 UUID를 요구하지
+   않는다.
+9. 특정 명령 취소는 이전 API 응답의 `target_command_id`가 일치할 때만 실행된다.
