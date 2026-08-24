@@ -137,6 +137,7 @@ def test_search_locks_virtual_target_before_stopping():
     candidate = {"tag_id": 7}
     pnp = {"forward": 0.6, "lateral": 0.1, "yaw": 0.0}
     fake.candidate_stop_due_at = 0.0
+    fake.selected_candidate = lambda: (candidate, pnp)
     fake.valid_measurement = lambda: (candidate, pnp, "ok")
     fake.update_world_target = lambda got_candidate, got_pnp: (
         got_candidate == candidate and got_pnp == pnp
@@ -147,6 +148,30 @@ def test_search_locks_virtual_target_before_stopping():
     AutoDockNode.tick_search(fake)
 
     assert fake.state == "docking"
+
+
+def test_first_matching_frame_schedules_stop_after_point_two_seconds(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    candidate = {"tag_id": 7, "streak": 1}
+    fake.candidate_stop_due_at = None
+    fake.selected_candidate = lambda: (candidate, {})
+    fake.number = lambda key, default, *_args: {
+        "candidate_stop_delay_sec": 0.2,
+        "search_linear_speed_m_s": 0.08,
+        "search_lateral_speed_m_s": 0.08,
+    }.get(key, default)
+    fake.publish_status = lambda *_args, **_kwargs: None
+    fake.config = {"search_lateral_direction": "left"}
+    fake.search_heading_yaw = None
+    fake.odom_yaw = 0.0
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
+
+    AutoDockNode.tick_search(fake)
+
+    assert fake.candidate_stop_due_at == pytest.approx(10.2)
+    assert commands == [(0.0, 0.08, 0.0)]
 
 
 def test_insertion_uses_configured_speed_before_distance_is_reached():

@@ -864,6 +864,8 @@ class AutoDockNode(Node):
             return
         if self.state == "search":
             self.tick_search()
+        elif self.state == "confirm":
+            self.tick_confirm()
         elif self.state == "docking":
             self.tick_docking()
         elif self.state == "inserting":
@@ -878,30 +880,31 @@ class AutoDockNode(Node):
             self.tick_backoff()
 
     def tick_search(self):
-        candidate, _pnp, _reason = self.valid_measurement()
+        candidate, _pnp = self.selected_candidate()
         now = time.monotonic()
         if candidate is not None and self.candidate_stop_due_at is None:
-            delay = self.number("candidate_stop_delay_sec", 0.5, 0.0, 5.0)
+            delay = self.number("candidate_stop_delay_sec", 0.2, 0.0, 5.0)
             self.candidate_stop_due_at = now + delay
             self.publish_status(
                 "running", "candidate_stop_scheduled", delay_sec=delay
             )
         if self.candidate_stop_due_at is not None and now >= self.candidate_stop_due_at:
             self.candidate_stop_due_at = None
+            self.stop_drive(5)
             candidate, pnp, reason = self.valid_measurement()
             if candidate is None:
+                self.state = "confirm"
                 self.publish_status(
-                    "running", "candidate_validation_lost_resume_search",
+                    "running", "candidate_paused_for_confirmation",
                     measurement_reason=reason,
                 )
-            elif not self.update_world_target(candidate, pnp):
+                return
+            if not self.update_world_target(candidate, pnp):
                 self.cancel("odom_missing")
                 return
-            else:
-                self.stop_drive(5)
-                self.state = "docking"
-                self.publish_status("running", "virtual_target_locked_docking")
-                return
+            self.state = "docking"
+            self.publish_status("running", "virtual_target_locked_docking")
+            return
         fallback_speed = self.number("search_linear_speed_m_s", 0.03, 0.01, 0.30)
         lateral_speed = self.number(
             "search_lateral_speed_m_s", fallback_speed, 0.01, 0.30
@@ -917,6 +920,25 @@ class AutoDockNode(Node):
             yaw_error = normalize_angle(self.search_heading_yaw - self.odom_yaw)
         angular_correction = clamp(1.2 * yaw_error, -0.20, 0.20)
         self.publish_drive(0.0, direction_sign * lateral_speed, angular_correction)
+
+    def tick_confirm(self):
+        candidate, pnp, reason = self.valid_measurement()
+        if candidate is None:
+            raw, _ = self.selected_candidate()
+            if raw is None:
+                self.state = "search"
+                self.publish_status("running", "candidate_lost_resume_search")
+                return
+            self.stop_drive()
+            self.publish_status(
+                "running", "candidate_confirmation", measurement_reason=reason
+            )
+            return
+        if not self.update_world_target(candidate, pnp):
+            self.cancel("odom_missing")
+            return
+        self.state = "docking"
+        self.publish_status("running", "virtual_target_locked_docking")
 
     def tick_docking(self):
         candidate, pnp, _ = self.valid_measurement()
