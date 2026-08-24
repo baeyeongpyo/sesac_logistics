@@ -319,8 +319,6 @@ class AutoDockNode(Node):
         self.declare_parameter("pose_config", "/shared/vehicle_pose_config.json")
         self.declare_parameter("config_overrides", "{}")
         self.declare_parameter("search_linear_speed_m_s", 0.0)
-        self.declare_parameter("insertion_distance_cm", 0.0)
-        self.declare_parameter("insertion_speed_m_s", 0.0)
         self.declare_parameter("trigger_topic", "")
         self.declare_parameter("status_topic", "")
         self.declare_parameter("stop_topic", "")
@@ -362,10 +360,6 @@ class AutoDockNode(Node):
         )
         if temporary_search_speed > 0.0:
             self.config_overrides["search_linear_speed_m_s"] = temporary_search_speed
-        for key in ("insertion_distance_cm", "insertion_speed_m_s"):
-            temporary_value = float(self.get_parameter(key).value)
-            if temporary_value > 0.0:
-                self.config_overrides[key] = temporary_value
         self.trigger_topic = self.topic_or_default("trigger_topic", f"{robot}/nav2/arrival")
         self.status_topic = self.topic_or_default("status_topic", f"{robot}/auto_dock/status")
         self.stop_topic = self.topic_or_default("stop_topic", f"{robot}/auto_dock/stop")
