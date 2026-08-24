@@ -141,15 +141,12 @@ def test_search_locks_virtual_target_before_stopping():
     fake.update_world_target = lambda got_candidate, got_pnp: (
         got_candidate == candidate and got_pnp == pnp
     )
-    fake.boolean = lambda key, default: False if key == "use_nav_approach" else default
     fake.stop_drive = lambda *_args: None
     fake.publish_status = lambda *_args, **_kwargs: None
-    fake.nav_approach_completed = True
 
     AutoDockNode.tick_search(fake)
 
     assert fake.state == "docking"
-    assert fake.nav_approach_completed is False
 
 
 def test_insertion_uses_configured_speed_before_distance_is_reached():

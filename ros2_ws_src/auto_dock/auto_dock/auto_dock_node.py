@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 import rclpy
 from cv_bridge import CvBridge
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -326,9 +326,6 @@ class AutoDockNode(Node):
         self.declare_parameter("lift_up_complete_topic", "")
         self.declare_parameter("fork_state_topic", "")
         self.declare_parameter("drive_ready_topic", "")
-        self.declare_parameter("entity_map_topic", "")
-        self.declare_parameter("nav_approach_goal_topic", "")
-        self.declare_parameter("nav_approach_result_topic", "")
         self.declare_parameter("detection_topic", "")
         self.declare_parameter(
             "slot_image_topic", "/ascamera_hp60c/camera_publisher/rgb0/image_upright"
@@ -375,15 +372,6 @@ class AutoDockNode(Node):
         self.drive_ready_topic = self.topic_or_default(
             "drive_ready_topic", f"{robot}/auto_dock/drive_ready"
         )
-        self.entity_map_topic = self.topic_or_default(
-            "entity_map_topic", f"{robot}/tag_entity_map"
-        )
-        self.nav_approach_goal_topic = self.topic_or_default(
-            "nav_approach_goal_topic", f"{robot}/nav2/approach_goal"
-        )
-        self.nav_approach_result_topic = self.topic_or_default(
-            "nav_approach_result_topic", f"{robot}/nav2/approach_result"
-        )
         self.detection_topic = self.topic_or_default(
             "detection_topic", f"{robot}/symbol_seg/detections"
         )
@@ -418,7 +406,6 @@ class AutoDockNode(Node):
         self.last_slot_snapshot = None
         self.latest_detection = None
         self.latest_detection_at = 0.0
-        self.latest_entity_map = None
         self.candidate_stop_due_at = None
         self.odom_position = None
         self.odom_yaw = None
@@ -433,7 +420,6 @@ class AutoDockNode(Node):
         self.insert_start_position = None
         self.post_lift_reverse_start = None
         self.turn_target_yaw = None
-        self.nav_approach_completed = False
         self.backoff_until = None
         self.backoff_command = (0.0, 0.0)
         self.was_docking_before_interrupt = False
@@ -454,18 +440,12 @@ class AutoDockNode(Node):
         self.drive_ready_pub = self.create_publisher(
             Empty, self.drive_ready_topic, 10
         )
-        self.nav_approach_goal_pub = self.create_publisher(
-            PoseStamped, self.nav_approach_goal_topic, 10
-        )
         self.create_subscription(String, self.trigger_topic, self.on_trigger, 10)
         self.create_subscription(Empty, self.stop_topic, self.on_stop, 10)
         self.create_subscription(
             Empty, self.lift_up_complete_topic, self.on_lift_up_complete, 10
         )
         self.create_subscription(String, self.fork_state_topic, self.on_fork_state, 10)
-        self.create_subscription(
-            String, self.nav_approach_result_topic, self.on_nav_approach_result, 10
-        )
         self.create_subscription(String, self.detection_topic, self.on_detection, 10)
         image_qos = QoSProfile(depth=1)
         image_qos.reliability = ReliabilityPolicy.BEST_EFFORT
@@ -473,10 +453,6 @@ class AutoDockNode(Node):
             Image, str(self.get_parameter("slot_image_topic").value),
             self.on_slot_image, image_qos,
         )
-        if self.boolean("use_nav_approach", True):
-            self.create_subscription(
-                String, self.entity_map_topic, self.on_entity_map, 10
-            )
         self.create_subscription(
             LaserScan, str(self.get_parameter("scan_topic").value), self.on_scan, 10
         )
@@ -617,7 +593,6 @@ class AutoDockNode(Node):
         self.insert_start_position = None
         self.post_lift_reverse_start = None
         self.turn_target_yaw = None
-        self.nav_approach_completed = False
         self.candidate_stop_due_at = None
         self.search_heading_yaw = self.odom_yaw
         self.send_yolo_target()
@@ -678,21 +653,6 @@ class AutoDockNode(Node):
             legacy=legacy,
         )
 
-    def on_nav_approach_result(self, msg):
-        if self.state != "waiting_nav_approach":
-            return
-        try:
-            result = json.loads(msg.data)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            self.cancel("invalid_nav_approach_result")
-            return
-        if result.get("status") != "succeeded":
-            self.cancel(f"nav_approach_{result.get('status', 'failed')}")
-            return
-        self.nav_approach_completed = True
-        self.state = "confirm"
-        self.publish_status("running", "nav_approach_complete_confirming")
-
     def cancel(self, reason):
         self.state = "idle"
         self.reason = reason
@@ -700,7 +660,6 @@ class AutoDockNode(Node):
         self.candidate_stop_due_at = None
         self.post_lift_reverse_start = None
         self.turn_target_yaw = None
-        self.nav_approach_completed = False
         self.stop_drive(10)
         self.fork_pub.publish(String(data="STOP"))
         self.publish_status("cancelled", reason)
@@ -750,52 +709,6 @@ class AutoDockNode(Node):
     def slot_row_column(slot_id):
         match = re.search(r"_R([1-3])_C([1-3])$", slot_id)
         return int(match.group(1)), int(match.group(2))
-
-    def on_entity_map(self, msg):
-        try:
-            payload = json.loads(msg.data)
-            if payload.get("frame_id") == "map":
-                self.latest_entity_map = payload
-        except (TypeError, ValueError, json.JSONDecodeError):
-            self.get_logger().warning("invalid tag entity map JSON")
-
-    def publish_nav_approach_goal(self, candidate):
-        entities = (self.latest_entity_map or {}).get("entities") or []
-        matrix = tuple(candidate.get("matrix") or [])
-        matches = [
-            entity for entity in entities
-            if tuple(entity.get("matrix") or []) == matrix
-        ]
-        if not matches:
-            return False
-        entity = max(
-            matches, key=lambda item: float(item.get("last_seen_unix", 0.0))
-        )
-        center_pose = entity.get("pose") or {}
-        face_pose = entity.get("face_pose")
-        try:
-            yaw = float(center_pose["yaw"])
-            if isinstance(face_pose, dict):
-                face_x = float(face_pose["x"])
-                face_y = float(face_pose["y"])
-            else:
-                face_to_center = self.number(
-                    "pallet_face_to_center_m", 0.065, 0.01, 0.50
-                )
-                face_x = float(center_pose["x"]) - face_to_center * math.cos(yaw)
-                face_y = float(center_pose["y"]) - face_to_center * math.sin(yaw)
-        except (KeyError, TypeError, ValueError):
-            return False
-        standoff = self.number("nav_approach_standoff_m", 0.45, 0.20, 2.0)
-        goal = PoseStamped()
-        goal.header.frame_id = "map"
-        goal.header.stamp = self.get_clock().now().to_msg()
-        goal.pose.position.x = face_x - standoff * math.cos(yaw)
-        goal.pose.position.y = face_y - standoff * math.sin(yaw)
-        goal.pose.orientation.z = math.sin(yaw * 0.5)
-        goal.pose.orientation.w = math.cos(yaw * 0.5)
-        self.nav_approach_goal_pub.publish(goal)
-        return True
 
     def on_scan(self, msg):
         self.nearest_range = math.inf
@@ -903,7 +816,7 @@ class AutoDockNode(Node):
     def interrupt_for_lidar(self):
         if self.state in {
             "idle", "ready", "waiting_lift_up", "waiting_fork",
-            "waiting_nav_approach", "slot_scanning", "slot_target_ready",
+            "slot_scanning", "slot_target_ready",
             "safety_backoff"
         }:
             return False
@@ -951,16 +864,12 @@ class AutoDockNode(Node):
             return
         if self.state == "search":
             self.tick_search()
-        elif self.state == "confirm":
-            self.tick_confirm()
         elif self.state == "docking":
             self.tick_docking()
         elif self.state == "inserting":
             self.tick_inserting()
         elif self.state in {"waiting_lift_up", "waiting_fork"}:
             self.stop_drive()
-        elif self.state == "waiting_nav_approach":
-            return
         elif self.state == "reversing_after_lift":
             self.tick_reversing_after_lift()
         elif self.state == "turning_for_drive":
@@ -988,20 +897,10 @@ class AutoDockNode(Node):
             elif not self.update_world_target(candidate, pnp):
                 self.cancel("odom_missing")
                 return
-            elif not self.boolean("use_nav_approach", True):
-                self.stop_drive(5)
-                self.nav_approach_completed = False
-                self.state = "docking"
-                self.publish_status("running", "virtual_target_locked_docking")
-                return
             else:
                 self.stop_drive(5)
-                if self.publish_nav_approach_goal(candidate):
-                    self.state = "waiting_nav_approach"
-                    self.publish_status("waiting", "map_goal_sent_waiting_nav2")
-                else:
-                    self.state = "confirm"
-                    self.publish_status("waiting", "target_found_waiting_tag_map")
+                self.state = "docking"
+                self.publish_status("running", "virtual_target_locked_docking")
                 return
         fallback_speed = self.number("search_linear_speed_m_s", 0.03, 0.01, 0.30)
         lateral_speed = self.number(
@@ -1018,39 +917,6 @@ class AutoDockNode(Node):
             yaw_error = normalize_angle(self.search_heading_yaw - self.odom_yaw)
         angular_correction = clamp(1.2 * yaw_error, -0.20, 0.20)
         self.publish_drive(0.0, direction_sign * lateral_speed, angular_correction)
-
-    def tick_confirm(self):
-        candidate, pnp, reason = self.valid_measurement()
-        if candidate is None:
-            raw, _ = self.selected_candidate()
-            if raw is None:
-                self.state = "search"
-                self.publish_status("running", "candidate_lost_resume_search")
-                return
-            self.stop_drive()
-            self.publish_status(
-                "running", "candidate_confirmation", measurement_reason=reason
-            )
-            return
-        if not self.update_world_target(candidate, pnp):
-            self.cancel("odom_missing")
-            return
-        if not self.boolean("use_nav_approach", True):
-            self.nav_approach_completed = False
-            self.state = "docking"
-            self.publish_status("running", "virtual_target_docking_without_map")
-            return
-        if not self.nav_approach_completed:
-            self.stop_drive(5)
-            if not self.publish_nav_approach_goal(candidate):
-                self.publish_status("waiting", "target_found_waiting_tag_map")
-                return
-            self.state = "waiting_nav_approach"
-            self.publish_status("waiting", "map_goal_sent_waiting_nav2")
-            return
-        self.nav_approach_completed = False
-        self.state = "docking"
-        self.publish_status("running", "virtual_target_docking")
 
     def tick_docking(self):
         candidate, pnp, _ = self.valid_measurement()

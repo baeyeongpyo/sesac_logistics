@@ -14,7 +14,6 @@ from datetime import datetime
 from tkinter import ttk
 
 import rclpy
-from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Empty, String
@@ -32,9 +31,6 @@ class TestPanelNode(Node):
         self.yolo_callback = yolo_callback
 
         self.arrival_pub = self.create_publisher(String, f"{robot}/nav2/arrival", 10)
-        self.approach_result_pub = self.create_publisher(
-            String, f"{robot}/nav2/approach_result", 10
-        )
         self.fork_state_pub = self.create_publisher(String, f"{robot}/fork/state", 10)
         self.legacy_up_pub = self.create_publisher(Empty, f"{robot}/lift/up_complete", 10)
         self.stop_pub = self.create_publisher(Empty, f"{robot}/auto_dock/stop", 10)
@@ -54,17 +50,6 @@ class TestPanelNode(Node):
         self.create_subscription(
             String, f"{robot}/fork/state",
             lambda msg: self.received(f"{robot}/fork/state", msg.data), 10,
-        )
-        self.create_subscription(
-            PoseStamped, f"{robot}/nav2/approach_goal",
-            lambda msg: self.received(
-                f"{robot}/nav2/approach_goal",
-                (
-                    f"frame={msg.header.frame_id} "
-                    f"x={msg.pose.position.x:.3f} y={msg.pose.position.y:.3f} "
-                    f"qz={msg.pose.orientation.z:.3f} qw={msg.pose.orientation.w:.3f}"
-                ),
-            ), 10,
         )
         self.create_subscription(
             Empty, f"{robot}/auto_dock/entry_complete",
@@ -93,14 +78,6 @@ class TestPanelNode(Node):
         data = f"arrived {left} {right}"
         self.arrival_pub.publish(String(data=data))
         self.log_callback("PUB", self.arrival_pub.topic_name, data)
-
-    def publish_approach_result(self, status, reason):
-        data = json.dumps(
-            {"status": status, "reason": reason, "source": "auto_dock_test_panel"},
-            separators=(",", ":"),
-        )
-        self.approach_result_pub.publish(String(data=data))
-        self.log_callback("PUB", self.approach_result_pub.topic_name, data)
 
     def publish_fork_state(self, state, error=""):
         data = json.dumps({"state": state, "error": error}, separators=(",", ":"))
@@ -203,21 +180,6 @@ class TestPanel:
             nav, "Legacy: arrived <left> <right>", self.publish_legacy_arrival,
             row=4, column=0, columnspan=7, pady=(8, 0),
         )
-
-        approach = ttk.LabelFrame(
-            controls, text="Nav2 담당자 대신 approach_result 발행", padding=10
-        )
-        approach.pack(fill="x", padx=12, pady=6)
-        self.add_action_button(
-            approach, "SUCCEEDED", lambda: self.publish_approach_result("succeeded"),
-            row=0, column=0, padx=3,
-        )
-        self.add_action_button(
-            approach, "FAILED", lambda: self.publish_approach_result("failed"),
-            row=0, column=1, padx=3,
-        )
-        approach.columnconfigure(0, weight=1)
-        approach.columnconfigure(1, weight=1)
 
         quick = ttk.LabelFrame(controls, text="빠른 Arrival", padding=10)
         quick.pack(fill="x", padx=12, pady=6)
@@ -332,11 +294,6 @@ class TestPanel:
     def publish_legacy_arrival(self):
         if self.require_enabled():
             self.node.publish_legacy_arrival(self.left_symbol.get(), self.right_symbol.get())
-
-    def publish_approach_result(self, status):
-        if self.require_enabled():
-            reason = "manual_test_success" if status == "succeeded" else "manual_test_failure"
-            self.node.publish_approach_result(status, reason)
 
     def publish_scenario(self, values):
         if not self.require_enabled():
