@@ -3,11 +3,12 @@ project(mentorpi_nav)
 
 find_package(ament_cmake REQUIRED)
 
-install(DIRECTORY config launch DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY config launch docs DESTINATION share/${PROJECT_NAME})
 install(PROGRAMS
   scripts/cmd_vel_relay.py
   scripts/cmd_vel_mux.py
   scripts/velocity_arbitration.py
+  scripts/vehicle_command_api.py
   scripts/goal_bridge.py
   scripts/map_import.py
   scripts/map_session.py

@@ -147,8 +147,11 @@ class VehicleCommandService:
 
         cancel_requested = False
         if operation_id is not None:
-            response = self.navigation.cancel(operation_id)
-            cancel_requested = bool(response.get('accepted'))
+            try:
+                response = self.navigation.cancel(operation_id)
+                cancel_requested = bool(response.get('accepted'))
+            except Exception:
+                cancel_requested = False
 
         with self._lock:
             if operation_id == self._active_navigation_operation:

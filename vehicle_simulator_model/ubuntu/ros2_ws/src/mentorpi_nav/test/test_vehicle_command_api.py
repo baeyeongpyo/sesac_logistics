@@ -244,6 +244,34 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             'detail': 'STOP_REQUESTED',
         })
 
+    def test_stop_returns_stopped_when_navigation_cancel_raises(self):
+        """Propagating a cancel exception after zeroing velocity must fail the stop safety contract."""
+        _, body = self.navigation_goal()
+
+        def raise_cancel_error(operation_id):
+            raise RuntimeError(f'cancel failed for {operation_id}')
+
+        original_cancel = self.navigation.cancel
+        self.navigation.cancel = raise_cancel_error
+        try:
+            response = self.service.stop()
+        except RuntimeError as error:
+            self.fail(f'stop must absorb a navigation cancel failure: {error}')
+        finally:
+            self.navigation.cancel = original_cancel
+
+        self.assertEqual(response, {
+            'operation_id': body['operation_id'],
+            'state': 'STOPPED',
+            'cancel_requested': False,
+        })
+        self.assertEqual(self.velocity.messages[-1], (0.0, 0.0))
+        self.assertEqual(self.service.operation_status(), {
+            'operation_id': body['operation_id'],
+            'state': 'STOPPED',
+            'detail': 'STOP_REQUESTED',
+        })
+
     def test_invalid_goal_and_unavailable_navigation_do_not_start_an_operation(self):
         """Removing goal validation or treating unavailable Nav2 as accepted must fail safely."""
         status, body = post_json(
