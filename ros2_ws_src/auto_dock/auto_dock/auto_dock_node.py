@@ -1393,9 +1393,13 @@ class AutoDockNode(Node):
         default_clearance = self.number("lidar_stop_distance_m", 0.35, 0.05, 2.0)
         violations = []
         if self.state == "search":
-            # Lateral drift and yaw can bring either side into a fixed
-            # structure even while the commanded search direction is one-way.
-            monitored = ("left", "right", "rear")
+            if AutoDockNode.boolean(self, "tape_guidance_enabled", False):
+                # The experimental tape mode moves laterally.
+                monitored = ("left", "right", "rear")
+            else:
+                # Circular search moves forward while turning, so protect its
+                # complete surrounding footprint.
+                monitored = ("front", "rear", "left", "right")
         elif self.state in {"coarse_align", "docking", "inserting"}:
             # The selected pallet is intentionally inside the front clearance.
             monitored = ("left", "right", "rear")
@@ -1499,10 +1503,6 @@ class AutoDockNode(Node):
             self.candidate_confirmation_started_at = None
             self.candidate_retry_not_before = 0.0
             return
-        if not AutoDockNode.boolean(self, "search_motion_enabled", False):
-            self.stop_drive()
-            self.publish_status("waiting", "stationary_search_waiting_target")
-            return
         fallback_speed = self.number("search_linear_speed_m_s", 0.03, 0.01, 0.30)
         lateral_speed = self.number(
             "search_lateral_speed_m_s", fallback_speed, 0.01, 0.30
@@ -1567,13 +1567,9 @@ class AutoDockNode(Node):
                 angular_correction,
             )
             return
-        if self.search_heading_yaw is None and self.odom_yaw is not None:
-            self.search_heading_yaw = self.odom_yaw
-        yaw_error = 0.0
-        if self.search_heading_yaw is not None and self.odom_yaw is not None:
-            yaw_error = normalize_angle(self.search_heading_yaw - self.odom_yaw)
-        angular_correction = clamp(1.2 * yaw_error, -0.20, 0.20)
-        self.publish_drive(0.0, direction_sign * lateral_speed, angular_correction)
+        diameter = self.number("search_circle_diameter_m", 1.34, 0.20, 10.0)
+        self.publish_status("running", "circular_target_search")
+        self.publish_drive(fallback_speed, 0.0, 2.0 * fallback_speed / diameter)
 
     def tick_missing_tape_recovery(self, now):
         """Nudge once toward the clearer longitudinal side while searching."""
