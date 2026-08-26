@@ -1,0 +1,323 @@
+{
+  "load_state": "unloaded",
+  "camera_pitch_deg": -7.0045071389682825,
+  "yaw_bias_deg": 0.14410323682444304,
+  "friction_coefficient": 0.9485619699123968,
+  "rotation_calibration_samples": [
+    {
+      "captured_at": "2026-08-25T03:10:15+0000",
+      "load_state": "unloaded",
+      "actual_deg": 360.0,
+      "command_deg": -379.5218566829612,
+      "scale": 0.9485619699123968,
+      "angular_speed_rad_s": 0.35,
+      "set_motor": {
+        "event_count": 211,
+        "mean_abs_rps": 0.24115646684801623,
+        "max_abs_rps": 0.24115646684801184
+      },
+      "difference_vs_previous_percent": null
+    }
+  ],
+  "rotation_convention": "vehicle CCW positive; target face yaw is opposite vehicle rotation",
+  "distance_coefficient": 0.8935677101700673,
+  "distance_convention": "calibrated odom path length; W/S forward/reverse",
+  "distance_calibration_samples": [
+    {
+      "captured_at": "2026-08-25T03:01:14+0000",
+      "load_state": "unloaded",
+      "actual_cm": 50.0,
+      "command_cm": 56.432828148004766,
+      "scale": 0.8860091127963041,
+      "linear_speed_m_s": 0.12,
+      "set_motor": {
+        "event_count": 48,
+        "mean_abs_rps": 0.5876490206469963,
+        "max_abs_rps": 0.5876490206469981
+      },
+      "difference_vs_previous_percent": null
+    },
+    {
+      "captured_at": "2026-08-25T03:01:26+0000",
+      "load_state": "unloaded",
+      "actual_cm": 50.0,
+      "command_cm": 55.314107688001954,
+      "scale": 0.9039285290838268,
+      "linear_speed_m_s": 0.12,
+      "set_motor": {
+        "event_count": 47,
+        "mean_abs_rps": 0.5876490206469963,
+        "max_abs_rps": 0.5876490206469981
+      },
+      "difference_vs_previous_percent": 2.02248667973266
+    },
+    {
+      "captured_at": "2026-08-25T03:01:36+0000",
+      "load_state": "unloaded",
+      "actual_cm": 50.0,
+      "command_cm": 56.131496604000844,
+      "scale": 0.8907654886300713,
+      "linear_speed_m_s": 0.12,
+      "set_motor": {
+        "event_count": 50,
+        "mean_abs_rps": 0.5876490206469963,
+        "max_abs_rps": 0.5876490206469981
+      },
+      "difference_vs_previous_percent": -0.46966242975693406
+    }
+  ],
+  "lateral_coefficient": 0.9391809600813833,
+  "lateral_convention": "vehicle right positive; A is left and D is right",
+  "lateral_calibration_samples": [
+    {
+      "captured_at": "2026-08-25T03:02:04+0000",
+      "load_state": "unloaded",
+      "actual_cm": 50.0,
+      "command_cm": 55.16609797200363,
+      "scale": 0.9063537541729817
+    },
+    {
+      "captured_at": "2026-08-25T03:03:02+0000",
+      "load_state": "unloaded",
+      "actual_cm": 50.0,
+      "command_cm": 50.731250196002655,
+      "scale": 0.9855858037565123
+    },
+    {
+      "captured_at": "2026-08-25T03:03:15+0000",
+      "load_state": "unloaded",
+      "actual_cm": 50.0,
+      "command_cm": 54.018820799999936,
+      "scale": 0.9256033223146563
+    }
+  ],
+  "camera_distance_scale_cm_per_pnp_unit": 6.366069808066864,
+  "camera_distance_offset_cm": -17.381442423258008,
+  "camera_distance_reference": "fork tip to target front face",
+  "camera_calibration_samples": [
+    {
+      "sample": 1,
+      "captured_at": "2026-08-25T03:08:38+0000",
+      "image": "sample_001.jpg",
+      "fork_tip_to_target_cm": 50.0,
+      "translation_x_units": 0.12772715191487422,
+      "translation_y_units": -3.2914633159495006,
+      "translation_z_units": 10.259651711861451,
+      "raw_camera_pitch_deg": 3.1690651033004937,
+      "yaw_before_bias_deg": 4.208580741656283,
+      "reprojection_error_px": 0.5132165551185608,
+      "target_top": [
+        "clover",
+        "clover"
+      ],
+      "note": "",
+      "pnp_forward_units": 10.58446489824453
+    },
+    {
+      "sample": 2,
+      "captured_at": "2026-08-25T03:08:55+0000",
+      "image": "sample_002.jpg",
+      "fork_tip_to_target_cm": 30.0,
+      "translation_x_units": 0.19208018398392784,
+      "translation_y_units": -1.3418603701968075,
+      "translation_z_units": 7.333908883748207,
+      "raw_camera_pitch_deg": -17.17807938123706,
+      "yaw_before_bias_deg": -3.920374268007396,
+      "reprojection_error_px": 1.0776190757751465,
+      "target_top": [
+        "clover",
+        "clover"
+      ],
+      "note": "",
+      "pnp_forward_units": 7.442809119563515
+    }
+  ],
+  "active_calibration_preset": "unloaded",
+  "calibration_presets": {
+    "unloaded": {
+      "name": "unloaded",
+      "friction_coefficient": 0.9485619699123968,
+      "rotation_calibration_samples": [
+        {
+          "captured_at": "2026-08-25T03:10:15+0000",
+          "load_state": "unloaded",
+          "actual_deg": 360.0,
+          "command_deg": -379.5218566829612,
+          "scale": 0.9485619699123968,
+          "angular_speed_rad_s": 0.35,
+          "set_motor": {
+            "event_count": 211,
+            "mean_abs_rps": 0.24115646684801623,
+            "max_abs_rps": 0.24115646684801184
+          },
+          "difference_vs_previous_percent": null
+        }
+      ],
+      "rotation_friction_by_speed": {
+        "0.35": {
+          "coefficient": 0.9485619699123968,
+          "sample_count": 1
+        }
+      },
+      "distance_coefficient": 0.8935677101700673,
+      "distance_calibration_samples": [
+        {
+          "captured_at": "2026-08-25T03:01:14+0000",
+          "load_state": "unloaded",
+          "actual_cm": 50.0,
+          "command_cm": 56.432828148004766,
+          "scale": 0.8860091127963041,
+          "linear_speed_m_s": 0.12,
+          "set_motor": {
+            "event_count": 48,
+            "mean_abs_rps": 0.5876490206469963,
+            "max_abs_rps": 0.5876490206469981
+          },
+          "difference_vs_previous_percent": null
+        },
+        {
+          "captured_at": "2026-08-25T03:01:26+0000",
+          "load_state": "unloaded",
+          "actual_cm": 50.0,
+          "command_cm": 55.314107688001954,
+          "scale": 0.9039285290838268,
+          "linear_speed_m_s": 0.12,
+          "set_motor": {
+            "event_count": 47,
+            "mean_abs_rps": 0.5876490206469963,
+            "max_abs_rps": 0.5876490206469981
+          },
+          "difference_vs_previous_percent": 2.02248667973266
+        },
+        {
+          "captured_at": "2026-08-25T03:01:36+0000",
+          "load_state": "unloaded",
+          "actual_cm": 50.0,
+          "command_cm": 56.131496604000844,
+          "scale": 0.8907654886300713,
+          "linear_speed_m_s": 0.12,
+          "set_motor": {
+            "event_count": 50,
+            "mean_abs_rps": 0.5876490206469963,
+            "max_abs_rps": 0.5876490206469981
+          },
+          "difference_vs_previous_percent": -0.46966242975693406
+        }
+      ],
+      "forward_friction_by_speed": {
+        "0.12": {
+          "coefficient": 0.8935677101700673,
+          "sample_count": 3
+        }
+      },
+      "lateral_coefficient": 0.9391809600813833,
+      "lateral_calibration_samples": [
+        {
+          "captured_at": "2026-08-25T03:02:04+0000",
+          "load_state": "unloaded",
+          "actual_cm": 50.0,
+          "command_cm": 55.16609797200363,
+          "scale": 0.9063537541729817
+        },
+        {
+          "captured_at": "2026-08-25T03:03:02+0000",
+          "load_state": "unloaded",
+          "actual_cm": 50.0,
+          "command_cm": 50.731250196002655,
+          "scale": 0.9855858037565123
+        },
+        {
+          "captured_at": "2026-08-25T03:03:15+0000",
+          "load_state": "unloaded",
+          "actual_cm": 50.0,
+          "command_cm": 54.018820799999936,
+          "scale": 0.9256033223146563
+        }
+      ],
+      "lateral_friction_by_speed": {}
+    }
+  },
+  "_comment_centerline_offset_cm": "카메라 인식 중심과 실제 포크 중심선 사이의 좌우 보정값(cm)",
+  "centerline_offset_cm": 1.0,
+  "_comment_dock_standoff_m": "정렬을 끝내고 직진 삽입을 시작할 팔레트 전면까지의 거리(m)",
+  "dock_standoff_m": 0.2,
+  "_comment_insertion_distance_cm": "팔레트 전면을 통과한 뒤 내부로 추가 삽입할 실제 깊이(cm)",
+  "insertion_distance_cm": 12.0,
+  "_comment_insertion_speed_m_s": "포크 삽입 중 차량의 전진 속도(m/s)",
+  "insertion_speed_m_s": 0.12,
+  "_comment_near_center_check_distance_cm": "YOLO 근거리 중앙 정렬 판정을 적용하는 기준 거리(cm)",
+  "near_center_check_distance_cm": 25.0,
+  "_comment_post_lift_reverse_distance_cm": "포크 UP/DOWN 완료 후 회전 전에 직선 후진하는 거리(cm)",
+  "post_lift_reverse_distance_cm": 30.0,
+  "_comment_post_lift_reverse_speed_m_s": "포크 완료 후 직선 후진 속도(m/s)",
+  "post_lift_reverse_speed_m_s": 0.05,
+  "_comment_post_lift_turn_deg": "후진 완료 후 Ready가 되기 전에 회전할 각도(도, 양수는 반시계)",
+  "post_lift_turn_deg": 180.0,
+  "_comment_post_lift_turn_speed_rad_s": "포크 완료 후 회전할 때의 최대 각속도(rad/s)",
+  "post_lift_turn_speed_rad_s": 0.3,
+  "_comment_post_lift_turn_tolerance_deg": "180도 회전을 완료로 판정하는 허용 각도 오차(도)",
+  "post_lift_turn_tolerance_deg": 3.0,
+  "_comment_search_linear_speed_m_s": "기존 호환용 탐색 속도이며 횡이동 속도가 없을 때 사용(m/s)",
+  "search_linear_speed_m_s": 0.08,
+  "_comment_search_motion": "YOLO 노드에 전달하는 탐색 방식 표시값",
+  "search_motion": "strafe_left",
+  "_comment_search_lateral_direction": "Auto Dock 횡탐색 방향(left 또는 right)",
+  "search_lateral_direction": "left",
+  "_comment_search_lateral_speed_m_s": "Auto Dock 횡탐색 속도(m/s)",
+  "search_lateral_speed_m_s": 0.08,
+  "_comment_disable_external_webcams": "실차 실행 중 외부 웹캠 입력을 사용하지 않을지 여부",
+  "disable_external_webcams": true,
+  "_comment_candidate_stop_delay_sec": "목표와 일치하는 첫 후보를 본 뒤 정지할 때까지 더 이동하는 시간(초)",
+  "candidate_stop_delay_sec": 0.2,
+  "_comment_stable_detection_frames": "목표를 확정하기 위해 연속 검출되어야 하는 프레임 수",
+  "stable_detection_frames": 2,
+  "_comment_depth_camera_to_fork_tip_offset_cm": "깊이 카메라 기준점과 포크 끝 사이의 전후 거리(cm)",
+  "depth_camera_to_fork_tip_offset_cm": 14.0,
+  "_comment_lidar_self_filter_distance_m": "라이다 최소 유효거리 필터(m); 안전거리보다 작아야 함",
+  "lidar_self_filter_distance_m": 0.03,
+  "_comment_lidar_front_clearance_m": "차체 외곽 기준 전방 여유거리(m)",
+  "lidar_front_clearance_m": 0.01,
+  "_comment_lidar_rear_clearance_m": "차체 외곽 기준 후방 여유거리(m)",
+  "lidar_rear_clearance_m": 0.01,
+  "_comment_lidar_left_clearance_m": "차체 외곽 기준 좌측 여유거리(m)",
+  "lidar_left_clearance_m": 0.01,
+  "_comment_lidar_right_clearance_m": "차체 외곽 기준 우측 여유거리(m)",
+  "lidar_right_clearance_m": 0.01,
+  "_comment_lidar_body_front_extent_m": "LiDAR 중심에서 차체 전방 끝까지 거리(m)",
+  "lidar_body_front_extent_m": 0.35,
+  "_comment_lidar_body_rear_extent_m": "LiDAR 중심에서 차체 후방 끝까지 거리(m)",
+  "lidar_body_rear_extent_m": 0.05,
+  "_comment_lidar_body_half_width_m": "LiDAR 중심에서 차체 좌우 끝까지 거리(m)",
+  "lidar_body_half_width_m": 0.085,
+  "_comment_lidar_sensor_radius_m": "LiDAR 센서 반경(m)",
+  "lidar_sensor_radius_m": 0.015,
+  "_comment_slot_confirmation_frames": "보관 슬롯의 FREE/OCCUPIED 상태를 확정할 연속 프레임 수",
+  "slot_confirmation_frames": 3,
+  "_comment_slot_free_non_floor_ratio": "이 비율 이하면 슬롯을 비어 있다고 판정",
+  "slot_free_non_floor_ratio": 0.12,
+  "_comment_slot_occupied_non_floor_ratio": "이 비율 이상이면 슬롯을 차 있다고 판정",
+  "slot_occupied_non_floor_ratio": 0.28,
+  "max_pnp_reprojection_error_px": 3.5,
+  "lateral_overrun_cm": 0.0,
+  "rotation_overrun_deg": 0.0,
+  "small_rotation_threshold_deg": 5.0,
+  "small_rotation_speed_rad_s": 0.55,
+  "arc_cycle_pause_sec": 0.7,
+  "search_circle_diameter_m": 1.34,
+  "lidar_stop_distance_m": 0.2,
+  "_comment_lidar_self_mask_front_half_angle_deg": "라이다 정면에서 차체 반사로 제외할 좌우 반각(도)",
+  "lidar_self_mask_front_half_angle_deg": 20.0,
+  "_comment_lidar_self_mask_front_max_range_m": "정면 차체 반사로 제외할 최대 거리(m)",
+  "lidar_self_mask_front_max_range_m": 0.18,
+  "candidate_confirmation_timeout_sec": 0.8,
+  "candidate_retry_cooldown_sec": 1.0,
+  "max_frontal_error": 0.35,
+  "coarse_center_error_max": 0.1,
+  "depth_fallback_confirmation_frames": 3,
+  "coarse_alignment_timeout_sec": 5.0,
+  "insertion_lateral_gain": 0.5,
+  "insertion_max_lateral_speed_m_s": 0.025,
+  "insertion_yaw_gain": 0.8,
+  "insertion_max_angular_speed_rad_s": 0.12,
+  "motion_transition_pause_sec": 0.5
+}
