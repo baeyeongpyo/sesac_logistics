@@ -213,7 +213,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             'cancel_requested': True,
         })
         self.assertEqual(self.velocity.messages[-1], (0.0, 0.0))
-        self.assertEqual(self.navigation.cancel_requests, [body['operation_id']])
+        self.assertEqual(self.navigation.cancel_requests, [body['operation_id'], body['operation_id']])
         _, operation_status = self.get_json('/v1/operation-status')
         self.assertEqual(operation_status, {
             'operation_id': body['operation_id'],
@@ -283,6 +283,25 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             'operation_id': None,
             'state': 'IDLE',
             'detail': 'MANUAL_COMMAND_EXPIRED',
+        })
+
+    def test_manual_velocity_cancels_an_active_navigation_before_direct_control(self):
+        """Allowing manual velocity while Nav2 stays active must fail control handoff safety."""
+        _, body = self.navigation_goal()
+
+        status, response = post_json(
+            f'{self.base_url}/v1/cmd-vel',
+            {'linear_x': 0.05, 'angular_z': 0.0, 'hold_ms': 1000},
+        )
+
+        self.assertEqual(status, 202)
+        self.assertEqual(response['state'], 'MANUAL')
+        self.assertEqual(self.navigation.cancel_requests, [body['operation_id']])
+        _, operation_status = self.get_json('/v1/operation-status')
+        self.assertEqual(operation_status, {
+            'operation_id': None,
+            'state': 'MANUAL',
+            'detail': 'MANUAL_COMMAND_SENT',
         })
 
 
