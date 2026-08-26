@@ -616,8 +616,18 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def run_server(arguments, adapter_factory=RosVehicleAdapter, http_server_factory=create_http_server):
-    adapter = adapter_factory(arguments)
+def create_ros_vehicle_adapter(arguments):
+    return RosVehicleAdapter(
+        cmd_vel_topic=arguments.cmd_vel_topic,
+        action_name=arguments.action_name,
+        action_server_timeout_sec=arguments.action_server_timeout_sec,
+        goal_response_timeout_sec=arguments.goal_response_timeout_sec,
+        cancel_response_timeout_sec=arguments.cancel_response_timeout_sec,
+    )
+
+
+def run_server(arguments, adapter_factory=None, http_server_factory=create_http_server):
+    adapter = create_ros_vehicle_adapter(arguments) if adapter_factory is None else adapter_factory(arguments)
     service = VehicleCommandService(
         velocity=adapter,
         navigation=adapter,

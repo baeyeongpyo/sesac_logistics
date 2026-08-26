@@ -410,6 +410,60 @@ class VehicleCommandApiCliTest(unittest.TestCase):
         self.assertEqual(adapter.messages, [(0.0, 0.0)])
         self.assertTrue(adapter.closed)
 
+    def test_default_runner_expands_cli_arguments_for_ros_adapter(self):
+        """Passing the argparse object directly to RosVehicleAdapter must fail startup."""
+        adapter = ClosingFakeAdapter()
+        http_server = ReturningHttpServer()
+        arguments = SimpleNamespace(
+            host='0.0.0.0',
+            port=8082,
+            cmd_vel_topic='/cmd_vel',
+            action_name='/navigate_to_pose',
+            max_linear_x=0.10,
+            max_angular_z=0.50,
+            max_hold_ms=1000,
+            action_server_timeout_sec=1.0,
+            goal_response_timeout_sec=3.0,
+            cancel_response_timeout_sec=3.0,
+        )
+        captured = {}
+
+        def construct_adapter(
+            cmd_vel_topic,
+            action_name,
+            action_server_timeout_sec,
+            goal_response_timeout_sec,
+            cancel_response_timeout_sec,
+        ):
+            captured.update({
+                'cmd_vel_topic': cmd_vel_topic,
+                'action_name': action_name,
+                'action_server_timeout_sec': action_server_timeout_sec,
+                'goal_response_timeout_sec': goal_response_timeout_sec,
+                'cancel_response_timeout_sec': cancel_response_timeout_sec,
+            })
+            return adapter
+
+        original_adapter = self.module.RosVehicleAdapter
+        self.module.RosVehicleAdapter = construct_adapter
+        try:
+            self.module.run_server(
+                arguments,
+                http_server_factory=lambda host, port, service: http_server,
+            )
+        except Exception as error:
+            self.fail(f'default runner must construct the ROS adapter: {error}')
+        finally:
+            self.module.RosVehicleAdapter = original_adapter
+
+        self.assertEqual(captured, {
+            'cmd_vel_topic': '/cmd_vel',
+            'action_name': '/navigate_to_pose',
+            'action_server_timeout_sec': 1.0,
+            'goal_response_timeout_sec': 3.0,
+            'cancel_response_timeout_sec': 3.0,
+        })
+
 
 if __name__ == '__main__':
     unittest.main()
