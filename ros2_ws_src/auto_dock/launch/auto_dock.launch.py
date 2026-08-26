@@ -1,5 +1,5 @@
 import os
-import time
+import subprocess
 
 from launch import LaunchDescription
 from launch.actions import (
@@ -12,7 +12,6 @@ from launch.actions import (
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
-import rclpy
 
 
 def yolo_process(context):
@@ -25,21 +24,18 @@ def yolo_process(context):
             "vehicle cannot be inferred: ROS_DOMAIN_ID must be 215 or 216"
         )
     detection_topic = f"/robot_{vehicle}/symbol_seg/detections"
-    probe = None
     try:
-        rclpy.init()
-        probe = rclpy.create_node("_auto_dock_yolo_probe")
-        deadline = time.monotonic() + 1.0
-        while time.monotonic() < deadline:
-            rclpy.spin_once(probe, timeout_sec=0.1)
-            publishers = probe.get_publishers_info_by_topic(detection_topic)
-            if any(info.node_name == "yolo_tag" for info in publishers):
-                return [LogInfo(msg=f"YOLO already publishes {detection_topic}; reusing it.")]
-    finally:
-        if probe is not None:
-            probe.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        result = subprocess.run(
+            ["ros2", "node", "list"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=2.0,
+        )
+        if "/yolo_tag" in result.stdout.splitlines():
+            return [LogInfo(msg=f"YOLO already publishes {detection_topic}; reusing it.")]
+    except (OSError, subprocess.SubprocessError):
+        pass
     return [
         LogInfo(msg=f"No YOLO publisher on {detection_topic}; starting it."),
         ExecuteProcess(
@@ -86,6 +82,8 @@ def generate_launch_description():
                 executable="auto_dock_node",
                 name="auto_dock",
                 output="screen",
+                respawn=True,
+                respawn_delay=2.0,
                 parameters=[{
                     "vehicle": LaunchConfiguration("vehicle"),
                     "pose_config": LaunchConfiguration("pose_config"),

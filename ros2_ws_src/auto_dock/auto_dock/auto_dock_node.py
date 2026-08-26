@@ -623,6 +623,7 @@ class AutoDockNode(Node):
         self.right_turn_target_yaw = None
         self.backoff_until = None
         self.backoff_command = (0.0, 0.0)
+        self.backoff_direction = None
         self.was_docking_before_interrupt = False
 
         self.cmd_pub = self.create_publisher(
@@ -879,6 +880,7 @@ class AutoDockNode(Node):
         self.state = "idle"
         self.reason = reason
         self.backoff_until = None
+        self.backoff_direction = None
         self.candidate_stop_due_at = None
         self.candidate_confirmation_started_at = None
         self.candidate_retry_not_before = 0.0
@@ -915,22 +917,13 @@ class AutoDockNode(Node):
     def on_slot_image(self, msg):
         if self.state not in {"search", "slot_scanning", "slot_target_ready"}:
             return
+        # Search uses symbol detections only; warning-tape guidance was removed.
+        if self.state == "search":
+            return
         try:
             frame = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         except Exception as exc:
             self.publish_status("waiting", "camera_image_conversion", error=str(exc))
-            return
-        if self.state == "search":
-            self.latest_tape_guidance = detect_warning_tape(
-                frame,
-                roi_top_ratio=self.number(
-                    "tape_roi_top_ratio", 0.55, 0.30, 0.90
-                ),
-                minimum_yellow_pixels=int(self.number(
-                    "tape_min_yellow_pixels", 600, 100, 20000
-                )),
-            )
-            self.latest_tape_guidance_at = time.monotonic()
             return
         zone = self.location.split("_", 1)[0]
         if zone not in {"NORMAL", "FRESH"}:
@@ -1094,7 +1087,12 @@ class AutoDockNode(Node):
             f"lidar_{direction}_clearance_m", defaults[direction], 0.0, 2.0
         )
         body_distance = AutoDockNode.lidar_body_boundary_distance(self, angle)
-        return direction, body_distance + edge_clearance
+        minimum_stop_distance = self.number(
+            "lidar_stop_distance_m", 0.20, 0.05, 2.0
+        )
+        return direction, max(
+            body_distance + edge_clearance, minimum_stop_distance
+        )
 
     def lidar_body_boundary_distance(self, angle):
         """Distance from the LiDAR origin to the 40 x 17 cm vehicle outline."""
@@ -1384,6 +1382,12 @@ class AutoDockNode(Node):
         return c * dx + s * dy, -s * dx + c * dy, normalize_angle(self.target_world["yaw"] - self.odom_yaw)
 
     def interrupt_for_lidar(self):
+        lidar_safety_enabled = (
+            AutoDockNode.boolean(self, "lidar_safety_enabled", True)
+            if hasattr(self, "config") else True
+        )
+        if not lidar_safety_enabled:
+            return False
         if self.state in {
             "idle", "ready", "waiting_fork",
             "slot_scanning", "slot_target_ready",
@@ -1393,13 +1397,7 @@ class AutoDockNode(Node):
         default_clearance = self.number("lidar_stop_distance_m", 0.35, 0.05, 2.0)
         violations = []
         if self.state == "search":
-            if AutoDockNode.boolean(self, "tape_guidance_enabled", False):
-                # The experimental tape mode moves laterally.
-                monitored = ("left", "right", "rear")
-            else:
-                # Circular search moves forward while turning, so protect its
-                # complete surrounding footprint.
-                monitored = ("front", "rear", "left", "right")
+            monitored = ("front", "rear", "left", "right")
         elif self.state in {"coarse_align", "docking", "inserting"}:
             # The selected pallet is intentionally inside the front clearance.
             monitored = ("left", "right", "rear")
@@ -1431,14 +1429,25 @@ class AutoDockNode(Node):
                 range_m=round(distance, 3), clearance_m=round(clearance, 3),
             )
             return True
+        if not AutoDockNode.boolean(self, "lidar_backoff_enabled", True):
+            self.cancel(f"lidar_{direction}_blocked")
+            return True
         self.was_docking_before_interrupt = self.state in {
             "coarse_align", "docking", "inserting"
         }
         self.candidate_stop_due_at = None
         self.candidate_confirmation_started_at = None
-        angle = angle or 0.0
-        self.backoff_command = (-0.08 * math.cos(angle), -0.08 * math.sin(angle))
-        self.backoff_until = time.monotonic() + 0.7
+        backoff_speed = self.number("lidar_backoff_speed_m_s", 0.12, 0.05, 0.30)
+        self.backoff_command = {
+            "front": (-backoff_speed, 0.0),
+            "rear": (backoff_speed, 0.0),
+            "left": (0.0, -backoff_speed),
+            "right": (0.0, backoff_speed),
+        }[direction]
+        self.backoff_direction = direction
+        self.backoff_until = time.monotonic() + self.number(
+            "lidar_backoff_duration_sec", 0.7, 0.1, 2.0
+        )
         self.state = "safety_backoff"
         self.publish_status(
             "recovering", "lidar_backoff", direction=direction,
@@ -1511,65 +1520,27 @@ class AutoDockNode(Node):
             self.config.get("search_lateral_direction", "left")
         ).strip().lower()
         direction_sign = -1.0 if direction == "right" else 1.0
-        if AutoDockNode.boolean(self, "tape_guidance_enabled", False):
-            tape = getattr(self, "latest_tape_guidance", None)
-            tape_age = now - getattr(self, "latest_tape_guidance_at", 0.0)
-            maximum_age = self.number("tape_max_age_sec", 0.50, 0.10, 3.0)
-            if tape is None or tape_age > maximum_age:
-                self.tick_missing_tape_recovery(now)
-                return
-            self.tape_recovery_start_position = None
-            self.tape_recovery_direction = None
-            self.tape_recovery_done = False
-            if self.tape_reference is None:
-                self.tape_reference = {
-                    "center_y_ratio": tape["center_y_ratio"],
-                }
-            vertical_error = (
-                tape["center_y_ratio"] - self.tape_reference["center_y_ratio"]
-            )
-            # A horizontal tape in the camera image means the vehicle's
-            # forward axis is perpendicular to the tape.  Align to that
-            # absolute direction before beginning the parallel lateral sweep;
-            # preserving the first observed angle would preserve a bad
-            # arrival heading as well.
-            target_angle_deg = self.number(
-                "tape_perpendicular_target_angle_deg", 0.0, -20.0, 20.0
-            )
-            angle_error_deg = tape["angle_deg"] - target_angle_deg
-            forward_correction = clamp(
-                -self.number("tape_forward_gain", 0.10, 0.0, 1.0)
-                * vertical_error,
-                -self.number("tape_max_forward_speed_m_s", 0.03, 0.0, 0.10),
-                self.number("tape_max_forward_speed_m_s", 0.03, 0.0, 0.10),
-            )
-            angular_correction = clamp(
-                -self.number("tape_yaw_gain", 0.80, 0.0, 3.0)
-                * math.radians(angle_error_deg),
-                -self.number("tape_max_yaw_speed_rad_s", 0.20, 0.0, 0.50),
-                self.number("tape_max_yaw_speed_rad_s", 0.20, 0.0, 0.50),
-            )
-            perpendicular_tolerance_deg = self.number(
-                "tape_perpendicular_tolerance_deg", 3.0, 0.5, 15.0
-            )
-            if abs(angle_error_deg) > perpendicular_tolerance_deg:
-                self.publish_status(
-                    "running", "warning_tape_perpendicular_aligning",
-                    tape_angle_deg=round(tape["angle_deg"], 2),
-                    target_angle_deg=round(target_angle_deg, 2),
-                )
-                self.publish_drive(0.0, 0.0, angular_correction)
-                return
-            self.publish_status("running", "warning_tape_guided_search")
-            self.publish_drive(
-                forward_correction,
-                direction_sign * lateral_speed,
-                angular_correction,
-            )
-            return
-        diameter = self.number("search_circle_diameter_m", 1.34, 0.20, 10.0)
-        self.publish_status("running", "circular_target_search")
-        self.publish_drive(fallback_speed, 0.0, 2.0 * fallback_speed / diameter)
+        # The real mecanum base drifts rearward during a pure strafe.  Keep the
+        # proven manual lateral speed and mix in a small forward feed-forward
+        # correction without letting either wheel pair enter the unstable
+        # low-speed region.
+        minimum_wheel_component = self.number(
+            "search_min_wheel_component_m_s", 0.10, 0.01, 0.30
+        )
+        correction_limit = max(0.0, lateral_speed - minimum_wheel_component)
+        forward_compensation = clamp(
+            self.number("search_forward_compensation_m_s", 0.02, -0.10, 0.10),
+            -correction_limit,
+            correction_limit,
+        )
+        self.publish_status(
+            "running", "lateral_target_search",
+            forward_compensation_m_s=round(forward_compensation, 3),
+            lateral_speed_m_s=round(direction_sign * lateral_speed, 3),
+        )
+        self.publish_drive(
+            forward_compensation, direction_sign * lateral_speed, 0.0
+        )
 
     def tick_missing_tape_recovery(self, now):
         """Nudge once toward the clearer longitudinal side while searching."""
@@ -2003,6 +1974,13 @@ class AutoDockNode(Node):
             return
         self.stop_drive(5)
         self.backoff_until = None
+        direction = self.backoff_direction
+        self.backoff_direction = None
+        if direction in self.nearest_by_direction:
+            distance, _angle, clearance = self.nearest_by_direction[direction]
+            if distance < clearance:
+                self.cancel(f"lidar_{direction}_blocked_after_backoff")
+                return
         self.state = "docking" if self.was_docking_before_interrupt and self.target_world else "search"
         self.publish_status("running", "lidar_replanned_virtual_dock" if self.state == "docking" else "lidar_recovery_search")
 

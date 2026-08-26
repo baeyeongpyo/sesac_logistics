@@ -90,13 +90,13 @@ def test_test_load_state_is_rejected_while_busy():
 
 @pytest.mark.parametrize(("angle_deg", "direction", "distance"), [
     (0.0, "front", 0.36),
-    (180.0, "rear", 0.06),
-    (90.0, "left", 0.095),
-    (-90.0, "right", 0.095),
-    (135.0, "left", 0.01 + 0.05 / math.sqrt(0.5)),
-    (45.0, "front", 0.01 + 0.085 / math.sqrt(0.5)),
+    (180.0, "rear", 0.20),
+    (90.0, "left", 0.20),
+    (-90.0, "right", 0.20),
+    (135.0, "left", 0.20),
+    (45.0, "front", 0.20),
 ])
-def test_lidar_threshold_adds_body_extent_to_edge_clearance(
+def test_lidar_threshold_respects_global_stop_distance_and_body_clearance(
     angle_deg, direction, distance
 ):
     fake = type("FakeDock", (), {})()
@@ -124,12 +124,12 @@ def test_selected_pallet_front_return_is_allowed_during_insertion():
     assert AutoDockNode.interrupt_for_lidar(fake) is False
 
 
-def test_front_return_does_not_force_reverse_during_lateral_search():
+def test_disabled_lidar_does_not_force_reverse_during_lateral_search():
     fake = type("FakeDock", (), {})()
     fake.state = "search"
     fake.config = {
         "search_lateral_direction": "left",
-        "tape_guidance_enabled": True,
+        "lidar_safety_enabled": False,
     }
     fake.number = lambda key, default, *_args: default
     fake.nearest_by_direction = {
@@ -152,6 +152,76 @@ def test_known_front_chassis_return_is_self_masked():
     assert AutoDockNode.is_lidar_self_return(
         fake, math.radians(-16.5), 0.25
     ) is False
+
+
+def test_left_diagonal_lidar_backoff_is_pure_right_strafe(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.state = "search"
+    fake.config = {"tape_guidance_enabled": False}
+    fake.number = lambda key, default, *_args: default
+    fake.nearest_by_direction = {
+        "front": (math.inf, None, 0.20),
+        "rear": (math.inf, None, 0.20),
+        "left": (0.12, math.radians(45.0), 0.20),
+        "right": (math.inf, None, 0.20),
+    }
+    fake.candidate_stop_due_at = None
+    fake.candidate_confirmation_started_at = None
+    fake.publish_status = lambda *_args, **_kwargs: None
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
+
+    assert AutoDockNode.interrupt_for_lidar(fake) is True
+    assert fake.backoff_direction == "left"
+    assert fake.backoff_command == (0.0, -0.12)
+
+
+def test_disabled_lidar_backoff_stops_without_recovery_motion():
+    fake = type("FakeDock", (), {})()
+    fake.state = "search"
+    fake.config = {
+        "tape_guidance_enabled": False,
+        "lidar_backoff_enabled": False,
+    }
+    fake.number = lambda key, default, *_args: default
+    fake.nearest_by_direction = {
+        "front": (math.inf, None, 0.20),
+        "rear": (math.inf, None, 0.20),
+        "left": (0.12, math.pi / 2.0, 0.20),
+        "right": (math.inf, None, 0.20),
+    }
+    cancelled = []
+    fake.cancel = lambda reason: cancelled.append(reason)
+
+    assert AutoDockNode.interrupt_for_lidar(fake) is True
+    assert cancelled == ["lidar_left_blocked"]
+    assert not hasattr(fake, "backoff_command")
+
+
+def test_disabled_lidar_safety_does_not_interrupt_driving():
+    fake = type("FakeDock", (), {})()
+    fake.state = "search"
+    fake.config = {"lidar_safety_enabled": False}
+    fake.nearest_by_direction = {
+        direction: (0.05, 0.0, 0.20)
+        for direction in ("front", "rear", "left", "right")
+    }
+
+    assert AutoDockNode.interrupt_for_lidar(fake) is False
+
+
+def test_persistent_lidar_obstacle_stops_after_one_backoff(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.backoff_until = 10.0
+    fake.backoff_direction = "left"
+    fake.nearest_by_direction = {"left": (0.12, math.pi / 2.0, 0.20)}
+    fake.stop_drive = lambda *_args: None
+    cancelled = []
+    fake.cancel = lambda reason: cancelled.append(reason)
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_backoff(fake)
+
+    assert cancelled == ["lidar_left_blocked_after_backoff"]
 
 
 def test_structured_dock_pick_allows_duplicate_symbols():
@@ -420,7 +490,9 @@ def test_first_matching_frame_schedules_stop_after_point_two_seconds(monkeypatch
     fake.number = lambda key, default, *_args: {
         "candidate_stop_delay_sec": 0.2,
         "search_linear_speed_m_s": 0.08,
-        "search_circle_diameter_m": 0.50,
+        "search_lateral_speed_m_s": 0.12,
+        "search_forward_compensation_m_s": 0.02,
+        "search_min_wheel_component_m_s": 0.10,
     }.get(key, default)
     fake.publish_status = lambda *_args, **_kwargs: None
     fake.config = {
@@ -436,7 +508,32 @@ def test_first_matching_frame_schedules_stop_after_point_two_seconds(monkeypatch
     AutoDockNode.tick_search(fake)
 
     assert fake.candidate_stop_due_at == pytest.approx(10.2)
-    assert commands == [(0.08, 0.0, 0.32)]
+    assert commands == [(pytest.approx(0.02), 0.12, 0.0)]
+
+
+def test_lateral_search_caps_compensation_to_keep_wheels_out_of_low_speed(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.candidate_stop_due_at = None
+    fake.candidate_retry_not_before = 0.0
+    fake.selected_candidate = lambda: (None, None)
+    fake.config = {
+        "search_lateral_direction": "right",
+        "tape_guidance_enabled": False,
+    }
+    fake.number = lambda key, default, *_args: {
+        "search_lateral_speed_m_s": 0.12,
+        "search_forward_compensation_m_s": 0.08,
+        "search_min_wheel_component_m_s": 0.10,
+    }.get(key, default)
+    fake.publish_status = lambda *_args, **_kwargs: None
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
+
+    AutoDockNode.tick_search(fake)
+
+    assert commands[0][0] == pytest.approx(0.02)
+    assert commands[0][1:] == (-0.12, 0.0)
 
 
 def tape_search_fake(angle_deg):
@@ -459,7 +556,9 @@ def tape_search_fake(angle_deg):
     }
     fake.number = lambda key, default, *_args: {
         "search_linear_speed_m_s": 0.08,
-        "search_lateral_speed_m_s": 0.08,
+        "search_lateral_speed_m_s": 0.12,
+        "search_forward_compensation_m_s": 0.02,
+        "search_min_wheel_component_m_s": 0.10,
     }.get(key, default)
     fake.commands = []
     fake.statuses = []
@@ -470,26 +569,26 @@ def tape_search_fake(angle_deg):
     return fake
 
 
-def test_tape_search_aligns_vehicle_perpendicular_before_lateral_motion(monkeypatch):
+def test_removed_tape_guidance_cannot_rotate_search_motion(monkeypatch):
     fake = tape_search_fake(angle_deg=10.0)
     monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
 
     AutoDockNode.tick_search(fake)
 
-    assert fake.commands[0][0:2] == (0.0, 0.0)
-    assert fake.commands[0][2] < 0.0
-    assert fake.statuses[-1][1] == "warning_tape_perpendicular_aligning"
+    assert fake.commands[0][0] == pytest.approx(0.02)
+    assert fake.commands[0][1:] == (0.12, 0.0)
+    assert fake.statuses[-1][1] == "lateral_target_search"
 
 
-def test_tape_search_moves_laterally_when_vehicle_is_perpendicular(monkeypatch):
+def test_removed_tape_guidance_cannot_change_lateral_search(monkeypatch):
     fake = tape_search_fake(angle_deg=1.0)
     monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
 
     AutoDockNode.tick_search(fake)
 
-    assert fake.commands[0][0] == pytest.approx(0.0)
-    assert fake.commands[0][1] == pytest.approx(0.08)
-    assert fake.statuses[-1][1] == "warning_tape_guided_search"
+    assert fake.commands[0][0] == pytest.approx(0.02)
+    assert fake.commands[0][1:] == (0.12, 0.0)
+    assert fake.statuses[-1][1] == "lateral_target_search"
 
 
 def missing_tape_recovery_fake(front_margin, rear_margin):
