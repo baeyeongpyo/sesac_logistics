@@ -2066,11 +2066,9 @@ class TeleopWindow(QMainWindow):
                     2.0 * self.target_search_linear_m_s
                     / self.search_circle_diameter_m
                 )
-                self.args.stop_distance = min(2.0, max(
-                    0.05, float(data.get(
-                        "lidar_stop_distance_m", self.args.stop_distance
-                    ))
-                ))
+                # Keep the explicit control_gui --stop-distance value.  The
+                # shared pose file is also consumed by Auto Dock, whose LiDAR
+                # clearance must not silently replace the manual-teleop limit.
                 self.node.lidar_self_filter_distance_m = min(1.0, max(
                     0.05, float(data.get(
                         "lidar_self_filter_distance_m",
