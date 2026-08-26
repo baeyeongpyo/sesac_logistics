@@ -129,6 +129,7 @@ def test_front_return_does_not_force_reverse_during_lateral_search():
     fake.state = "search"
     fake.config = {
         "search_lateral_direction": "left",
+        "search_motion_enabled": True,
         "tape_guidance_enabled": False,
     }
     fake.number = lambda key, default, *_args: default
@@ -425,6 +426,7 @@ def test_first_matching_frame_schedules_stop_after_point_two_seconds(monkeypatch
     fake.publish_status = lambda *_args, **_kwargs: None
     fake.config = {
         "search_lateral_direction": "left",
+        "search_motion_enabled": True,
         "tape_guidance_enabled": False,
     }
     fake.search_heading_yaw = None
@@ -437,6 +439,27 @@ def test_first_matching_frame_schedules_stop_after_point_two_seconds(monkeypatch
 
     assert fake.candidate_stop_due_at == pytest.approx(10.2)
     assert commands == [(0.0, 0.08, 0.0)]
+
+
+def test_stationary_search_does_not_publish_lateral_motion(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.candidate_stop_due_at = None
+    fake.candidate_retry_not_before = 0.0
+    fake.selected_candidate = lambda: (None, None)
+    fake.config = {"search_motion_enabled": False}
+    fake.number = lambda _key, default, *_args: default
+    fake.stops = []
+    fake.statuses = []
+    fake.stop_drive = lambda *_args: fake.stops.append(True)
+    fake.publish_status = lambda state, reason, **extra: fake.statuses.append(
+        (state, reason, extra)
+    )
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
+
+    AutoDockNode.tick_search(fake)
+
+    assert fake.stops == [True]
+    assert fake.statuses[-1][1] == "stationary_search_waiting_target"
 
 
 def tape_search_fake(angle_deg):
@@ -455,6 +478,7 @@ def tape_search_fake(angle_deg):
     fake.tape_recovery_done = False
     fake.config = {
         "search_lateral_direction": "left",
+        "search_motion_enabled": True,
         "tape_guidance_enabled": True,
     }
     fake.number = lambda key, default, *_args: {

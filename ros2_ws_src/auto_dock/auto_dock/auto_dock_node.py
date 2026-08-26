@@ -1499,6 +1499,10 @@ class AutoDockNode(Node):
             self.candidate_confirmation_started_at = None
             self.candidate_retry_not_before = 0.0
             return
+        if not AutoDockNode.boolean(self, "search_motion_enabled", False):
+            self.stop_drive()
+            self.publish_status("waiting", "stationary_search_waiting_target")
+            return
         fallback_speed = self.number("search_linear_speed_m_s", 0.03, 0.01, 0.30)
         lateral_speed = self.number(
             "search_lateral_speed_m_s", fallback_speed, 0.01, 0.30
@@ -1507,7 +1511,7 @@ class AutoDockNode(Node):
             self.config.get("search_lateral_direction", "left")
         ).strip().lower()
         direction_sign = -1.0 if direction == "right" else 1.0
-        if AutoDockNode.boolean(self, "tape_guidance_enabled", True):
+        if AutoDockNode.boolean(self, "tape_guidance_enabled", False):
             tape = getattr(self, "latest_tape_guidance", None)
             tape_age = now - getattr(self, "latest_tape_guidance_at", 0.0)
             maximum_age = self.number("tape_max_age_sec", 0.50, 0.10, 3.0)
