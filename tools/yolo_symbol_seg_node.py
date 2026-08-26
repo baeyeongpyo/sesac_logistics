@@ -10,6 +10,7 @@ import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 # Keep this process off Fast DDS shared memory. UDPv4 still interoperates with
 # the navigation participants without making them inherit this setting.
@@ -293,6 +294,7 @@ class YoloSymbolSeg(Node):
         self.confidence = float(self.get_parameter("confidence").value)
         pose_config = {}
         pose_config_path = str(self.get_parameter("pose_config").value)
+        self.pose_config_path = pose_config_path
         if pose_config_path and os.path.isfile(pose_config_path):
             try:
                 with open(pose_config_path, encoding="utf-8") as source:
@@ -308,6 +310,9 @@ class YoloSymbolSeg(Node):
         )
         self.camera_distance_offset = (
             None if distance_offset is None else float(distance_offset)
+        )
+        self.depth_camera_to_fork_tip_offset_cm = float(
+            pose_config.get("depth_camera_to_fork_tip_offset_cm", 14.0)
         )
         self.friction_coefficient = float(pose_config.get("friction_coefficient", 1.0))
         self.yaw_bias_deg = float(
@@ -419,6 +424,7 @@ class YoloSymbolSeg(Node):
                     )
                     self.yaw_bias_deg = float(command["yaw_bias_deg"])
                     self.previous_pnp_yaw = None
+                    self.persist_camera_pose_config()
                     self.get_logger().info(
                         f"camera calibration changed: pitch={self.camera_pitch_deg:+.2f} deg"
                     )
@@ -441,6 +447,31 @@ class YoloSymbolSeg(Node):
                     drive_active = False
             except (OSError, ValueError, TypeError, UnicodeDecodeError):
                 continue
+
+    def persist_camera_pose_config(self):
+        if not self.pose_config_path:
+            return
+        path = Path(self.pose_config_path)
+        data = {}
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                data = {}
+        data.update({
+            "camera_pitch_deg": self.camera_pitch_deg,
+            "camera_distance_scale_cm_per_pnp_unit": self.camera_distance_scale,
+            "camera_distance_offset_cm": self.camera_distance_offset,
+            "yaw_bias_deg": self.yaw_bias_deg,
+        })
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        if path.exists():
+            os.chmod(temporary, path.stat().st_mode)
+        os.replace(temporary, path)
 
     def start_web_server(self, port):
         node = self
@@ -720,6 +751,13 @@ class YoloSymbolSeg(Node):
         baseline = math.hypot(right_x - left_x, right_depth - left_depth)
         if baseline < 0.03:
             return None
+        camera_depth_m = 0.5 * (left_depth + right_depth)
+        ground_forward_m = camera_depth_m * math.cos(
+            math.radians(self.camera_pitch_deg)
+        )
+        forward_distance_cm = (
+            ground_forward_m * 100.0 - self.depth_camera_to_fork_tip_offset_cm
+        )
         return {
             "yaw_deg": math.degrees(math.atan2(
                 right_depth - left_depth, right_x - left_x
@@ -727,6 +765,8 @@ class YoloSymbolSeg(Node):
             "left_depth_m": left_depth,
             "right_depth_m": right_depth,
             "baseline_m": baseline,
+            "forward_distance_cm": forward_distance_cm,
+            "distance_reference": "fork tip to target front face",
         }
 
     def start_telemetry(self, session):
@@ -951,7 +991,11 @@ class YoloSymbolSeg(Node):
             and abs(float(entity.get("bottom_row_error", 999.0))) <= 0.8
         ]
         assign_frame_pallet_groups(map_entities)
-        entities = pallet_entities(results, self.target_top)
+        # Build each pallet entity once without knowing the requested target.
+        # Filtering combinations by target_top here creates confirmation bias:
+        # nearby symbols can be rearranged into the requested answer even when
+        # the best pallet entity has a different upper row.
+        entities = map_entities
         complete_entities = [
             entity for entity in entities
             if entity["complete"]
@@ -1020,6 +1064,10 @@ class YoloSymbolSeg(Node):
             else:
                 left_center = detection_center(tracked_partial["left_tag"])
                 right_center = detection_center(tracked_partial["right_tag"])
+                tracked_partial["center_error"] = (
+                    ((left_center[0] + right_center[0]) * 0.5)
+                    - frame.shape[1] * 0.5
+                ) / max(frame.shape[1] * 0.5, 1.0)
                 tracked_partial["depth_yaw"] = self.depth_yaw_from_pair(
                     tracked_partial["left_tag"], tracked_partial["right_tag"], source_stamp_ns
                 )
@@ -1144,6 +1192,7 @@ class YoloSymbolSeg(Node):
                     "entity_id": tracked_partial["entity_id"],
                     "bearing_error_deg": tracked_partial["bearing_error_deg"],
                     "age_sec": tracked_partial["age_sec"],
+                    "center_error": tracked_partial["center_error"],
                     "depth_yaw": tracked_partial.get("depth_yaw"),
                 }
             ),

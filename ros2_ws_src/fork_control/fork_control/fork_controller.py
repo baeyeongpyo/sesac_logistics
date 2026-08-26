@@ -9,7 +9,7 @@ import rclpy
 from gpiozero import Button, Motor
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from std_msgs.msg import Empty, String
+from std_msgs.msg import String
 
 
 class ForkController(Node):
@@ -20,8 +20,6 @@ class ForkController(Node):
         self.declare_parameter("vehicle", 0)
         self.declare_parameter("command_topic", "/fork/command")
         self.declare_parameter("state_topic", "")
-        self.declare_parameter("entry_complete_topic", "")
-        self.declare_parameter("lift_up_complete_topic", "")
 
         requested_vehicle = int(self.get_parameter("vehicle").value)
         domain_vehicle = {215: 1, 216: 2}.get(
@@ -32,10 +30,6 @@ class ForkController(Node):
             raise RuntimeError("vehicle must be 1/2, or ROS_DOMAIN_ID must be 215/216")
         robot = f"/robot_{self.vehicle}"
         state_topic = str(self.get_parameter("state_topic").value).strip() or f"{robot}/fork/state"
-        entry_topic = str(self.get_parameter("entry_complete_topic").value).strip() or f"{robot}/auto_dock/entry_complete"
-        legacy_complete_topic = str(
-            self.get_parameter("lift_up_complete_topic").value
-        ).strip() or f"{robot}/lift/up_complete"
 
         self.motor = Motor(forward=17, backward=18)
         self.lower_limit_switch = Button(27, pull_up=False, bounce_time=0.05)
@@ -45,7 +39,6 @@ class ForkController(Node):
         self.lower_release_started_at = None
         self.upper_release_started_at = None
         self.active_command = "STOP"
-        self.legacy_up_pending = False
 
         self.lower_limit_switch.when_pressed = self.lower_limit_pressed
         self.upper_limit_switch.when_pressed = self.upper_limit_pressed
@@ -54,9 +47,7 @@ class ForkController(Node):
             String, str(self.get_parameter("command_topic").value),
             self.command_callback, 10,
         )
-        self.create_subscription(Empty, entry_topic, self.entry_complete_callback, 10)
         self.state_pub = self.create_publisher(String, state_topic, 10)
-        self.legacy_up_pub = self.create_publisher(Empty, legacy_complete_topic, 10)
 
         if self.lower_limit_latched or self.upper_limit_latched:
             self.motor.stop()
@@ -73,9 +64,6 @@ class ForkController(Node):
         self.motor.stop()
         self.active_command = "STOP"
         self.publish_state(f"{command}_COMPLETE")
-        if command == "UP" and self.legacy_up_pending:
-            self.legacy_up_pending = False
-            self.legacy_up_pub.publish(Empty())
 
     def lower_limit_pressed(self):
         was_moving_down = self.active_command == "DOWN"
@@ -99,8 +87,7 @@ class ForkController(Node):
         if was_moving_up:
             self.complete("UP")
 
-    def start_command(self, command, legacy_up=False):
-        self.legacy_up_pending = bool(legacy_up and command == "UP")
+    def start_command(self, command):
         if command == "UP":
             if self.upper_limit_latched or self.upper_limit_switch.is_pressed:
                 self.complete("UP")
@@ -114,15 +101,11 @@ class ForkController(Node):
         self.active_command = command
         self.get_logger().info(f"Motor: {command}")
 
-    def entry_complete_callback(self, _message):
-        self.start_command("UP", legacy_up=True)
-
     def command_callback(self, message):
         command = message.data.strip().upper()
         if command in {"UP", "DOWN"}:
             self.start_command(command)
         elif command == "STOP":
-            self.legacy_up_pending = False
             self.motor.stop()
             self.active_command = "STOP"
         else:

@@ -13,8 +13,10 @@ from types import SimpleNamespace
 
 
 _bootstrap = argparse.ArgumentParser(add_help=False)
-_bootstrap.add_argument("--ros-domain-id", type=int, default=215)
+_bootstrap.add_argument("--vehicle", type=int, choices=(1, 2), default=1)
+_bootstrap.add_argument("--ros-domain-id", type=int, default=None)
 _bootstrap_args, _ = _bootstrap.parse_known_args()
+_bootstrap_domain = _bootstrap_args.ros_domain_id or 214 + _bootstrap_args.vehicle
 
 if not os.environ.get("VEHICLE_GUI_ROS_READY"):
     ros_setup = next(
@@ -29,7 +31,7 @@ if not os.environ.get("VEHICLE_GUI_ROS_READY"):
         environment = os.environ.copy()
         environment["VEHICLE_GUI_ROS_READY"] = "1"
         environment["QT_QPA_PLATFORM"] = "offscreen"
-        environment["ROS_DOMAIN_ID"] = str(_bootstrap_args.ros_domain_id)
+        environment["ROS_DOMAIN_ID"] = str(_bootstrap_domain)
         os.execve(
             "/bin/bash",
             ["bash", "-lc", f'{" && ".join(commands)} && exec "$@"',
@@ -38,7 +40,7 @@ if not os.environ.get("VEHICLE_GUI_ROS_READY"):
         )
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ["ROS_DOMAIN_ID"] = str(_bootstrap_args.ros_domain_id)
+os.environ["ROS_DOMAIN_ID"] = str(_bootstrap_domain)
 os.environ["RMW_IMPLEMENTATION"] = "rmw_fastrtps_cpp"
 os.environ["FASTDDS_BUILTIN_TRANSPORTS"] = "UDPv4"
 os.environ.pop("ROS_DISCOVERY_SERVER", None)
@@ -49,7 +51,7 @@ from python_qt_binding.QtCore import QTimer
 from python_qt_binding.QtWidgets import QApplication
 from std_msgs.msg import Empty, String
 
-from vehicle_camera_teleop_gui import TeleopNode, TeleopWindow
+from vehicle_camera_teleop_gui import TeleopNode, TeleopWindow, VEHICLE_HOSTS
 
 
 SYMBOLS = ("star", "diamond", "spade", "clover", "heart")
@@ -60,7 +62,7 @@ def make_args(cli):
     return SimpleNamespace(
         vehicle=cli.vehicle, ros_domain_id=cli.ros_domain_id, node_name="auto_dock",
         webcam_ip="", image_topic="", secondary_image_topic="", secondary_video_url="",
-        primary_video_url="", primary_video_command="", control_host="127.0.0.1",
+        primary_video_url="", primary_video_command="", control_host=VEHICLE_HOSTS[cli.vehicle],
         control_port=8091, control_url="", control_command="", webcam_1_video_url="",
         webcam_2_video_url="", scan_topic="/scan_raw", odom_topic="/odom_raw",
         motor_command_topic="/ros_robot_controller/set_motor", battery_topic="/ros_robot_controller/battery",
@@ -224,7 +226,7 @@ class AutoDockRunner:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--vehicle", type=int, choices=(1, 2), required=True)
-    parser.add_argument("--ros-domain-id", type=int, default=_bootstrap_args.ros_domain_id)
+    parser.add_argument("--ros-domain-id", type=int, default=_bootstrap_domain)
     parser.add_argument("--left", choices=SYMBOLS, default="spade")
     parser.add_argument("--right", choices=SYMBOLS, default="spade")
     parser.add_argument("--speed", type=float, default=0.12)

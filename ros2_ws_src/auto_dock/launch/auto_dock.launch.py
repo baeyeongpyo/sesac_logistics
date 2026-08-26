@@ -62,6 +62,15 @@ def generate_launch_description():
         # tag pair through the existing local UDP target-control interface.
         OpaqueFunction(function=yolo_process),
         Node(
+            package="fork_control",
+            executable="fork_controller",
+            name="fork_controller",
+            output="screen",
+            parameters=[{
+                "vehicle": LaunchConfiguration("vehicle"),
+            }],
+        ),
+        Node(
             package="auto_dock",
             executable="auto_dock_node",
             name="auto_dock",

@@ -89,6 +89,9 @@ from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import Empty, String, UInt16
 
 
+VEHICLE_HOSTS = {1: "192.168.100.38", 2: "192.168.100.35"}
+
+
 class DevControlClientNode(Node):
     """ROS I/O client for the optional development GUI/UI."""
 
@@ -174,6 +177,22 @@ class DevControlClientNode(Node):
         self.auto_dock_status_sub = self.create_subscription(
             String, args.auto_dock_status_topic, self.on_auto_dock_status, status_qos
         )
+        self.fork_state = {"state": "UNKNOWN", "error": ""}
+        self.drive_ready_count = 0
+        robot_namespace = f"/robot_{args.vehicle}"
+        self.fork_state_sub = self.create_subscription(
+            String,
+            getattr(args, "fork_state_topic", f"{robot_namespace}/fork/state"),
+            self.on_fork_state, 10,
+        )
+        self.drive_ready_sub = self.create_subscription(
+            Empty,
+            getattr(
+                args, "drive_ready_topic",
+                f"{robot_namespace}/auto_dock/drive_ready",
+            ),
+            self.on_drive_ready, 10,
+        )
         map_qos = QoSProfile(depth=1)
         map_qos.reliability = ReliabilityPolicy.RELIABLE
         map_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
@@ -190,7 +209,16 @@ class DevControlClientNode(Node):
         )
 
     def publish_arrival(self, left, right):
-        self.arrival_pub.publish(String(data=f"arrived {left} {right}"))
+        payload = {
+            "status": "SUCCEEDED",
+            "location": "DOCK_1",
+            "operation": "PICK",
+            "product_type": "NORMAL",
+            "target": {"type": "SYMBOLS", "left": left, "right": right},
+        }
+        self.arrival_pub.publish(String(data=json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":")
+        )))
 
     def publish_auto_dock_stop(self):
         self.auto_dock_stop_pub.publish(Empty())
@@ -202,6 +230,17 @@ class DevControlClientNode(Node):
                 self.auto_dock_status = status
         except (TypeError, ValueError):
             self.get_logger().warning("invalid auto_dock status JSON received")
+
+    def on_fork_state(self, msg):
+        try:
+            payload = json.loads(msg.data)
+            if isinstance(payload, dict):
+                self.fork_state = payload
+        except (TypeError, ValueError):
+            self.fork_state = {"state": "INVALID", "error": msg.data}
+
+    def on_drive_ready(self, _msg):
+        self.drive_ready_count += 1
 
     def on_map(self, msg):
         width = int(msg.info.width)
@@ -764,6 +803,7 @@ class EntityMapView(QWidget):
 class TeleopWindow(QMainWindow):
     MOVEMENT_KEYS = {Qt.Key_W, Qt.Key_A, Qt.Key_S, Qt.Key_D, Qt.Key_Q, Qt.Key_E}
     FORK_KEYS = {Qt.Key_Up, Qt.Key_Down}
+    KEY_RELEASE_DEBOUNCE_MS = 150
     LATERAL_ACCEL_M_S2 = 0.025
     LATERAL_STOP_TOLERANCE_M = 0.003
     ARC_CYCLE_YAW_THRESHOLD_DEG = 3.0
@@ -773,6 +813,7 @@ class TeleopWindow(QMainWindow):
         self.node = node
         self.args = args
         self.pressed = set()
+        self.movement_release_timers = {}
         self.last_displayed_sequence = (-1, -1, -1)
         self.last_map_sequence = (-1, -1)
         self.writer = None
@@ -1150,11 +1191,12 @@ class TeleopWindow(QMainWindow):
         self.arc_cancel_button.clicked.connect(
             lambda: self.cancel_arc_approach("사용자 취소")
         )
-        self.arrival_button = QPushButton("1.2 arrival 토픽 발행")
+        self.arrival_button = QPushButton("DOCK PICK Arrival 발행")
         self.arrival_button.clicked.connect(self.publish_arrival_trigger)
-        self.auto_dock_stop_button = QPushButton("1.2 stop 토픽 발행")
+        self.auto_dock_stop_button = QPushButton("AUTO-DOCK STOP 발행")
         self.auto_dock_stop_button.clicked.connect(self.publish_auto_dock_stop)
-        self.auto_dock_status_label = QLabel("1.2 상태: 수신 대기")
+        self.auto_dock_status_label = QLabel("AUTO-DOCK 상태: 수신 대기")
+        self.fork_flow_status_label = QLabel("Fork/Ready 상태: 수신 대기")
         self.arc_label = QLabel("대기: 목표 검출 후 경로 계산")
         self.arc_forward_error = QDoubleSpinBox()
         self.arc_forward_error.setRange(-200.0, 200.0)
@@ -1185,13 +1227,14 @@ class TeleopWindow(QMainWindow):
         arc_layout.addWidget(self.arrival_button, 3, 0, 1, 3)
         arc_layout.addWidget(self.auto_dock_stop_button, 3, 3, 1, 2)
         arc_layout.addWidget(self.auto_dock_status_label, 4, 0, 1, 5)
-        arc_layout.addWidget(self.arc_label, 5, 0, 1, 5)
-        arc_layout.addWidget(QLabel("전후차 (+덜 감)"), 6, 0)
-        arc_layout.addWidget(self.arc_forward_error, 6, 1)
-        arc_layout.addWidget(QLabel("좌우차 (+왼쪽)"), 6, 2)
-        arc_layout.addWidget(self.arc_lateral_error, 6, 3)
-        arc_layout.addWidget(self.arc_sample_save, 6, 4)
-        arc_layout.addWidget(self.arc_sample_label, 7, 0, 1, 5)
+        arc_layout.addWidget(self.fork_flow_status_label, 5, 0, 1, 5)
+        arc_layout.addWidget(self.arc_label, 6, 0, 1, 5)
+        arc_layout.addWidget(QLabel("전후차 (+덜 감)"), 7, 0)
+        arc_layout.addWidget(self.arc_forward_error, 7, 1)
+        arc_layout.addWidget(QLabel("좌우차 (+왼쪽)"), 7, 2)
+        arc_layout.addWidget(self.arc_lateral_error, 7, 3)
+        arc_layout.addWidget(self.arc_sample_save, 7, 4)
+        arc_layout.addWidget(self.arc_sample_label, 8, 0, 1, 5)
 
         self.memo = QPlainTextEdit()
         self.memo.setPlaceholderText("캡처 메모 (이미지와 별도 JSON으로 저장)")
@@ -2097,6 +2140,11 @@ class TeleopWindow(QMainWindow):
             except (OSError, TypeError, ValueError):
                 data = {}
         self.calibration_presets[self.active_calibration_preset] = self.current_motion_preset()
+        camera_samples = self.camera_calibration_samples
+        if len(camera_samples) < 2:
+            saved_samples = data.get("camera_calibration_samples")
+            if isinstance(saved_samples, list) and len(saved_samples) >= 2:
+                camera_samples = saved_samples
         data.update({
             "load_state": self.active_calibration_preset,
             "active_calibration_preset": self.active_calibration_preset,
@@ -2114,7 +2162,7 @@ class TeleopWindow(QMainWindow):
             "camera_distance_scale_cm_per_pnp_unit": self.camera_distance_scale,
             "camera_distance_offset_cm": self.camera_distance_offset,
             "camera_distance_reference": "fork tip to target front face",
-            "camera_calibration_samples": self.camera_calibration_samples,
+            "camera_calibration_samples": camera_samples,
             "yaw_bias_deg": self.camera_yaw_bias,
             "centerline_offset_cm": self.centerline_offset_cm,
             "lateral_overrun_cm": self.lateral_overrun_cm,
@@ -2525,6 +2573,7 @@ class TeleopWindow(QMainWindow):
         if not self.mapping_active or self.mapping_start_frame is None:
             self.mapping_label.setText("먼저 중앙 목표 매핑 시작을 누르세요")
             return
+        self.cancel_movement_key_releases()
         self.pressed.clear()
         self.node.stop(repeats=3)
         motion = self.mapping_motion()
@@ -2653,6 +2702,42 @@ class TeleopWindow(QMainWindow):
         else:
             self.node.publish_fork("STOP")
 
+    def press_movement_key(self, key):
+        timer = self.movement_release_timers.pop(key, None)
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+        self.pressed.add(key)
+
+    def release_movement_key(self, key):
+        previous = self.movement_release_timers.pop(key, None)
+        if previous is not None:
+            previous.stop()
+            previous.deleteLater()
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(
+            lambda held_key=key, release_timer=timer:
+            self.finish_movement_key_release(held_key, release_timer)
+        )
+        self.movement_release_timers[key] = timer
+        timer.start(self.KEY_RELEASE_DEBOUNCE_MS)
+
+    def finish_movement_key_release(self, key, timer):
+        if self.movement_release_timers.get(key) is not timer:
+            return
+        self.movement_release_timers.pop(key, None)
+        timer.deleteLater()
+        self.pressed.discard(key)
+        if not (self.pressed & self.MOVEMENT_KEYS):
+            self.node.stop()
+
+    def cancel_movement_key_releases(self):
+        for timer in self.movement_release_timers.values():
+            timer.stop()
+            timer.deleteLater()
+        self.movement_release_timers.clear()
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Space:
             self.emergency_stop()
@@ -2661,7 +2746,7 @@ class TeleopWindow(QMainWindow):
             self.record.toggle()
             return
         if event.key() in self.MOVEMENT_KEYS:
-            self.pressed.add(event.key())
+            self.press_movement_key(event.key())
             event.accept()
             return
         if event.key() in self.FORK_KEYS:
@@ -2674,8 +2759,7 @@ class TeleopWindow(QMainWindow):
 
     def keyReleaseEvent(self, event):
         if event.key() in self.MOVEMENT_KEYS and not event.isAutoRepeat():
-            self.pressed.discard(event.key())
-            self.node.stop()
+            self.release_movement_key(event.key())
             event.accept()
             return
         if event.key() in self.FORK_KEYS and not event.isAutoRepeat():
@@ -2700,7 +2784,7 @@ class TeleopWindow(QMainWindow):
                 self.record.toggle()
                 return True
             if event.key() in self.MOVEMENT_KEYS:
-                self.pressed.add(event.key())
+                self.press_movement_key(event.key())
                 return True
             if event.key() in self.FORK_KEYS:
                 if not event.isAutoRepeat():
@@ -2709,8 +2793,7 @@ class TeleopWindow(QMainWindow):
                 return True
         elif event.type() == QEvent.KeyRelease:
             if event.key() in self.MOVEMENT_KEYS and not event.isAutoRepeat():
-                self.pressed.discard(event.key())
-                self.node.stop()
+                self.release_movement_key(event.key())
                 return True
             if event.key() in self.FORK_KEYS and not event.isAutoRepeat():
                 self.pressed.discard(event.key())
@@ -2719,12 +2802,14 @@ class TeleopWindow(QMainWindow):
         return super().eventFilter(watched, event)
 
     def focusOutEvent(self, event):
+        self.cancel_movement_key_releases()
         self.pressed.clear()
         self.node.stop(repeats=3)
         self.node.publish_fork("STOP")
         super().focusOutEvent(event)
 
     def on_drive_mode_changed(self, _index):
+        self.cancel_movement_key_releases()
         self.pressed.difference_update(self.MOVEMENT_KEYS)
         self.node.stop(repeats=3)
         mode = self.drive_mode.currentData()
@@ -2941,7 +3026,7 @@ class TeleopWindow(QMainWindow):
             return False
         waypoints = self.cubic_arc_waypoints(goal_x, goal_y, goal_yaw)
         # The controller now changes curvature continuously from the live pose
-        # error.  These legacy fields remain in logs only for compatibility.
+        # error.  These historical fields remain in logs for old recordings.
         arc_radius = None
         straight_length = None
         odom_position = self.node.odom_position
@@ -3340,6 +3425,7 @@ class TeleopWindow(QMainWindow):
             self.arc_label.setText("실패: 경로 계산 후 차량이 움직임, 다시 계산하세요")
             self.arc_execute_button.setEnabled(False)
             return
+        self.cancel_movement_key_releases()
         self.pressed.difference_update(self.MOVEMENT_KEYS)
         self.arc_start_position = self.node.odom_position
         self.arc_start_yaw = self.node.odom_yaw_unwrapped
@@ -3563,21 +3649,21 @@ class TeleopWindow(QMainWindow):
         self.start_arc_approach()
 
     def publish_arrival_trigger(self):
-        """Trigger the independent 1.2 node without changing 1.1 GUI state."""
+        """Publish a structured DOCK/PICK arrival for the Auto Dock node."""
         if self.args.http_viewer_only:
             self.arc_label.setText("HTTP 화면 전용 모드에서는 arrival 발행 불가")
             return
         left = self.target_left.currentData()
         right = self.target_right.currentData()
         self.node.publish_arrival(left, right)
-        self.arc_label.setText(f"1.2 arrival 발행: {left} / {right}")
+        self.arc_label.setText(f"DOCK PICK Arrival 발행: {left} / {right}")
 
     def publish_auto_dock_stop(self):
         if self.args.http_viewer_only:
             self.arc_label.setText("HTTP 화면 전용 모드에서는 stop 발행 불가")
             return
         self.node.publish_auto_dock_stop()
-        self.auto_dock_status_label.setText("1.2 stop 요청 전송")
+        self.auto_dock_status_label.setText("AUTO-DOCK stop 요청 전송")
 
     def start_target_search(self, auto_lift_after_dock=False):
         self.cancel_arc_approach("원형 목표 탐색 시작")
@@ -4520,6 +4606,7 @@ class TeleopWindow(QMainWindow):
         self.arc_auto_replan_due_at = None
         self.arc_cycle_replan_due_at = None
         self.auto_lift_after_dock = False
+        self.cancel_movement_key_releases()
         self.pressed.clear()
         self.node.stop(repeats=5)
         self.node.publish_fork("STOP")
@@ -4661,8 +4748,13 @@ class TeleopWindow(QMainWindow):
         if not self.args.http_viewer_only:
             auto_status = self.node.auto_dock_status
             self.auto_dock_status_label.setText(
-                f"1.2 상태: {auto_status.get('state', '?')} | "
+                f"AUTO-DOCK 상태: {auto_status.get('state', '?')} | "
                 f"{auto_status.get('reason', '?')}"
+            )
+            fork_state = self.node.fork_state
+            self.fork_flow_status_label.setText(
+                f"Fork: {fork_state.get('state', '?')} | "
+                f"drive_ready {self.node.drive_ready_count}회"
             )
         self.update_battery_status()
         self.update_rotation_estimate()
@@ -5033,6 +5125,7 @@ class TeleopWindow(QMainWindow):
             self.record_label.setText(f"Saved: {self.record_path}{suffix}")
 
     def closeEvent(self, event):
+        self.cancel_movement_key_releases()
         self.pressed.clear()
         self.node.stop(repeats=5)
         self.node.publish_fork("STOP")
@@ -5069,10 +5162,12 @@ def main():
     parser.add_argument("--arrival-topic", default="")
     parser.add_argument("--auto-dock-stop-topic", default="")
     parser.add_argument("--auto-dock-status-topic", default="")
+    parser.add_argument("--fork-state-topic", default="")
+    parser.add_argument("--drive-ready-topic", default="")
     parser.add_argument("--map-topic", default="/map")
     parser.add_argument("--entity-map-topic", default="")
     parser.add_argument("--output-dir", default="")
-    parser.add_argument("--linear-speed", type=float, default=0.05)
+    parser.add_argument("--linear-speed", type=float, default=0.12)
     parser.add_argument("--angular-speed", type=float, default=0.35)
     parser.add_argument("--camera-pitch-deg", type=float, default=0.0)
     parser.add_argument("--friction-coefficient", type=float, default=1.0)
@@ -5119,6 +5214,10 @@ def main():
         args.auto_dock_stop_topic = f"{robot_namespace}/auto_dock/stop"
     if not args.auto_dock_status_topic:
         args.auto_dock_status_topic = f"{robot_namespace}/auto_dock/status"
+    if not args.fork_state_topic:
+        args.fork_state_topic = f"{robot_namespace}/fork/state"
+    if not args.drive_ready_topic:
+        args.drive_ready_topic = f"{robot_namespace}/auto_dock/drive_ready"
     if not args.entity_map_topic:
         args.entity_map_topic = f"{robot_namespace}/tag_entity_map"
     if args.secondary_image_topic and (args.secondary_video_url or args.webcam_1_video_url):
@@ -5132,9 +5231,9 @@ def main():
     if not args.webcam_2_video_url:
         args.webcam_2_video_url = f"http://{args.webcam_ip}:5000/video/2"
     if not args.primary_video_url and not explicit_image_topic:
-        args.primary_video_url = f"http://210.220.0.{200 + args.vehicle}:8090/stream"
+        args.primary_video_url = f"http://{VEHICLE_HOSTS[args.vehicle]}:8090/stream"
     if not args.control_host:
-        args.control_host = f"210.220.0.{200 + args.vehicle}"
+        args.control_host = VEHICLE_HOSTS[args.vehicle]
     if not args.output_dir:
         args.output_dir = str(Path.home() / "recordings" / f"vehicle{args.vehicle}")
     if not args.pose_config:
