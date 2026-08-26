@@ -16,11 +16,14 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import ttk
 
+import cv2
+import numpy as np
 import rclpy
+from cv_bridge import CvBridge
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import Empty, String
 
 
@@ -70,7 +73,8 @@ TUNING_FIELDS = (
 
 class TestPanelNode(Node):
     def __init__(
-        self, vehicle, log_callback, yolo_callback, status_callback, lidar_callback
+        self, vehicle, image_topic, log_callback, yolo_callback, status_callback,
+        lidar_callback, motion_watchdog_callback,
     ):
         super().__init__("auto_dock_test_panel")
         robot = f"/robot_{vehicle}"
@@ -78,6 +82,19 @@ class TestPanelNode(Node):
         self.yolo_callback = yolo_callback
         self.status_callback = status_callback
         self.lidar_callback = lidar_callback
+        self.motion_watchdog_callback = motion_watchdog_callback
+        self.bridge = CvBridge()
+        self.motion_watchdog_enabled = False
+        self.motion_watchdog_triggered = False
+        self.auto_dock_state = "IDLE"
+        self.auto_dock_cmd_gid = None
+        self.auto_dock_gid_checked_at = 0.0
+        self.last_auto_command_at = 0.0
+        self.auto_command_started_at = None
+        self.low_flow_started_at = None
+        self.last_flow_frame_at = 0.0
+        self.previous_flow_gray = None
+        self.last_watchdog_report_at = 0.0
 
         self.arrival_pub = self.create_publisher(String, f"{robot}/nav2/arrival", 10)
         self.fork_command_pub = self.create_publisher(String, "/fork/command", 10)
@@ -112,6 +129,12 @@ class TestPanelNode(Node):
             String, f"{robot}/symbol_seg/detections", self.received_yolo, 10,
         )
         self.create_subscription(LaserScan, "/scan_raw", self.received_lidar, 10)
+        self.create_subscription(
+            Twist, "/controller/cmd_vel", self.received_cmd_vel, 20
+        )
+        camera_qos = QoSProfile(depth=1)
+        camera_qos.reliability = ReliabilityPolicy.RELIABLE
+        self.create_subscription(Image, image_topic, self.received_camera, camera_qos)
 
     def received(self, topic, value):
         if topic.endswith("/auto_dock/status"):
@@ -153,10 +176,136 @@ class TestPanelNode(Node):
         try:
             payload = json.loads(value)
             if isinstance(payload, dict):
+                self.auto_dock_state = str(payload.get("state") or "UNKNOWN").upper()
+                if self.auto_dock_state in {"IDLE", "READY", "ERROR"}:
+                    self.reset_motion_watchdog_tracking()
                 self.status_callback(payload)
         except (TypeError, ValueError, json.JSONDecodeError):
             pass
         self.received(topic, value)
+
+    def set_motion_watchdog_enabled(self, enabled):
+        self.motion_watchdog_enabled = bool(enabled)
+        self.motion_watchdog_triggered = False
+        self.reset_motion_watchdog_tracking(clear_frame=True)
+        state = "대기 중" if enabled else "꺼짐"
+        self.motion_watchdog_callback(state)
+        self.log_callback("CFG", "camera_motion_watchdog", str(bool(enabled)))
+
+    def reset_motion_watchdog_tracking(self, clear_frame=False):
+        self.last_auto_command_at = 0.0
+        self.auto_command_started_at = None
+        self.low_flow_started_at = None
+        if clear_frame:
+            self.previous_flow_gray = None
+
+    def refresh_auto_dock_cmd_gid(self, now):
+        if self.auto_dock_cmd_gid is not None and now - self.auto_dock_gid_checked_at < 2.0:
+            return
+        self.auto_dock_gid_checked_at = now
+        self.auto_dock_cmd_gid = None
+        for endpoint in self.get_publishers_info_by_topic("/controller/cmd_vel"):
+            if endpoint.node_name == "auto_dock":
+                self.auto_dock_cmd_gid = bytes(endpoint.endpoint_gid)
+                break
+
+    def received_cmd_vel(self, message, message_info):
+        if not self.motion_watchdog_enabled or self.motion_watchdog_triggered:
+            return
+        now = time.monotonic()
+        self.refresh_auto_dock_cmd_gid(now)
+        if (
+            self.auto_dock_cmd_gid is None
+            or bytes(message_info.publisher_gid) != self.auto_dock_cmd_gid
+        ):
+            return
+        moving = (
+            math.hypot(float(message.linear.x), float(message.linear.y)) >= 0.025
+            or abs(float(message.angular.z)) >= 0.06
+        )
+        if not moving:
+            self.reset_motion_watchdog_tracking()
+            return
+        self.last_auto_command_at = now
+        if self.auto_command_started_at is None:
+            self.auto_command_started_at = now
+
+    def received_camera(self, message):
+        if not self.motion_watchdog_enabled or self.motion_watchdog_triggered:
+            return
+        now = time.monotonic()
+        if now - self.last_flow_frame_at < 0.10:
+            return
+        self.last_flow_frame_at = now
+        try:
+            frame = self.bridge.imgmsg_to_cv2(message, desired_encoding="bgr8")
+        except Exception as exc:  # CvBridge exception types vary by ROS build.
+            if now - self.last_watchdog_report_at >= 1.0:
+                self.last_watchdog_report_at = now
+                self.motion_watchdog_callback(f"영상 변환 실패: {exc}")
+            return
+        height, width = frame.shape[:2]
+        scale = min(1.0, 320.0 / max(width, 1))
+        gray = cv2.cvtColor(
+            cv2.resize(frame, (max(1, int(width * scale)), max(1, int(height * scale)))),
+            cv2.COLOR_BGR2GRAY,
+        )
+        previous = self.previous_flow_gray
+        previous_at = getattr(self, "previous_flow_frame_at", None)
+        self.previous_flow_gray = gray
+        self.previous_flow_frame_at = now
+        if previous is None or previous.shape != gray.shape or previous_at is None:
+            return
+        points = cv2.goodFeaturesToTrack(
+            previous, maxCorners=80, qualityLevel=0.02, minDistance=8, blockSize=7
+        )
+        if points is None or len(points) < 15:
+            self.low_flow_started_at = None
+            self.motion_watchdog_callback("특징점 부족 · 판정 보류")
+            return
+        moved, status, _error = cv2.calcOpticalFlowPyrLK(
+            previous, gray, points, None,
+            winSize=(15, 15), maxLevel=2,
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.03),
+        )
+        if moved is None or status is None:
+            self.low_flow_started_at = None
+            return
+        valid = status.reshape(-1).astype(bool)
+        if int(np.count_nonzero(valid)) < 15:
+            self.low_flow_started_at = None
+            return
+        displacement = np.linalg.norm(
+            moved.reshape(-1, 2)[valid] - points.reshape(-1, 2)[valid], axis=1
+        )
+        dt = max(0.001, now - previous_at)
+        flow_px_s = float(np.median(displacement) / dt)
+        command_active = (
+            self.auto_dock_state in {
+                "SEARCHING", "ALIGNING", "INSERTING", "REVERSING", "TURNING"
+            }
+            and now - self.last_auto_command_at <= 0.25
+            and self.auto_command_started_at is not None
+            and now - self.auto_command_started_at >= 0.40
+        )
+        if not command_active:
+            self.low_flow_started_at = None
+        elif flow_px_s < 3.0:
+            if self.low_flow_started_at is None:
+                self.low_flow_started_at = now
+            elif now - self.low_flow_started_at >= 0.70:
+                self.motion_watchdog_triggered = True
+                self.stop_pub.publish(Empty())
+                detail = f"STOP · 명령 중 영상 이동 {flow_px_s:.1f}px/s"
+                self.motion_watchdog_callback(detail)
+                self.log_callback("SAFE", "camera_motion_watchdog", detail)
+                return
+        else:
+            self.low_flow_started_at = None
+        if now - self.last_watchdog_report_at >= 0.50:
+            self.last_watchdog_report_at = now
+            prefix = "감시 중" if command_active else "대기 중"
+            self.motion_watchdog_callback(f"{prefix} · {flow_px_s:.1f}px/s")
 
     def publish_arrival(self, payload):
         data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -213,6 +362,8 @@ class TestPanel:
         self.manual_angular_speed = tk.StringVar(value="0.35")
         self.manual_status = tk.StringVar(value="정지")
         self.lidar_ranges = tk.StringVar(value="LiDAR 수신 대기")
+        self.motion_watchdog_enabled = tk.BooleanVar(value=False)
+        self.motion_watchdog_status = tk.StringVar(value="꺼짐")
         self.last_lidar_log_at = 0.0
         self.manual_keys = set()
         self.manual_engaged = False
@@ -234,8 +385,9 @@ class TestPanel:
         root.protocol("WM_DELETE_WINDOW", self.close)
 
         self.node = TestPanelNode(
-            args.vehicle, self.append_log, self.update_yolo,
+            args.vehicle, args.image_topic, self.append_log, self.update_yolo,
             self.update_fsm_status, self.update_lidar_ranges,
+            self.update_motion_watchdog_status,
         )
         self.action_buttons = []
         self.build_ui()
@@ -273,6 +425,19 @@ class TestPanel:
             font=("DejaVu Sans", 12, "bold"), pady=5,
         )
         stop.pack(fill="x", padx=12, pady=(2, 4))
+
+        watchdog = ttk.Frame(self.root)
+        watchdog.pack(fill="x", padx=12, pady=(0, 4))
+        ttk.Checkbutton(
+            watchdog,
+            text="실험: 카메라 이동불일치 자동 STOP",
+            variable=self.motion_watchdog_enabled,
+            command=self.toggle_motion_watchdog,
+        ).pack(side="left")
+        ttk.Label(
+            watchdog, textvariable=self.motion_watchdog_status,
+            font=("DejaVu Sans Mono", 9),
+        ).pack(side="left", padx=(12, 0))
 
         panes = ttk.Panedwindow(self.root, orient="horizontal")
         panes.pack(fill="both", expand=True, padx=8, pady=(2, 8))
@@ -403,6 +568,34 @@ class TestPanel:
         )
         for column in range(10):
             nav.columnconfigure(column, weight=1)
+
+        slot_grid = ttk.LabelFrame(
+            controls,
+            text="NORMAL 3×3 지정 하차 · 클릭 즉시 Arrival 발행",
+            padding=8,
+        )
+        slot_grid.pack(fill="x", padx=12, pady=6)
+        ttk.Label(
+            slot_grid,
+            text="안쪽 R3",
+            font=("DejaVu Sans", 9, "bold"),
+        ).grid(row=0, column=0, sticky="w", padx=(0, 6))
+        for display_row, slot_row in enumerate((3, 2, 1), start=0):
+            for column in range(1, 4):
+                slot_id = f"R{slot_row}C{column}"
+                self.add_action_button(
+                    slot_grid,
+                    slot_id,
+                    lambda selected=slot_id: self.publish_normal_slot(selected),
+                    row=display_row,
+                    column=column,
+                    padx=3,
+                    pady=3,
+                )
+                slot_grid.columnconfigure(column, weight=1)
+        ttk.Label(slot_grid, text="바깥쪽 R1").grid(
+            row=2, column=0, sticky="w", padx=(0, 6)
+        )
 
         quick = ttk.LabelFrame(controls, text="빠른 Arrival", padding=10)
         quick.pack(fill="x", padx=12, pady=6)
@@ -764,6 +957,18 @@ class TestPanel:
         self.manual_takeover_active = False
         self.node.publish_arrival(self.arrival_payload())
 
+    def publish_normal_slot(self, slot_id):
+        if not self.require_enabled():
+            return
+        self.arrival_status.set("SUCCEEDED")
+        self.location.set("NORMAL")
+        self.operation.set("PLACE")
+        self.product_type.set("NORMAL")
+        self.target_type.set("SLOT")
+        self.slot_id.set(str(slot_id).upper())
+        self.manual_takeover_active = False
+        self.node.publish_arrival(self.arrival_payload())
+
     def publish_fork(self, state):
         if self.require_enabled():
             error = self.error_text.get().strip() if state == "FAILED" else ""
@@ -777,6 +982,12 @@ class TestPanel:
         self.stop_manual_drive()
         self.manual_takeover_active = False
         self.node.publish_stop()
+
+    def toggle_motion_watchdog(self):
+        self.node.set_motion_watchdog_enabled(self.motion_watchdog_enabled.get())
+
+    def update_motion_watchdog_status(self, status):
+        self.motion_watchdog_status.set(str(status))
 
     def publish_load_state(self, state):
         if self.require_enabled():
@@ -884,6 +1095,9 @@ def parse_args():
     parser.add_argument("--vehicle", type=int, choices=(1, 2), default=1)
     parser.add_argument("--ros-domain-id", type=int)
     parser.add_argument("--config", default="/shared/vehicle_pose_config.json")
+    parser.add_argument(
+        "--image-topic", default="/ascamera/camera_publisher/rgb0/image"
+    )
     return parser.parse_args()
 
 
