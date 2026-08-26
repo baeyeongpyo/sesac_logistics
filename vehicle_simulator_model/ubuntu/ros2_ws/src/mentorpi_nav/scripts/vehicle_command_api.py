@@ -2,9 +2,11 @@
 """Serve direct vehicle commands against an already-running global Nav2 stack."""
 
 import argparse
+from datetime import datetime, timezone
 import json
 import math
 import threading
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
@@ -22,13 +24,67 @@ class NavigationCancelError(RuntimeError):
     pass
 
 
+class VehicleStatus:
+    """Keep the configured identity and most recent battery reading thread-safe."""
+
+    def __init__(self, robot_id, battery_stale_sec, clock=None):
+        if not isinstance(robot_id, str) or not robot_id:
+            raise ValueError('robot_id must be a non-empty string')
+        if battery_stale_sec <= 0:
+            raise ValueError('battery_stale_sec must be greater than zero')
+        self._robot_id = robot_id
+        self._battery_stale_sec = battery_stale_sec
+        self._clock = clock or time.time
+        self._lock = threading.Lock()
+        self._battery_raw_value = None
+        self._battery_received_at = None
+
+    def update_battery(self, raw_value):
+        with self._lock:
+            self._battery_raw_value = int(raw_value)
+            self._battery_received_at = self._clock()
+
+    def snapshot(self, operation):
+        now = self._clock()
+        with self._lock:
+            raw_value = self._battery_raw_value
+            received_at = self._battery_received_at
+        stale = received_at is None or (now - received_at) > self._battery_stale_sec
+        return {
+            'robot_id': self._robot_id,
+            'battery': {
+                'raw_value': raw_value,
+                'received_at': self._format_timestamp(received_at),
+                'stale': stale,
+            },
+            'operation': operation,
+        }
+
+    @staticmethod
+    def _format_timestamp(timestamp):
+        if timestamp is None:
+            return None
+        return datetime.fromtimestamp(timestamp, timezone.utc).isoformat(
+            timespec='milliseconds',
+        ).replace('+00:00', 'Z')
+
+
 class VehicleCommandService:
-    def __init__(self, velocity, navigation, max_linear_x, max_angular_z, max_hold_ms):
+    def __init__(
+        self,
+        velocity,
+        navigation,
+        max_linear_x,
+        max_angular_z,
+        max_hold_ms,
+        vehicle_status=None,
+    ):
         self.velocity = velocity
         self.navigation = navigation
         self.max_linear_x = max_linear_x
         self.max_angular_z = max_angular_z
         self.max_hold_ms = max_hold_ms
+        self._vehicle_status = vehicle_status or VehicleStatus('unknown', 3.0)
         self._lock = threading.Lock()
         self._manual_timer = None
         self._manual_generation = 0
@@ -44,6 +100,9 @@ class VehicleCommandService:
     def operation_status(self):
         with self._lock:
             return dict(self._status)
+
+    def vehicle_status(self):
+        return self._vehicle_status.snapshot(self.operation_status())
 
     def command(self, payload):
         self._validate_fields(payload, {'linear_x', 'angular_z', 'hold_ms'})
@@ -261,6 +320,27 @@ def openapi_document(service):
             'detail': {'type': 'string'},
         },
     }
+    vehicle_status_schema = {
+        'type': 'object',
+        'required': ['robot_id', 'battery', 'operation'],
+        'properties': {
+            'robot_id': {'type': 'string'},
+            'battery': {
+                'type': 'object',
+                'required': ['raw_value', 'received_at', 'stale'],
+                'properties': {
+                    'raw_value': {'type': 'integer', 'nullable': True},
+                    'received_at': {
+                        'type': 'string',
+                        'format': 'date-time',
+                        'nullable': True,
+                    },
+                    'stale': {'type': 'boolean'},
+                },
+            },
+            'operation': operation_status_schema,
+        },
+    }
     return {
         'openapi': '3.0.3',
         'info': {
@@ -281,6 +361,16 @@ def openapi_document(service):
                         '200': {
                             'description': 'Current command operation state',
                             'content': {'application/json': {'schema': operation_status_schema}},
+                        },
+                    },
+                },
+            },
+            '/v1/vehicle-status': {
+                'get': {
+                    'responses': {
+                        '200': {
+                            'description': 'Configured vehicle identity, battery and operation state',
+                            'content': {'application/json': {'schema': vehicle_status_schema}},
                         },
                     },
                 },
@@ -378,6 +468,9 @@ def create_http_server(host, port, service):
             if path == '/v1/operation-status':
                 self._write_json(200, service.operation_status())
                 return
+            if path == '/v1/vehicle-status':
+                self._write_json(200, service.vehicle_status())
+                return
             self._write_json(404, {'error': 'not_found'})
 
         def do_POST(self):
@@ -467,6 +560,8 @@ class RosVehicleAdapter:
             from rclpy.action import ActionClient
             from rclpy.context import Context
             from rclpy.executors import SingleThreadedExecutor
+            from rclpy.qos import qos_profile_sensor_data
+            from std_msgs.msg import UInt16
         except ImportError as error:
             raise RuntimeError(
                 'ROS 2 Python packages are unavailable. Source the ROS 2 environment first.',
@@ -478,12 +573,15 @@ class RosVehicleAdapter:
         self._twist_type = Twist
         self._navigate_to_pose_type = NavigateToPose
         self._action_client_type = ActionClient
+        self._uint16_type = UInt16
+        self._battery_qos = qos_profile_sensor_data
         self._action_server_timeout_sec = action_server_timeout_sec
         self._goal_response_timeout_sec = goal_response_timeout_sec
         self._cancel_response_timeout_sec = cancel_response_timeout_sec
         self._lock = threading.Lock()
         self._goal_handles = {}
         self._closed = False
+        self._battery_subscription = None
 
         self._context = Context()
         self._rclpy.init(args=None, context=self._context)
@@ -498,6 +596,16 @@ class RosVehicleAdapter:
         self._executor.add_node(self._node)
         self._executor_thread = threading.Thread(target=self._executor.spin, daemon=True)
         self._executor_thread.start()
+
+    def subscribe_battery(self, battery_topic, on_battery):
+        if self._battery_subscription is not None:
+            raise RuntimeError('battery subscription is already configured')
+        self._battery_subscription = self._node.create_subscription(
+            self._uint16_type,
+            battery_topic,
+            lambda message: on_battery(message.data),
+            self._battery_qos,
+        )
 
     def publish(self, linear_x, angular_z):
         message = self._twist_type()
@@ -605,8 +713,11 @@ def parse_args(argv=None):
     )
     parser.add_argument('--host', default='0.0.0.0')
     parser.add_argument('--port', type=int, default=8082)
+    parser.add_argument('--robot-id', required=True)
     parser.add_argument('--cmd-vel-topic', default='/cmd_vel')
     parser.add_argument('--action-name', default='/navigate_to_pose')
+    parser.add_argument('--battery-topic', default='/ros_robot_controller/battery')
+    parser.add_argument('--battery-stale-sec', type=float, default=3.0)
     parser.add_argument('--max-linear-x', type=float, default=0.10)
     parser.add_argument('--max-angular-z', type=float, default=0.50)
     parser.add_argument('--max-hold-ms', type=int, default=1000)
@@ -627,13 +738,20 @@ def create_ros_vehicle_adapter(arguments):
 
 
 def run_server(arguments, adapter_factory=None, http_server_factory=create_http_server):
+    vehicle_status = VehicleStatus(
+        robot_id=arguments.robot_id,
+        battery_stale_sec=arguments.battery_stale_sec,
+    )
     adapter = create_ros_vehicle_adapter(arguments) if adapter_factory is None else adapter_factory(arguments)
+    if hasattr(adapter, 'subscribe_battery'):
+        adapter.subscribe_battery(arguments.battery_topic, vehicle_status.update_battery)
     service = VehicleCommandService(
         velocity=adapter,
         navigation=adapter,
         max_linear_x=arguments.max_linear_x,
         max_angular_z=arguments.max_angular_z,
         max_hold_ms=arguments.max_hold_ms,
+        vehicle_status=vehicle_status,
     )
     http_server = http_server_factory(arguments.host, arguments.port, service)
     try:

@@ -29,6 +29,7 @@ source /opt/ros/humble/setup.zsh
 python3 src/mentorpi_nav/scripts/vehicle_command_api.py \
   --host 0.0.0.0 \
   --port 8082 \
+  --robot-id robot_2 \
   --cmd-vel-topic /cmd_vel \
   --action-name /navigate_to_pose
 ```
@@ -41,6 +42,9 @@ python3 src/mentorpi_nav/scripts/vehicle_command_api.py \
 
 | 인자 | 기본값 | 의미 |
 |---|---:|---|
+| `--robot-id` | 없음(필수) | 이 API 인스턴스가 제어하는 차량 식별자 |
+| `--battery-topic` | `/ros_robot_controller/battery` | `std_msgs/msg/UInt16` 배터리 원시값 토픽 |
+| `--battery-stale-sec` | `3.0` | 이 시간보다 오래된 배터리값을 stale로 표시 (초) |
 | `--max-linear-x` | `0.10` | 수동 전진/후진 최대 속도 (m/s) |
 | `--max-angular-z` | `0.50` | 수동 회전 최대 속도 (rad/s) |
 | `--max-hold-ms` | `1000` | 수동 속도 유지 최대 시간 (ms) |
@@ -54,7 +58,10 @@ python3 src/mentorpi_nav/scripts/vehicle_command_api.py \
 cd ~/ros2_ws
 colcon build --packages-select mentorpi_nav --symlink-install
 source install/setup.zsh
-ros2 run mentorpi_nav vehicle_command_api.py --host 0.0.0.0 --port 8082
+ros2 run mentorpi_nav vehicle_command_api.py \
+  --host 0.0.0.0 \
+  --port 8082 \
+  --robot-id robot_2
 ```
 
 ## API 확인과 테스트
@@ -111,6 +118,33 @@ curl -sS http://192.168.100.20:8082/v1/operation-status | python3 -m json.tool
 | `COMPLETED` | Nav2 goal 성공 |
 | `FAILED` | goal 거절, Nav2 미가용, abort 또는 action 오류 |
 | `STOPPED` | `/v1/stop`이 즉시 0속도를 발행함 |
+
+### 차량 상태 조회
+
+```bash
+curl -sS http://192.168.100.20:8082/v1/vehicle-status | python3 -m json.tool
+```
+
+`robot_id`는 실행 시 `--robot-id`로 지정한 값을 그대로 반환한다. `battery`는
+`/ros_robot_controller/battery`에서 받은 `UInt16` 원시값이며, 메시지 단위가
+확인되기 전까지 전압이나 퍼센트로 변환하지 않는다. 아직 받지 못했거나
+`--battery-stale-sec`보다 오래된 값은 `stale: true`로 표시한다.
+
+```json
+{
+  "robot_id": "robot_2",
+  "battery": {
+    "raw_value": 8354,
+    "received_at": "2026-08-26T06:52:31.420Z",
+    "stale": false
+  },
+  "operation": {
+    "operation_id": null,
+    "state": "IDLE",
+    "detail": "READY"
+  }
+}
+```
 
 ### 지정 취소와 즉시 정지
 

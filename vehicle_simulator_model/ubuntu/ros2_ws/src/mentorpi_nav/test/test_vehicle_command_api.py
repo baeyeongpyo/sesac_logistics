@@ -102,6 +102,12 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             hasattr(self.module, 'VehicleCommandService'),
             'the standalone vehicle command service must exist',
         )
+        self.now = [1700000000.125]
+        self.vehicle_status = self.module.VehicleStatus(
+            robot_id='robot_2',
+            battery_stale_sec=3.0,
+            clock=lambda: self.now[0],
+        )
         self.velocity = RecordingVelocity()
         self.navigation = FakeNavigation()
         self.service = self.module.VehicleCommandService(
@@ -110,6 +116,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             max_linear_x=0.10,
             max_angular_z=0.50,
             max_hold_ms=1000,
+            vehicle_status=self.vehicle_status,
         )
         self.server = self.module.create_http_server('127.0.0.1', 0, self.service)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -151,6 +158,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
                 '/healthz',
                 '/openapi.json',
                 '/v1/operation-status',
+                '/v1/vehicle-status',
                 '/v1/cmd-vel',
                 '/v1/navigation/goals',
                 '/v1/navigation/cancel',
@@ -162,6 +170,46 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             'operation_id': None,
             'state': 'IDLE',
             'detail': 'READY',
+        })
+
+    def test_vehicle_status_reports_configured_robot_battery_and_operation(self):
+        """Dropping configured identity or battery freshness must fail fleet monitoring."""
+        self.vehicle_status.update_battery(8354)
+        _, goal = self.navigation_goal()
+
+        status, vehicle_status = self.get_json('/v1/vehicle-status')
+
+        self.assertEqual(status, 200)
+        self.assertEqual(vehicle_status, {
+            'robot_id': 'robot_2',
+            'battery': {
+                'raw_value': 8354,
+                'received_at': '2023-11-14T22:13:20.125Z',
+                'stale': False,
+            },
+            'operation': {
+                'operation_id': goal['operation_id'],
+                'state': 'NAVIGATING',
+                'detail': 'NAVIGATION_GOAL_ACCEPTED',
+            },
+        })
+
+    def test_vehicle_status_marks_missing_or_expired_battery_stale(self):
+        """Treating missing telemetry as fresh must fail operational monitoring."""
+        _, missing_battery = self.get_json('/v1/vehicle-status')
+        self.vehicle_status.update_battery(8354)
+        self.now[0] += 3.001
+        _, expired_battery = self.get_json('/v1/vehicle-status')
+
+        self.assertEqual(missing_battery['battery'], {
+            'raw_value': None,
+            'received_at': None,
+            'stale': True,
+        })
+        self.assertEqual(expired_battery['battery'], {
+            'raw_value': 8354,
+            'received_at': '2023-11-14T22:13:20.125Z',
+            'stale': True,
         })
 
     def test_navigation_goal_returns_vehicle_generated_operation_id_and_tracks_goal(self):
@@ -371,7 +419,8 @@ class VehicleCommandApiCliTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         for option in (
-            '--host', '--port', '--cmd-vel-topic', '--action-name',
+            '--host', '--port', '--robot-id', '--cmd-vel-topic', '--action-name',
+            '--battery-topic', '--battery-stale-sec',
             '--max-linear-x', '--max-angular-z', '--max-hold-ms',
             '--action-server-timeout-sec', '--goal-response-timeout-sec',
             '--cancel-response-timeout-sec',
@@ -389,8 +438,11 @@ class VehicleCommandApiCliTest(unittest.TestCase):
         arguments = SimpleNamespace(
             host='0.0.0.0',
             port=8082,
+            robot_id='robot_2',
             cmd_vel_topic='/cmd_vel',
             action_name='/navigate_to_pose',
+            battery_topic='/ros_robot_controller/battery',
+            battery_stale_sec=3.0,
             max_linear_x=0.10,
             max_angular_z=0.50,
             max_hold_ms=1000,
@@ -417,8 +469,11 @@ class VehicleCommandApiCliTest(unittest.TestCase):
         arguments = SimpleNamespace(
             host='0.0.0.0',
             port=8082,
+            robot_id='robot_2',
             cmd_vel_topic='/cmd_vel',
             action_name='/navigate_to_pose',
+            battery_topic='/ros_robot_controller/battery',
+            battery_stale_sec=3.0,
             max_linear_x=0.10,
             max_angular_z=0.50,
             max_hold_ms=1000,
