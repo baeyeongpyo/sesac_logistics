@@ -2,7 +2,13 @@ import os
 import time
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, OpaqueFunction
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    LogInfo,
+    OpaqueFunction,
+    TimerAction,
+)
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -70,22 +76,28 @@ def generate_launch_description():
                 "vehicle": LaunchConfiguration("vehicle"),
             }],
         ),
-        Node(
-            package="auto_dock",
-            executable="auto_dock_node",
-            name="auto_dock",
-            output="screen",
-            parameters=[{
-                "vehicle": LaunchConfiguration("vehicle"),
-                "pose_config": LaunchConfiguration("pose_config"),
-                # ROS launch otherwise YAML-parses `{}` into a dict before it
-                # reaches rclpy; the controller intentionally parses JSON.
-                "config_overrides": ParameterValue(
-                    LaunchConfiguration("config_overrides"), value_type=str
-                ),
-                # Keep the short speed override for quick field tests; it is
-                # merged by launch into the same JSON override mechanism.
-                "search_linear_speed_m_s": LaunchConfiguration("search_linear_speed_m_s"),
-            }],
+        # YOLO and Auto Dock both import OpenCV/NumPy.  Starting them at the
+        # same instant can exhaust the vehicle while both native modules are
+        # loading, so let the detector finish its startup burst first.
+        TimerAction(
+            period=4.0,
+            actions=[Node(
+                package="auto_dock",
+                executable="auto_dock_node",
+                name="auto_dock",
+                output="screen",
+                parameters=[{
+                    "vehicle": LaunchConfiguration("vehicle"),
+                    "pose_config": LaunchConfiguration("pose_config"),
+                    # ROS launch otherwise YAML-parses `{}` into a dict before it
+                    # reaches rclpy; the controller intentionally parses JSON.
+                    "config_overrides": ParameterValue(
+                        LaunchConfiguration("config_overrides"), value_type=str
+                    ),
+                    # Keep the short speed override for quick field tests; it is
+                    # merged by launch into the same JSON override mechanism.
+                    "search_linear_speed_m_s": LaunchConfiguration("search_linear_speed_m_s"),
+                }],
+            )],
         ),
     ])
