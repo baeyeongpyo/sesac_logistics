@@ -87,8 +87,6 @@ class TestPanelNode(Node):
         self.motion_watchdog_enabled = False
         self.motion_watchdog_triggered = False
         self.auto_dock_state = "IDLE"
-        self.auto_dock_cmd_gid = None
-        self.auto_dock_gid_checked_at = 0.0
         self.last_auto_command_at = 0.0
         self.auto_command_started_at = None
         self.low_flow_started_at = None
@@ -199,32 +197,18 @@ class TestPanelNode(Node):
         if clear_frame:
             self.previous_flow_gray = None
 
-    def refresh_auto_dock_cmd_gid(self, now):
-        if self.auto_dock_cmd_gid is not None and now - self.auto_dock_gid_checked_at < 2.0:
-            return
-        self.auto_dock_gid_checked_at = now
-        self.auto_dock_cmd_gid = None
-        for endpoint in self.get_publishers_info_by_topic("/controller/cmd_vel"):
-            if endpoint.node_name == "auto_dock":
-                self.auto_dock_cmd_gid = bytes(endpoint.endpoint_gid)
-                break
-
-    def received_cmd_vel(self, message, message_info):
+    def received_cmd_vel(self, message):
         if not self.motion_watchdog_enabled or self.motion_watchdog_triggered:
             return
         now = time.monotonic()
-        self.refresh_auto_dock_cmd_gid(now)
-        if (
-            self.auto_dock_cmd_gid is None
-            or bytes(message_info.publisher_gid) != self.auto_dock_cmd_gid
-        ):
-            return
         moving = (
             math.hypot(float(message.linear.x), float(message.linear.y)) >= 0.025
             or abs(float(message.angular.z)) >= 0.06
         )
         if not moving:
-            self.reset_motion_watchdog_tracking()
+            # Several nodes publish zero Twist on this shared topic.  Do not
+            # let an unrelated zero erase a recent autonomous drive command;
+            # the freshness timeout below disarms it naturally.
             return
         self.last_auto_command_at = now
         if self.auto_command_started_at is None:
