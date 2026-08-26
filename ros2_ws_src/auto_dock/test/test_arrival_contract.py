@@ -439,6 +439,59 @@ def test_first_matching_frame_schedules_stop_after_point_two_seconds(monkeypatch
     assert commands == [(0.0, 0.08, 0.0)]
 
 
+def tape_search_fake(angle_deg):
+    fake = type("FakeDock", (), {})()
+    fake.candidate_stop_due_at = None
+    fake.candidate_retry_not_before = 0.0
+    fake.selected_candidate = lambda: (None, None)
+    fake.latest_tape_guidance = {
+        "center_y_ratio": 0.80,
+        "angle_deg": angle_deg,
+    }
+    fake.latest_tape_guidance_at = 10.0
+    fake.tape_reference = None
+    fake.tape_recovery_start_position = None
+    fake.tape_recovery_direction = None
+    fake.tape_recovery_done = False
+    fake.config = {
+        "search_lateral_direction": "left",
+        "tape_guidance_enabled": True,
+    }
+    fake.number = lambda key, default, *_args: {
+        "search_linear_speed_m_s": 0.08,
+        "search_lateral_speed_m_s": 0.08,
+    }.get(key, default)
+    fake.commands = []
+    fake.statuses = []
+    fake.publish_drive = lambda x, y, yaw: fake.commands.append((x, y, yaw))
+    fake.publish_status = lambda state, reason, **extra: fake.statuses.append(
+        (state, reason, extra)
+    )
+    return fake
+
+
+def test_tape_search_aligns_vehicle_perpendicular_before_lateral_motion(monkeypatch):
+    fake = tape_search_fake(angle_deg=10.0)
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_search(fake)
+
+    assert fake.commands[0][0:2] == (0.0, 0.0)
+    assert fake.commands[0][2] < 0.0
+    assert fake.statuses[-1][1] == "warning_tape_perpendicular_aligning"
+
+
+def test_tape_search_moves_laterally_when_vehicle_is_perpendicular(monkeypatch):
+    fake = tape_search_fake(angle_deg=1.0)
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_search(fake)
+
+    assert fake.commands[0][0] == pytest.approx(0.0)
+    assert fake.commands[0][1] == pytest.approx(0.08)
+    assert fake.statuses[-1][1] == "warning_tape_guided_search"
+
+
 def missing_tape_recovery_fake(front_margin, rear_margin):
     fake = type("FakeDock", (), {})()
     fake.tape_recovery_done = False

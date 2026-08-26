@@ -1520,12 +1520,19 @@ class AutoDockNode(Node):
             if self.tape_reference is None:
                 self.tape_reference = {
                     "center_y_ratio": tape["center_y_ratio"],
-                    "angle_deg": tape["angle_deg"],
                 }
             vertical_error = (
                 tape["center_y_ratio"] - self.tape_reference["center_y_ratio"]
             )
-            angle_error_deg = tape["angle_deg"] - self.tape_reference["angle_deg"]
+            # A horizontal tape in the camera image means the vehicle's
+            # forward axis is perpendicular to the tape.  Align to that
+            # absolute direction before beginning the parallel lateral sweep;
+            # preserving the first observed angle would preserve a bad
+            # arrival heading as well.
+            target_angle_deg = self.number(
+                "tape_perpendicular_target_angle_deg", 0.0, -20.0, 20.0
+            )
+            angle_error_deg = tape["angle_deg"] - target_angle_deg
             forward_correction = clamp(
                 -self.number("tape_forward_gain", 0.10, 0.0, 1.0)
                 * vertical_error,
@@ -1538,6 +1545,17 @@ class AutoDockNode(Node):
                 -self.number("tape_max_yaw_speed_rad_s", 0.20, 0.0, 0.50),
                 self.number("tape_max_yaw_speed_rad_s", 0.20, 0.0, 0.50),
             )
+            perpendicular_tolerance_deg = self.number(
+                "tape_perpendicular_tolerance_deg", 3.0, 0.5, 15.0
+            )
+            if abs(angle_error_deg) > perpendicular_tolerance_deg:
+                self.publish_status(
+                    "running", "warning_tape_perpendicular_aligning",
+                    tape_angle_deg=round(tape["angle_deg"], 2),
+                    target_angle_deg=round(target_angle_deg, 2),
+                )
+                self.publish_drive(0.0, 0.0, angular_correction)
+                return
             self.publish_status("running", "warning_tape_guided_search")
             self.publish_drive(
                 forward_correction,
