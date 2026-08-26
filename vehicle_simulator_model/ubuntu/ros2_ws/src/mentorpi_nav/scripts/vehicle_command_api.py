@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Serve direct vehicle commands against an already-running global Nav2 stack."""
 
+import argparse
 import json
 import math
 import threading
@@ -442,3 +443,199 @@ def create_http_server(host, port, service):
             return
 
     return ThreadingHTTPServer((host, port), RequestHandler)
+
+
+class RosVehicleAdapter:
+    """ROS adapter that joins the vehicle's existing global Nav2 graph."""
+
+    def __init__(
+        self,
+        cmd_vel_topic,
+        action_name,
+        action_server_timeout_sec,
+        goal_response_timeout_sec,
+        cancel_response_timeout_sec,
+    ):
+        try:
+            import rclpy
+            from action_msgs.msg import GoalStatus
+            from geometry_msgs.msg import PoseStamped, Twist
+            from nav2_msgs.action import NavigateToPose
+            from rclpy.action import ActionClient
+            from rclpy.context import Context
+            from rclpy.executors import SingleThreadedExecutor
+        except ImportError as error:
+            raise RuntimeError(
+                'ROS 2 Python packages are unavailable. Source the ROS 2 environment first.',
+            ) from error
+
+        self._rclpy = rclpy
+        self._goal_status = GoalStatus
+        self._pose_stamped_type = PoseStamped
+        self._twist_type = Twist
+        self._navigate_to_pose_type = NavigateToPose
+        self._action_client_type = ActionClient
+        self._action_server_timeout_sec = action_server_timeout_sec
+        self._goal_response_timeout_sec = goal_response_timeout_sec
+        self._cancel_response_timeout_sec = cancel_response_timeout_sec
+        self._lock = threading.Lock()
+        self._goal_handles = {}
+        self._closed = False
+
+        self._context = Context()
+        self._rclpy.init(args=None, context=self._context)
+        self._node = self._rclpy.create_node('vehicle_command_api', context=self._context)
+        self._publisher = self._node.create_publisher(self._twist_type, cmd_vel_topic, 10)
+        self._goal_client = self._action_client_type(
+            self._node,
+            self._navigate_to_pose_type,
+            action_name,
+        )
+        self._executor = SingleThreadedExecutor(context=self._context)
+        self._executor.add_node(self._node)
+        self._executor_thread = threading.Thread(target=self._executor.spin, daemon=True)
+        self._executor_thread.start()
+
+    def publish(self, linear_x, angular_z):
+        message = self._twist_type()
+        message.linear.x = linear_x
+        message.angular.z = angular_z
+        self._publisher.publish(message)
+
+    def submit_goal(self, operation_id, goal, on_terminal):
+        if not self._goal_client.wait_for_server(timeout_sec=self._action_server_timeout_sec):
+            return {'accepted': False, 'error': 'NAVIGATION_SERVER_UNAVAILABLE'}
+
+        request = self._navigate_to_pose_type.Goal()
+        request.pose = self._pose_from_goal(goal)
+        try:
+            goal_handle = self._wait_for_future(
+                self._goal_client.send_goal_async(request),
+                self._goal_response_timeout_sec,
+                'NAVIGATION_GOAL_RESPONSE_TIMEOUT',
+            )
+        except NavigationUnavailableError as error:
+            return {'accepted': False, 'error': str(error)}
+        if not goal_handle.accepted:
+            return {'accepted': False, 'error': 'NAVIGATION_GOAL_REJECTED'}
+
+        with self._lock:
+            self._goal_handles[operation_id] = goal_handle
+        goal_handle.get_result_async().add_done_callback(
+            lambda future: self._on_navigation_result(operation_id, goal_handle, on_terminal, future),
+        )
+        return {'accepted': True}
+
+    def cancel(self, operation_id):
+        with self._lock:
+            goal_handle = self._goal_handles.get(operation_id)
+        if goal_handle is None:
+            return {'accepted': False, 'error': 'NAVIGATION_OPERATION_NOT_ACTIVE'}
+        try:
+            response = self._wait_for_future(
+                goal_handle.cancel_goal_async(),
+                self._cancel_response_timeout_sec,
+                'NAVIGATION_CANCEL_RESPONSE_TIMEOUT',
+            )
+        except NavigationUnavailableError as error:
+            return {'accepted': False, 'error': str(error)}
+        return {
+            'accepted': bool(getattr(response, 'goals_canceling', [])),
+            'error': 'NAVIGATION_CANCEL_REJECTED',
+        }
+
+    def close(self):
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        try:
+            self.publish(0.0, 0.0)
+        except Exception:
+            pass
+        self._executor.shutdown()
+        self._executor_thread.join(timeout=2)
+        self._node.destroy_node()
+        if self._context.ok():
+            self._rclpy.shutdown(context=self._context)
+
+    def _pose_from_goal(self, goal):
+        pose = self._pose_stamped_type()
+        pose.header.frame_id = goal['frame_id']
+        pose.header.stamp = self._node.get_clock().now().to_msg()
+        pose.pose.position.x = goal['x']
+        pose.pose.position.y = goal['y']
+        pose.pose.orientation.z = math.sin(goal['yaw'] / 2)
+        pose.pose.orientation.w = math.cos(goal['yaw'] / 2)
+        return pose
+
+    def _wait_for_future(self, future, timeout_sec, timeout_error):
+        completed = threading.Event()
+        future.add_done_callback(lambda _: completed.set())
+        if not completed.wait(timeout=timeout_sec):
+            raise NavigationUnavailableError(timeout_error)
+        try:
+            return future.result()
+        except Exception as error:
+            raise NavigationUnavailableError(timeout_error) from error
+
+    def _on_navigation_result(self, operation_id, goal_handle, on_terminal, future):
+        try:
+            result = future.result()
+            mapping = {
+                self._goal_status.STATUS_SUCCEEDED: 'COMPLETED',
+                self._goal_status.STATUS_CANCELED: 'CANCELLED',
+            }
+            terminal_state = mapping.get(result.status, 'FAILED')
+        except Exception:
+            terminal_state = 'FAILED'
+        with self._lock:
+            if self._goal_handles.get(operation_id) is not goal_handle:
+                return
+            self._goal_handles.pop(operation_id, None)
+        on_terminal(operation_id, terminal_state)
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description='Run a standalone HTTP gateway for the vehicle global Nav2 action.',
+    )
+    parser.add_argument('--host', default='0.0.0.0')
+    parser.add_argument('--port', type=int, default=8082)
+    parser.add_argument('--cmd-vel-topic', default='/cmd_vel')
+    parser.add_argument('--action-name', default='/navigate_to_pose')
+    parser.add_argument('--max-linear-x', type=float, default=0.10)
+    parser.add_argument('--max-angular-z', type=float, default=0.50)
+    parser.add_argument('--max-hold-ms', type=int, default=1000)
+    parser.add_argument('--action-server-timeout-sec', type=float, default=1.0)
+    parser.add_argument('--goal-response-timeout-sec', type=float, default=3.0)
+    parser.add_argument('--cancel-response-timeout-sec', type=float, default=3.0)
+    return parser.parse_args(argv)
+
+
+def run_server(arguments, adapter_factory=RosVehicleAdapter, http_server_factory=create_http_server):
+    adapter = adapter_factory(arguments)
+    service = VehicleCommandService(
+        velocity=adapter,
+        navigation=adapter,
+        max_linear_x=arguments.max_linear_x,
+        max_angular_z=arguments.max_angular_z,
+        max_hold_ms=arguments.max_hold_ms,
+    )
+    http_server = http_server_factory(arguments.host, arguments.port, service)
+    try:
+        http_server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        service.close()
+        http_server.server_close()
+        adapter.close()
+
+
+def main(argv=None):
+    run_server(parse_args(argv))
+
+
+if __name__ == '__main__':
+    main()

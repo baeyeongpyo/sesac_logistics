@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
 import threading
 import time
@@ -70,6 +71,28 @@ class FakeNavigation:
 
     def complete(self, operation_id, state):
         self._callbacks[operation_id](operation_id, state)
+
+
+class ClosingFakeAdapter(FakeNavigation, RecordingVelocity):
+    def __init__(self):
+        FakeNavigation.__init__(self)
+        RecordingVelocity.__init__(self)
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class ReturningHttpServer:
+    def __init__(self):
+        self.served = False
+        self.closed = False
+
+    def serve_forever(self):
+        self.served = True
+
+    def server_close(self):
+        self.closed = True
 
 
 class VehicleCommandApiServerTest(unittest.TestCase):
@@ -303,6 +326,61 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             'state': 'MANUAL',
             'detail': 'MANUAL_COMMAND_SENT',
         })
+
+
+class VehicleCommandApiCliTest(unittest.TestCase):
+    def setUp(self):
+        self.module = load_server_module()
+
+    def test_cli_exposes_direct_runner_and_action_timeout_configuration(self):
+        """Removing a runtime flag must fail the vehicle deployment contract."""
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), '--help'],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for option in (
+            '--host', '--port', '--cmd-vel-topic', '--action-name',
+            '--max-linear-x', '--max-angular-z', '--max-hold-ms',
+            '--action-server-timeout-sec', '--goal-response-timeout-sec',
+            '--cancel-response-timeout-sec',
+        ):
+            self.assertIn(option, result.stdout)
+
+    def test_direct_runner_zeroes_velocity_and_closes_its_adapter(self):
+        """Removing shutdown zeroing or adapter cleanup must fail the process lifecycle contract."""
+        self.assertTrue(
+            hasattr(self.module, 'run_server'),
+            'the standalone direct Python runner must exist',
+        )
+        adapter = ClosingFakeAdapter()
+        http_server = ReturningHttpServer()
+        arguments = SimpleNamespace(
+            host='0.0.0.0',
+            port=8082,
+            cmd_vel_topic='/cmd_vel',
+            action_name='/navigate_to_pose',
+            max_linear_x=0.10,
+            max_angular_z=0.50,
+            max_hold_ms=1000,
+            action_server_timeout_sec=1.0,
+            goal_response_timeout_sec=3.0,
+            cancel_response_timeout_sec=3.0,
+        )
+
+        self.module.run_server(
+            arguments,
+            adapter_factory=lambda args: adapter,
+            http_server_factory=lambda host, port, service: http_server,
+        )
+
+        self.assertTrue(http_server.served)
+        self.assertTrue(http_server.closed)
+        self.assertEqual(adapter.messages, [(0.0, 0.0)])
+        self.assertTrue(adapter.closed)
 
 
 if __name__ == '__main__':
