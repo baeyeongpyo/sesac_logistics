@@ -164,6 +164,20 @@ class InventoryApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertIn("detail", response.json())
 
+    def test_openapi_documents_every_operation_and_its_parameters(self) -> None:
+        schema = create_app(":memory:").openapi()
+
+        for path, path_item in schema["paths"].items():
+            for method, operation in path_item.items():
+                if method not in {"get", "post", "put"}:
+                    continue
+                with self.subTest(path=path, method=method):
+                    self.assertTrue(operation["summary"].strip())
+                    self.assertIn("**처리:**", operation["description"])
+                    self.assertIn("**결과:**", operation["description"])
+                    for parameter in operation.get("parameters", []):
+                        self.assertTrue(parameter["description"].strip())
+
 
 if __name__ == "__main__":
     unittest.main()
