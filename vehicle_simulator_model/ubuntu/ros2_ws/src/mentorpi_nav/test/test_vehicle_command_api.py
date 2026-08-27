@@ -73,6 +73,14 @@ class FakeNavigation:
         self._callbacks[operation_id](operation_id, state)
 
 
+class RecordingInitialPose:
+    def __init__(self):
+        self.messages = []
+
+    def publish_initial_pose(self, pose, position_variance, yaw_variance):
+        self.messages.append((pose, position_variance, yaw_variance))
+
+
 class ClosingFakeAdapter(FakeNavigation, RecordingVelocity):
     def __init__(self):
         FakeNavigation.__init__(self)
@@ -110,9 +118,11 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         )
         self.velocity = RecordingVelocity()
         self.navigation = FakeNavigation()
+        self.initial_pose_publisher = RecordingInitialPose()
         self.service = self.module.VehicleCommandService(
             velocity=self.velocity,
             navigation=self.navigation,
+            initial_pose=self.initial_pose_publisher,
             max_linear_x=0.10,
             max_angular_z=0.50,
             max_hold_ms=1000,
@@ -142,6 +152,12 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             {'frame_id': 'map', 'x': 1.50, 'y': 0.0, 'yaw': 0.0},
         )
 
+    def initial_pose(self):
+        return post_json(
+            f'{self.base_url}/v1/localization/initial-pose',
+            {'x': 1.50, 'y': 0.0, 'yaw': 0.0},
+        )
+
     def test_health_openapi_and_operation_status_are_discoverable(self):
         """Removing a public endpoint must fail the vehicle integration contract."""
         health_status, health = self.get_json('/healthz')
@@ -162,6 +178,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
                 '/v1/cmd-vel',
                 '/v1/navigation/goals',
                 '/v1/navigation/cancel',
+                '/v1/localization/initial-pose',
                 '/v1/stop',
             },
         )
@@ -171,6 +188,49 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             'state': 'IDLE',
             'detail': 'READY',
         })
+
+    def test_initial_pose_publishes_map_pose_with_configured_covariance(self):
+        """Removing initial pose publishing must fail AMCL initialization."""
+        status, response = self.initial_pose()
+
+        self.assertEqual(status, 202)
+        self.assertIsInstance(uuid.UUID(response['operation_id']), uuid.UUID)
+        self.assertEqual(response, {
+            'operation_id': response['operation_id'],
+            'state': 'INITIAL_POSE_PUBLISHED',
+            'frame_id': 'map',
+            'x': 1.5,
+            'y': 0.0,
+            'yaw': 0.0,
+        })
+        self.assertEqual(self.initial_pose_publisher.messages, [(
+            {'frame_id': 'map', 'x': 1.5, 'y': 0.0, 'yaw': 0.0},
+            0.25,
+            0.0685,
+        )])
+
+    def test_initial_pose_rejects_while_navigation_is_active(self):
+        """Repositioning AMCL during Nav2 motion must not publish a new pose."""
+        self.navigation_goal()
+
+        status, response = self.initial_pose()
+
+        self.assertEqual(status, 409)
+        self.assertEqual(response, {'error': 'VEHICLE_MOTION_ACTIVE'})
+        self.assertEqual(self.initial_pose_publisher.messages, [])
+
+    def test_initial_pose_rejects_while_manual_velocity_is_active(self):
+        """Repositioning AMCL during manual motion must not publish a new pose."""
+        post_json(
+            f'{self.base_url}/v1/cmd-vel',
+            {'linear_x': 0.05, 'angular_z': 0.0, 'hold_ms': 1000},
+        )
+
+        status, response = self.initial_pose()
+
+        self.assertEqual(status, 409)
+        self.assertEqual(response, {'error': 'VEHICLE_MOTION_ACTIVE'})
+        self.assertEqual(self.initial_pose_publisher.messages, [])
 
     def test_vehicle_status_reports_configured_robot_battery_and_operation(self):
         """Dropping configured identity or battery freshness must fail fleet monitoring."""
@@ -421,6 +481,8 @@ class VehicleCommandApiCliTest(unittest.TestCase):
         for option in (
             '--host', '--port', '--robot-id', '--cmd-vel-topic', '--action-name',
             '--battery-topic', '--battery-stale-sec',
+            '--initial-pose-topic', '--initial-pose-position-variance',
+            '--initial-pose-yaw-variance',
             '--max-linear-x', '--max-angular-z', '--max-hold-ms',
             '--action-server-timeout-sec', '--goal-response-timeout-sec',
             '--cancel-response-timeout-sec',
@@ -443,6 +505,9 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             action_name='/navigate_to_pose',
             battery_topic='/ros_robot_controller/battery',
             battery_stale_sec=3.0,
+            initial_pose_topic='/initialpose',
+            initial_pose_position_variance=0.25,
+            initial_pose_yaw_variance=0.0685,
             max_linear_x=0.10,
             max_angular_z=0.50,
             max_hold_ms=1000,
@@ -474,6 +539,9 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             action_name='/navigate_to_pose',
             battery_topic='/ros_robot_controller/battery',
             battery_stale_sec=3.0,
+            initial_pose_topic='/initialpose',
+            initial_pose_position_variance=0.25,
+            initial_pose_yaw_variance=0.0685,
             max_linear_x=0.10,
             max_angular_z=0.50,
             max_hold_ms=1000,

@@ -45,6 +45,9 @@ python3 src/mentorpi_nav/scripts/vehicle_command_api.py \
 | `--robot-id` | 없음(필수) | 이 API 인스턴스가 제어하는 차량 식별자 |
 | `--battery-topic` | `/ros_robot_controller/battery` | `std_msgs/msg/UInt16` 배터리 원시값 토픽 |
 | `--battery-stale-sec` | `3.0` | 이 시간보다 오래된 배터리값을 stale로 표시 (초) |
+| `--initial-pose-topic` | `/initialpose` | AMCL 초기 위치 발행 토픽 |
+| `--initial-pose-position-variance` | `0.25` | initial pose X/Y covariance 대각값 (m²) |
+| `--initial-pose-yaw-variance` | `0.0685` | initial pose yaw covariance 대각값 (rad²) |
 | `--max-linear-x` | `0.10` | 수동 전진/후진 최대 속도 (m/s) |
 | `--max-angular-z` | `0.50` | 수동 회전 최대 속도 (rad/s) |
 | `--max-hold-ms` | `1000` | 수동 속도 유지 최대 시간 (ms) |
@@ -143,6 +146,40 @@ curl -sS http://192.168.100.20:8082/v1/vehicle-status | python3 -m json.tool
     "state": "IDLE",
     "detail": "READY"
   }
+}
+```
+
+### AMCL 초기 위치 설정
+
+```bash
+curl -i -X POST http://192.168.100.20:8082/v1/localization/initial-pose \
+  -H 'Content-Type: application/json' \
+  --data '{"x": 1.50, "y": 0.0, "yaw": 0.0}'
+```
+
+성공하면 전역 `/initialpose`에 `geometry_msgs/msg/PoseWithCovarianceStamped`를
+한 번 발행한다. `frame_id`는 생략 시 `map`이며, 다른 frame은 거부한다.
+응답의 `INITIAL_POSE_PUBLISHED`는 AMCL이 메시지를 받도록 발행했다는 뜻이며,
+위치 추정이 수렴했다는 보장은 아니다.
+
+```json
+{
+  "operation_id": "a5fbf2ae-30d3-482b-bc64-fde849155349",
+  "state": "INITIAL_POSE_PUBLISHED",
+  "frame_id": "map",
+  "x": 1.5,
+  "y": 0.0,
+  "yaw": 0.0
+}
+```
+
+`NAVIGATING`, `CANCELLING`, 또는 `MANUAL` 상태에서는 위치 재설정이 위험하므로
+발행하지 않고 `409`을 반환한다. 호출자는 먼저 `/v1/stop`을 직접 호출하고,
+Nav2의 취소 처리가 끝난 뒤 initial pose 요청을 다시 수행해야 한다.
+
+```json
+{
+  "error": "VEHICLE_MOTION_ACTIVE"
 }
 ```
 

@@ -24,6 +24,10 @@ class NavigationCancelError(RuntimeError):
     pass
 
 
+class InitialPoseMotionError(RuntimeError):
+    pass
+
+
 class VehicleStatus:
     """Keep the configured identity and most recent battery reading thread-safe."""
 
@@ -77,6 +81,9 @@ class VehicleCommandService:
         max_linear_x,
         max_angular_z,
         max_hold_ms,
+        initial_pose=None,
+        initial_pose_position_variance=0.25,
+        initial_pose_yaw_variance=0.0685,
         vehicle_status=None,
     ):
         self.velocity = velocity
@@ -84,6 +91,11 @@ class VehicleCommandService:
         self.max_linear_x = max_linear_x
         self.max_angular_z = max_angular_z
         self.max_hold_ms = max_hold_ms
+        if initial_pose_position_variance <= 0 or initial_pose_yaw_variance <= 0:
+            raise ValueError('initial pose covariance variances must be greater than zero')
+        self._initial_pose_publisher = initial_pose
+        self._initial_pose_position_variance = initial_pose_position_variance
+        self._initial_pose_yaw_variance = initial_pose_yaw_variance
         self._vehicle_status = vehicle_status or VehicleStatus('unknown', 3.0)
         self._lock = threading.Lock()
         self._manual_timer = None
@@ -103,6 +115,24 @@ class VehicleCommandService:
 
     def vehicle_status(self):
         return self._vehicle_status.snapshot(self.operation_status())
+
+    def initial_pose(self, payload):
+        pose = self._goal(payload)
+        with self._lock:
+            if self._active_navigation_operation is not None or self._status['state'] == 'MANUAL':
+                raise InitialPoseMotionError('VEHICLE_MOTION_ACTIVE')
+            if self._initial_pose_publisher is None:
+                raise NavigationUnavailableError('INITIAL_POSE_PUBLISHER_UNAVAILABLE')
+            self._initial_pose_publisher.publish_initial_pose(
+                pose,
+                self._initial_pose_position_variance,
+                self._initial_pose_yaw_variance,
+            )
+        return {
+            'operation_id': str(uuid.uuid4()),
+            'state': 'INITIAL_POSE_PUBLISHED',
+            **pose,
+        }
 
     def command(self, payload):
         self._validate_fields(payload, {'linear_x', 'angular_z', 'hold_ms'})
@@ -341,6 +371,17 @@ def openapi_document(service):
             'operation': operation_status_schema,
         },
     }
+    initial_pose_schema = {
+        'type': 'object',
+        'additionalProperties': False,
+        'required': ['x', 'y', 'yaw'],
+        'properties': {
+            'frame_id': {'type': 'string', 'default': 'map'},
+            'x': {'type': 'number'},
+            'y': {'type': 'number'},
+            'yaw': {'type': 'number'},
+        },
+    }
     return {
         'openapi': '3.0.3',
         'info': {
@@ -446,6 +487,19 @@ def openapi_document(service):
                     },
                 },
             },
+            '/v1/localization/initial-pose': {
+                'post': {
+                    'requestBody': {
+                        'required': True,
+                        'content': {'application/json': {'schema': initial_pose_schema}},
+                    },
+                    'responses': {
+                        '202': {'description': 'Initial pose published to AMCL'},
+                        '409': {'description': 'Vehicle has an active navigation or manual motion'},
+                        '422': {'description': 'Invalid initial pose'},
+                    },
+                },
+            },
             '/v1/stop': {
                 'post': {
                     'responses': {'200': {'description': 'Velocity zeroed and Nav2 cancel requested'}},
@@ -485,6 +539,9 @@ def create_http_server(host, port, service):
                 if path == '/v1/navigation/cancel':
                     self._write_json(202, service.navigation_cancel(self._read_optional_json()))
                     return
+                if path == '/v1/localization/initial-pose':
+                    self._write_json(202, service.initial_pose(self._read_json()))
+                    return
                 if path == '/v1/stop':
                     self._read_optional_json()
                     self._write_json(200, service.stop())
@@ -496,6 +553,9 @@ def create_http_server(host, port, service):
                 self._write_json(503, {'error': str(error)})
                 return
             except NavigationCancelError as error:
+                self._write_json(409, {'error': str(error)})
+                return
+            except InitialPoseMotionError as error:
                 self._write_json(409, {'error': str(error)})
                 return
             except json.JSONDecodeError:
@@ -555,7 +615,7 @@ class RosVehicleAdapter:
         try:
             import rclpy
             from action_msgs.msg import GoalStatus
-            from geometry_msgs.msg import PoseStamped, Twist
+            from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
             from nav2_msgs.action import NavigateToPose
             from rclpy.action import ActionClient
             from rclpy.context import Context
@@ -570,6 +630,7 @@ class RosVehicleAdapter:
         self._rclpy = rclpy
         self._goal_status = GoalStatus
         self._pose_stamped_type = PoseStamped
+        self._pose_with_covariance_stamped_type = PoseWithCovarianceStamped
         self._twist_type = Twist
         self._navigate_to_pose_type = NavigateToPose
         self._action_client_type = ActionClient
@@ -582,6 +643,7 @@ class RosVehicleAdapter:
         self._goal_handles = {}
         self._closed = False
         self._battery_subscription = None
+        self._initial_pose_publisher = None
 
         self._context = Context()
         self._rclpy.init(args=None, context=self._context)
@@ -606,6 +668,30 @@ class RosVehicleAdapter:
             lambda message: on_battery(message.data),
             self._battery_qos,
         )
+
+    def configure_initial_pose_publisher(self, initial_pose_topic):
+        if self._initial_pose_publisher is not None:
+            raise RuntimeError('initial pose publisher is already configured')
+        self._initial_pose_publisher = self._node.create_publisher(
+            self._pose_with_covariance_stamped_type,
+            initial_pose_topic,
+            10,
+        )
+
+    def publish_initial_pose(self, pose, position_variance, yaw_variance):
+        if self._initial_pose_publisher is None:
+            raise NavigationUnavailableError('INITIAL_POSE_PUBLISHER_UNAVAILABLE')
+        message = self._pose_with_covariance_stamped_type()
+        message.header.frame_id = pose['frame_id']
+        message.header.stamp = self._node.get_clock().now().to_msg()
+        message.pose.pose.position.x = pose['x']
+        message.pose.pose.position.y = pose['y']
+        message.pose.pose.orientation.z = math.sin(pose['yaw'] / 2)
+        message.pose.pose.orientation.w = math.cos(pose['yaw'] / 2)
+        message.pose.covariance[0] = position_variance
+        message.pose.covariance[7] = position_variance
+        message.pose.covariance[35] = yaw_variance
+        self._initial_pose_publisher.publish(message)
 
     def publish(self, linear_x, angular_z):
         message = self._twist_type()
@@ -718,6 +804,9 @@ def parse_args(argv=None):
     parser.add_argument('--action-name', default='/navigate_to_pose')
     parser.add_argument('--battery-topic', default='/ros_robot_controller/battery')
     parser.add_argument('--battery-stale-sec', type=float, default=3.0)
+    parser.add_argument('--initial-pose-topic', default='/initialpose')
+    parser.add_argument('--initial-pose-position-variance', type=float, default=0.25)
+    parser.add_argument('--initial-pose-yaw-variance', type=float, default=0.0685)
     parser.add_argument('--max-linear-x', type=float, default=0.10)
     parser.add_argument('--max-angular-z', type=float, default=0.50)
     parser.add_argument('--max-hold-ms', type=int, default=1000)
@@ -745,12 +834,17 @@ def run_server(arguments, adapter_factory=None, http_server_factory=create_http_
     adapter = create_ros_vehicle_adapter(arguments) if adapter_factory is None else adapter_factory(arguments)
     if hasattr(adapter, 'subscribe_battery'):
         adapter.subscribe_battery(arguments.battery_topic, vehicle_status.update_battery)
+    if hasattr(adapter, 'configure_initial_pose_publisher'):
+        adapter.configure_initial_pose_publisher(arguments.initial_pose_topic)
     service = VehicleCommandService(
         velocity=adapter,
         navigation=adapter,
+        initial_pose=adapter,
         max_linear_x=arguments.max_linear_x,
         max_angular_z=arguments.max_angular_z,
         max_hold_ms=arguments.max_hold_ms,
+        initial_pose_position_variance=arguments.initial_pose_position_variance,
+        initial_pose_yaw_variance=arguments.initial_pose_yaw_variance,
         vehicle_status=vehicle_status,
     )
     http_server = http_server_factory(arguments.host, arguments.port, service)
