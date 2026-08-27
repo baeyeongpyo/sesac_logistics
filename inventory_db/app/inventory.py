@@ -17,7 +17,6 @@ class PayloadType(str, Enum):
 
 
 class OperationStatus(str, Enum):
-    QUEUED = "QUEUED"
     TO_PICK = "TO_PICK"
     PICKING = "PICKING"
     TO_PLACE = "TO_PLACE"
@@ -29,7 +28,6 @@ class OperationStatus(str, Enum):
 
 
 ACTIVE_OPERATION_STATUSES = (
-    OperationStatus.QUEUED,
     OperationStatus.TO_PICK,
     OperationStatus.PICKING,
     OperationStatus.TO_PLACE,
@@ -231,7 +229,7 @@ class InventoryStore:
                     FOREIGN KEY (destination_zone_id) REFERENCES zones(zone_id),
                     CHECK (source_zone_id <> destination_zone_id),
                     CHECK (status IN (
-                        'QUEUED', 'TO_PICK', 'PICKING', 'TO_PLACE', 'PLACING',
+                        'TO_PICK', 'PICKING', 'TO_PLACE', 'PLACING',
                         'COMPLETED', 'FAILED', 'RECOVERY_REQUIRED', 'CANCELLED'
                     ))
                 );
@@ -269,6 +267,8 @@ class InventoryStore:
             )
         finally:
             connection.close()
+        self._remove_legacy_queued_operations()
+        self._rebuild_legacy_transport_tables()
 
     def upsert_zone(self, zone: Zone) -> Zone:
         self._validate_zone(zone)
@@ -423,11 +423,14 @@ class InventoryStore:
 
     def create_operation(
         self,
+        robot_id: str,
         payload_type: PayloadType,
         source_zone_id: str,
         destination_zone_id: str,
         priority: int = 0,
     ) -> Operation:
+        if not robot_id:
+            raise ValueError("robot_id must not be empty")
         if source_zone_id == destination_zone_id:
             raise ValueError("source and destination zones must differ")
 
@@ -435,6 +438,7 @@ class InventoryStore:
         with self._write_connection() as connection:
             self._require_zone(connection, source_zone_id)
             self._require_zone(connection, destination_zone_id)
+            self._require_available_robot(connection, robot_id)
             destination = connection.execute(
                 "SELECT capacity FROM zones WHERE zone_id = ?", (destination_zone_id,)
             ).fetchone()
@@ -472,14 +476,15 @@ class InventoryStore:
                         operation_id, robot_id, payload_type, source_zone_id,
                         destination_zone_id, status, priority, failure_code, version,
                         created_at, updated_at, completed_at
-                    ) VALUES (?, NULL, ?, ?, ?, ?, ?, NULL, 1, ?, ?, NULL)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?, NULL)
                     """,
                     (
                         operation_id,
+                        robot_id,
                         payload_type.value,
                         source_zone_id,
                         destination_zone_id,
-                        OperationStatus.QUEUED.value,
+                        OperationStatus.TO_PICK.value,
                         priority,
                         timestamp,
                         timestamp,
@@ -509,52 +514,6 @@ class InventoryStore:
             return [self._operation_from_row(row) for row in rows]
         finally:
             connection.close()
-
-    def assign_operation(self, operation_id: str, robot_id: str) -> Operation:
-        if not robot_id:
-            raise ValueError("robot_id must not be empty")
-        timestamp = self._timestamp()
-        with self._write_connection() as connection:
-            operation = connection.execute(
-                "SELECT * FROM transport_operations WHERE operation_id = ?",
-                (operation_id,),
-            ).fetchone()
-            if operation is None:
-                raise NotFoundError(f"unknown operation: {operation_id}")
-            if operation["status"] != OperationStatus.QUEUED.value:
-                raise ConflictError(f"operation is not queueable: {operation_id}")
-
-            active_operation = connection.execute(
-                """
-                SELECT operation_id FROM transport_operations
-                WHERE robot_id = ?
-                  AND status IN ('TO_PICK', 'PICKING', 'TO_PLACE', 'PLACING', 'RECOVERY_REQUIRED')
-                """,
-                (robot_id,),
-            ).fetchone()
-            if active_operation is not None:
-                raise ConflictError(f"robot already has an active operation: {robot_id}")
-
-            robot_state = connection.execute(
-                "SELECT has_pallet FROM robot_pallet_states WHERE robot_id = ?",
-                (robot_id,),
-            ).fetchone()
-            if robot_state is not None and robot_state["has_pallet"]:
-                raise ConflictError(f"robot already carries a pallet: {robot_id}")
-
-            connection.execute(
-                """
-                UPDATE transport_operations
-                SET robot_id = ?, status = ?, version = version + 1, updated_at = ?
-                WHERE operation_id = ?
-                """,
-                (robot_id, OperationStatus.TO_PICK.value, timestamp, operation_id),
-            )
-            row = connection.execute(
-                "SELECT * FROM transport_operations WHERE operation_id = ?",
-                (operation_id,),
-            ).fetchone()
-        return self._operation_from_row(row)
 
     def get_robot_pallet_state(self, robot_id: str) -> RobotPalletState:
         connection = self._connect()
@@ -876,6 +835,153 @@ class InventoryStore:
         finally:
             connection.close()
 
+    def _remove_legacy_queued_operations(self) -> None:
+        with self._write_connection() as connection:
+            reservations = connection.execute(
+                """
+                SELECT source_zone_id, payload_type, COUNT(*) AS quantity
+                FROM transport_operations
+                WHERE status = 'QUEUED'
+                GROUP BY source_zone_id, payload_type
+                """
+            ).fetchall()
+            if not reservations:
+                return
+
+            timestamp = self._timestamp()
+            for reservation in reservations:
+                released = connection.execute(
+                    """
+                    UPDATE pallet_stocks
+                    SET reserved_quantity = reserved_quantity - ?,
+                        version = version + 1,
+                        updated_at = ?
+                    WHERE zone_id = ?
+                      AND payload_type = ?
+                      AND reserved_quantity >= ?
+                    """,
+                    (
+                        reservation["quantity"],
+                        timestamp,
+                        reservation["source_zone_id"],
+                        reservation["payload_type"],
+                        reservation["quantity"],
+                    ),
+                )
+                if released.rowcount != 1:
+                    raise ConflictError(
+                        "legacy queued operation reservation cannot be released"
+                    )
+            connection.execute("DELETE FROM transport_operations WHERE status = 'QUEUED'")
+
+    def _rebuild_legacy_transport_tables(self) -> None:
+        connection = self._connect()
+        try:
+            table = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'transport_operations'"
+            ).fetchone()
+            if table is None or "'QUEUED'" not in table["sql"]:
+                return
+
+            connection.execute("PRAGMA foreign_keys = OFF")
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute("ALTER TABLE inventory_events RENAME TO inventory_events_legacy")
+                connection.execute(
+                    "ALTER TABLE transport_operations RENAME TO transport_operations_legacy"
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE transport_operations (
+                        operation_id TEXT PRIMARY KEY,
+                        robot_id TEXT,
+                        payload_type TEXT NOT NULL,
+                        source_zone_id TEXT NOT NULL,
+                        destination_zone_id TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        priority INTEGER NOT NULL DEFAULT 0,
+                        failure_code TEXT,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        FOREIGN KEY (payload_type) REFERENCES payload_types(payload_type),
+                        FOREIGN KEY (source_zone_id) REFERENCES zones(zone_id),
+                        FOREIGN KEY (destination_zone_id) REFERENCES zones(zone_id),
+                        CHECK (source_zone_id <> destination_zone_id),
+                        CHECK (status IN (
+                            'TO_PICK', 'PICKING', 'TO_PLACE', 'PLACING',
+                            'COMPLETED', 'FAILED', 'RECOVERY_REQUIRED', 'CANCELLED'
+                        ))
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO transport_operations (
+                        operation_id, robot_id, payload_type, source_zone_id,
+                        destination_zone_id, status, priority, failure_code, version,
+                        created_at, updated_at, completed_at
+                    )
+                    SELECT
+                        operation_id, robot_id, payload_type, source_zone_id,
+                        destination_zone_id, status, priority, failure_code, version,
+                        created_at, updated_at, completed_at
+                    FROM transport_operations_legacy
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE inventory_events (
+                        event_id TEXT PRIMARY KEY,
+                        idempotency_key TEXT NOT NULL UNIQUE,
+                        operation_id TEXT,
+                        robot_id TEXT,
+                        event_type TEXT NOT NULL,
+                        zone_id TEXT NOT NULL,
+                        payload_type TEXT NOT NULL,
+                        quantity_delta INTEGER NOT NULL,
+                        occurred_at TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (operation_id) REFERENCES transport_operations(operation_id),
+                        FOREIGN KEY (zone_id) REFERENCES zones(zone_id),
+                        FOREIGN KEY (payload_type) REFERENCES payload_types(payload_type),
+                        CHECK (event_type IN ('PICK_COMPLETED', 'PLACE_COMPLETED', 'STOCK_ADJUSTED')),
+                        CHECK (
+                            (event_type = 'PICK_COMPLETED' AND quantity_delta = -1)
+                            OR (event_type = 'PLACE_COMPLETED' AND quantity_delta = 1)
+                            OR (event_type = 'STOCK_ADJUSTED' AND quantity_delta <> 0)
+                        )
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO inventory_events (
+                        event_id, idempotency_key, operation_id, robot_id, event_type,
+                        zone_id, payload_type, quantity_delta, occurred_at, created_at
+                    )
+                    SELECT
+                        event_id, idempotency_key, operation_id, robot_id, event_type,
+                        zone_id, payload_type, quantity_delta, occurred_at, created_at
+                    FROM inventory_events_legacy
+                    """
+                )
+                connection.execute("DROP TABLE inventory_events_legacy")
+                connection.execute("DROP TABLE transport_operations_legacy")
+                foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
+                if foreign_key_errors:
+                    raise ConflictError("legacy transport schema has foreign key errors")
+                connection.execute("COMMIT")
+            except BaseException:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+            finally:
+                connection.execute("PRAGMA foreign_keys = ON")
+        finally:
+            connection.close()
+
     @staticmethod
     def _timestamp() -> str:
         return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -924,6 +1030,26 @@ class InventoryStore:
             raise NotFoundError(f"unknown zone: {zone_id}")
 
     @staticmethod
+    def _require_available_robot(connection: sqlite3.Connection, robot_id: str) -> None:
+        active_operation = connection.execute(
+            """
+            SELECT operation_id FROM transport_operations
+            WHERE robot_id = ?
+              AND status IN ('TO_PICK', 'PICKING', 'TO_PLACE', 'PLACING', 'RECOVERY_REQUIRED')
+            """,
+            (robot_id,),
+        ).fetchone()
+        if active_operation is not None:
+            raise ConflictError(f"robot already has an active operation: {robot_id}")
+
+        robot_state = connection.execute(
+            "SELECT has_pallet FROM robot_pallet_states WHERE robot_id = ?",
+            (robot_id,),
+        ).fetchone()
+        if robot_state is not None and robot_state["has_pallet"]:
+            raise ConflictError(f"robot already carries a pallet: {robot_id}")
+
+    @staticmethod
     def _destination_reservation_count(
         connection: sqlite3.Connection, zone_id: str
     ) -> int:
@@ -933,7 +1059,7 @@ class InventoryStore:
             FROM transport_operations
             WHERE destination_zone_id = ?
               AND status IN (
-                  'QUEUED', 'TO_PICK', 'PICKING', 'TO_PLACE', 'PLACING',
+                  'TO_PICK', 'PICKING', 'TO_PLACE', 'PLACING',
                   'RECOVERY_REQUIRED'
               )
             """,

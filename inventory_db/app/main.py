@@ -29,12 +29,11 @@ API_DESCRIPTION = """
 
 1. **zones**에서 Nav2 주행 목적지와 적치 용량을 설정합니다.
 2. **stocks**에서 초기 재고 또는 실사 재고를 절대 수량으로 설정합니다.
-3. **operations**에서 source 파렛트와 destination 적치 슬롯을 함께 예약한 뒤, 차량을 배정합니다.
+3. **operations**에서 차량을 지정해 source 파렛트와 destination 적치 슬롯을 함께 예약하고 즉시 작업에 배정합니다.
 4. 외부 비전·포크 노드가 PICK/PLACE 성공을 확인하면 완료 API를 호출해 실제 재고와 차량 적재 상태를 변경합니다.
 
 ## 작업 상태
 
-- `QUEUED`: 재고와 목적지 슬롯을 예약했지만 차량이 아직 배정되지 않은 상태입니다.
 - `TO_PICK`: 차량이 source zone으로 주행해 PICK해야 하는 상태입니다.
 - `TO_PLACE`: PICK 완료로 차량에 파렛트가 적재되어 destination zone으로 주행해야 하는 상태입니다.
 - `COMPLETED`: PLACE가 반영되어 작업이 끝난 상태입니다.
@@ -53,7 +52,7 @@ OPENAPI_TAGS = [
     },
     {
         "name": "operations",
-        "description": "운송 예약, 차량 배정, 실제 PICK/PLACE 완료를 기록합니다.",
+        "description": "차량에 즉시 배정하는 운송 예약과 실제 PICK/PLACE 완료를 기록합니다.",
     },
     {
         "name": "robots",
@@ -88,6 +87,10 @@ class StockRequest(RequestModel):
 
 
 class OperationRequest(RequestModel):
+    robot_id: str = Field(
+        min_length=1,
+        description="작업 생성과 동시에 배정할 차량 식별자입니다.",
+    )
     payload_type: PayloadType = Field(
         description="운송할 파렛트 적재물 유형입니다."
     )
@@ -98,10 +101,6 @@ class OperationRequest(RequestModel):
         min_length=1, description="파렛트를 place할 목적지 zone ID입니다."
     )
     priority: int = Field(default=0, description="값이 클수록 먼저 처리하는 우선순위입니다.")
-
-
-class AssignmentRequest(RequestModel):
-    robot_id: str = Field(min_length=1, description="작업을 수행할 차량 식별자")
 
 
 class CompletionRequest(RequestModel):
@@ -256,13 +255,14 @@ def create_app(database_path: str) -> FastAPI:
         tags=["operations"],
         summary="파렛트 운송 작업 생성 및 양쪽 zone 예약",
         description=_endpoint_description(
-            "source 파렛트 1개와 destination 적치 슬롯 1개를 하나의 transaction에서 예약하고 UUID operation_id를 생성합니다.",
-            "차량이 아직 배정되지 않은 QUEUED 작업을 201으로 반환합니다.",
-            "source 재고 부족 또는 destination의 현재 적치·inbound 예약을 합친 용량 초과는 409 오류입니다.",
+            "robot_id가 지정된 비적재·비작업 차량, source 파렛트 1개, destination 적치 슬롯 1개를 하나의 transaction에서 함께 확인·예약하고 UUID operation_id를 생성합니다.",
+            "robot_id가 저장된 TO_PICK 작업을 201으로 반환합니다.",
+            "차량에 활성 작업 또는 적재 파렛트가 있거나 source 재고 부족, destination의 현재 적치·inbound 예약을 합친 용량 초과이면 409 오류입니다.",
         ),
     )
     def create_operation(body: OperationRequest, request: Request) -> dict:
         operation = _store(request).create_operation(
+            body.robot_id,
             body.payload_type,
             body.source_zone_id,
             body.destination_zone_id,
@@ -276,7 +276,7 @@ def create_app(database_path: str) -> FastAPI:
         summary="진행 중인 운송 작업 조회",
         description=_endpoint_description(
             "재고를 예약했거나 차량 PICK/PLACE가 아직 완료되지 않은 운송 작업을 조회합니다.",
-            "QUEUED, TO_PICK, PICKING, TO_PLACE, PLACING, RECOVERY_REQUIRED 상태의 작업을 우선순위 내림차순으로 반환합니다.",
+            "TO_PICK, PICKING, TO_PLACE, PLACING, RECOVERY_REQUIRED 상태의 작업을 우선순위 내림차순으로 반환합니다.",
             "COMPLETED, FAILED, CANCELLED 상태의 종료 작업은 포함하지 않습니다.",
         ),
     )
@@ -285,25 +285,6 @@ def create_app(database_path: str) -> FastAPI:
             _response(operation)
             for operation in _store(request).list_active_operations()
         ]
-
-    @app.post(
-        "/api/v1/operations/{operation_id}/assignments",
-        tags=["operations"],
-        summary="예약 작업에 차량 배정",
-        description=_endpoint_description(
-            "QUEUED 작업에 비적재·비작업 상태의 차량을 배정합니다.",
-            "작업의 robot_id를 저장하고 상태를 TO_PICK으로 전이해 차량이 source zone 주행 지시를 받을 수 있게 합니다.",
-            "이미 배정된 작업, 다른 활성 작업이 있는 차량, 파렛트를 적재한 차량은 409 오류입니다.",
-        ),
-    )
-    def assign_operation(
-        operation_id: Annotated[
-            str, Path(description="차량을 배정할 운송 작업의 UUID")
-        ],
-        body: AssignmentRequest,
-        request: Request,
-    ) -> dict:
-        return _response(_store(request).assign_operation(operation_id, body.robot_id))
 
     @app.post(
         "/api/v1/operations/{operation_id}/pick-completions",

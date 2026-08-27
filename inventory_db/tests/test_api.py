@@ -51,6 +51,7 @@ class InventoryApiTest(unittest.TestCase):
         operation_response = self.client.post(
             "/api/v1/operations",
             json={
+                "robot_id": "robot_1",
                 "payload_type": "FRESH",
                 "source_zone_id": "source",
                 "destination_zone_id": "destination",
@@ -59,13 +60,6 @@ class InventoryApiTest(unittest.TestCase):
         )
         self.assertEqual(operation_response.status_code, 201)
         self.operation_id = operation_response.json()["operation_id"]
-        self.assertEqual(
-            self.client.post(
-                f"/api/v1/operations/{self.operation_id}/assignments",
-                json={"robot_id": "robot_1"},
-            ).status_code,
-            200,
-        )
 
     def tearDown(self) -> None:
         self.client.__exit__(None, None, None)
@@ -98,6 +92,7 @@ class InventoryApiTest(unittest.TestCase):
         response = self.client.post(
             "/api/v1/operations",
             json={
+                "robot_id": "robot_2",
                 "payload_type": "FRESH",
                 "source_zone_id": "source",
                 "destination_zone_id": "destination",
@@ -107,7 +102,21 @@ class InventoryApiTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 201)
         UUID(response.json()["operation_id"])
-        self.assertEqual(response.json()["status"], "QUEUED")
+        self.assertEqual(response.json()["robot_id"], "robot_2")
+        self.assertEqual(response.json()["status"], "TO_PICK")
+
+    def test_operation_creation_requires_the_assigned_robot(self) -> None:
+        response = self.client.post(
+            "/api/v1/operations",
+            json={
+                "payload_type": "FRESH",
+                "source_zone_id": "source",
+                "destination_zone_id": "destination",
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(self.client.get("/api/v1/stocks").json()[0]["reserved_quantity"], 1)
 
     def test_place_completion_endpoint_clears_robot_load(self) -> None:
         self.assertEqual(
@@ -147,14 +156,21 @@ class InventoryApiTest(unittest.TestCase):
         self.assertEqual(response.json()[0]["zone_id"], "destination")
         self.assertEqual(response.json()[0]["map_name"], "warehouse_map")
 
-    def test_conflicting_assignment_returns_http_409(self) -> None:
+    def test_busy_robot_cannot_receive_a_second_operation(self) -> None:
         response = self.client.post(
-            f"/api/v1/operations/{self.operation_id}/assignments",
-            json={"robot_id": "robot_2"},
+            "/api/v1/operations",
+            json={
+                "robot_id": "robot_1",
+                "payload_type": "FRESH",
+                "source_zone_id": "source",
+                "destination_zone_id": "destination",
+            },
         )
 
         self.assertEqual(response.status_code, 409)
         self.assertIn("detail", response.json())
+        stocks = self.client.get("/api/v1/stocks").json()
+        self.assertEqual(stocks[0]["reserved_quantity"], 1)
 
     def test_unknown_zone_stock_write_returns_http_404(self) -> None:
         response = self.client.put(
@@ -178,17 +194,22 @@ class InventoryApiTest(unittest.TestCase):
                     for parameter in operation.get("parameters", []):
                         self.assertTrue(parameter["description"].strip())
 
+        request_schema = schema["components"]["schemas"]["OperationRequest"]
+        self.assertIn("robot_id", request_schema["required"])
+        self.assertNotIn("/api/v1/operations/{operation_id}/assignments", schema["paths"])
+
     def test_active_operations_lists_pending_work_by_priority(self) -> None:
-        queued = self.client.post(
+        higher_priority = self.client.post(
             "/api/v1/operations",
             json={
+                "robot_id": "robot_2",
                 "payload_type": "FRESH",
                 "source_zone_id": "source",
                 "destination_zone_id": "destination",
                 "priority": 10,
             },
         )
-        self.assertEqual(queued.status_code, 201)
+        self.assertEqual(higher_priority.status_code, 201)
 
         response = self.client.get("/api/v1/operations/active")
 
@@ -196,11 +217,11 @@ class InventoryApiTest(unittest.TestCase):
         operations = response.json()
         self.assertEqual(
             [operation["operation_id"] for operation in operations],
-            [queued.json()["operation_id"], self.operation_id],
+            [higher_priority.json()["operation_id"], self.operation_id],
         )
         self.assertEqual(
             [operation["status"] for operation in operations],
-            ["QUEUED", "TO_PICK"],
+            ["TO_PICK", "TO_PICK"],
         )
 
     def test_active_operations_excludes_completed_work(self) -> None:
