@@ -189,6 +189,8 @@ class ConfigurationContractTest(unittest.TestCase):
             'SERVER_ROS_DOMAIN_ID=225',
             'ROBOT_1_FOXGLOVE_URI=',
             'ROBOT_2_FOXGLOVE_URI=',
+            'ROBOT_1_COMMAND_API_URL=',
+            'ROBOT_2_COMMAND_API_URL=',
             'RMW_IMPLEMENTATION=rmw_fastrtps_cpp',
             'FASTDDS_BUILTIN_TRANSPORTS=DEFAULT',
             'COMMAND_API_HOST=',

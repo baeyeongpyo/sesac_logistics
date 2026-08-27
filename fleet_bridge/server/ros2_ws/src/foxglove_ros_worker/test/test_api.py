@@ -15,8 +15,10 @@ from fleet_bridge_config.models import (
     VehicleConfig,
 )
 from foxglove_ros_worker.api import create_app
-from foxglove_ros_worker.command import NavigationCancelResult, StopDeliveryError
-from foxglove_ros_worker.protocol import ProtocolError
+from foxglove_ros_worker.command import (
+    VehicleCommandApiError,
+    VehicleCommandTransportError,
+)
 
 
 def fleet(*, enabled=True):
@@ -29,6 +31,7 @@ def fleet(*, enabled=True):
         vehicles=(VehicleConfig(
             id='robot_1',
             foxglove_uri='ws://10.0.0.11:8766',
+            command_api_url='http://10.0.0.11:8082',
             enabled=enabled,
             command=CommandConfig(
                 topic='/cmd_vel',
@@ -54,23 +57,35 @@ class RecordingCommandClient:
         if self.error:
             raise self.error
         self.twists.append((vehicle.id, linear_x, angular_z, hold_ms))
+        return {'state': 'MANUAL'}
 
     async def send_goal_pose(self, vehicle, goal_pose):
         if self.error:
             raise self.error
         self.goal_poses.append((vehicle.id, goal_pose))
+        return {
+            'operation_id': 'f1c191f4-4f51-4b49-b748-5577fbf0b4e1',
+            'state': 'NAVIGATING',
+        }
 
-    async def cancel_navigation(self, vehicle):
+    async def cancel_navigation(self, vehicle, operation_id=None):
         if self.error:
             raise self.error
-        self.nav_cancels.append(vehicle.id)
-        return NavigationCancelResult(return_code=0, goals_canceling=1)
+        self.nav_cancels.append((vehicle.id, operation_id))
+        return {
+            'operation_id': 'f1c191f4-4f51-4b49-b748-5577fbf0b4e1',
+            'state': 'CANCELLING',
+        }
 
     async def stop(self, vehicle):
         if self.error:
             raise self.error
         self.stops.append(vehicle.id)
-        return NavigationCancelResult(return_code=0, goals_canceling=1)
+        return {
+            'operation_id': 'f1c191f4-4f51-4b49-b748-5577fbf0b4e1',
+            'state': 'STOPPED',
+            'cancel_requested': True,
+        }
 
 
 class CommandApiTest(unittest.TestCase):
@@ -95,6 +110,7 @@ class CommandApiTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()['robot_id'], 'robot_1')
+        self.assertEqual(response.json()['state'], 'MANUAL')
         self.assertEqual(commands.twists, [('robot_1', 0.1, 0.0, 300)])
 
     def test_cmd_vel_rejects_invalid_or_unsafe_request(self):
@@ -128,6 +144,7 @@ class CommandApiTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json()['command'], 'nav2_goal_pose')
+        self.assertEqual(response.json()['operation_id'], 'f1c191f4-4f51-4b49-b748-5577fbf0b4e1')
         self.assertEqual(commands.goal_poses, [('robot_1', goal_pose)])
 
     def test_goal_pose_rejects_incomplete_pose_stamped(self):
@@ -167,7 +184,7 @@ class CommandApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertEqual(commands.goal_poses, [])
 
-    def test_nav2_cancel_returns_cancel_result(self):
+    def test_nav2_cancel_returns_vehicle_operation_state(self):
         client, commands = self.client()
 
         response = client.post('/api/v1/robots/robot_1/nav2/cancel')
@@ -177,20 +194,34 @@ class CommandApiTest(unittest.TestCase):
             'robot_id': 'robot_1',
             'command': 'nav2_cancel',
             'hold_ms': None,
-            'nav2_return_code': 0,
-            'nav2_goals_canceling': 1,
+            'operation_id': 'f1c191f4-4f51-4b49-b748-5577fbf0b4e1',
+            'state': 'CANCELLING',
+            'cancel_requested': None,
         })
-        self.assertEqual(commands.nav_cancels, ['robot_1'])
+        self.assertEqual(commands.nav_cancels, [('robot_1', None)])
 
-    def test_nav2_cancel_returns_service_unavailable_for_invalid_cdr(self):
+    def test_nav2_cancel_forwards_requested_operation_id(self):
+        client, commands = self.client()
+
+        response = client.post('/api/v1/robots/robot_1/nav2/cancel', json={
+            'operation_id': 'f1c191f4-4f51-4b49-b748-5577fbf0b4e1',
+        })
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(commands.nav_cancels, [(
+            'robot_1',
+            'f1c191f4-4f51-4b49-b748-5577fbf0b4e1',
+        )])
+
+    def test_nav2_cancel_preserves_vehicle_conflict_response(self):
         client, _commands = self.client(
-            error=ProtocolError('invalid Nav2 cancel CDR response'),
+            error=VehicleCommandApiError(409, 'NAVIGATION_OPERATION_NOT_ACTIVE'),
         )
 
         response = client.post('/api/v1/robots/robot_1/nav2/cancel')
 
-        self.assertEqual(response.status_code, 503)
-        self.assertIn('invalid Nav2 cancel CDR', response.json()['detail'])
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('NAVIGATION_OPERATION_NOT_ACTIVE', response.json()['detail'])
 
     def test_api_rejects_unknown_or_disabled_robot(self):
         client, _commands = self.client()
@@ -202,20 +233,23 @@ class CommandApiTest(unittest.TestCase):
         self.assertEqual(disabled_response.status_code, 404)
 
     def test_api_returns_service_unavailable_when_delivery_fails(self):
-        client, _commands = self.client(error=ConnectionError('vehicle unavailable'))
+        client, _commands = self.client(
+            error=VehicleCommandTransportError('vehicle unavailable'),
+        )
 
         response = client.post('/api/v1/robots/robot_1/stop')
 
         self.assertEqual(response.status_code, 503)
 
-    def test_stop_returns_service_unavailable_after_partial_delivery_failure(self):
-        error = StopDeliveryError((('Nav2 cancel', ConnectionError('offline')),))
-        client, _commands = self.client(error=error)
+    def test_stop_preserves_vehicle_unavailable_response(self):
+        client, _commands = self.client(
+            error=VehicleCommandApiError(503, 'NAVIGATION_SERVER_UNAVAILABLE'),
+        )
 
         response = client.post('/api/v1/robots/robot_1/stop')
 
         self.assertEqual(response.status_code, 503)
-        self.assertIn('Nav2 cancel', response.json()['detail'])
+        self.assertIn('NAVIGATION_SERVER_UNAVAILABLE', response.json()['detail'])
 
     def test_stop_docs_and_openapi_are_available(self):
         client, commands = self.client()
@@ -225,6 +259,8 @@ class CommandApiTest(unittest.TestCase):
 
         self.assertEqual(stop.status_code, 202)
         self.assertEqual(commands.stops, ['robot_1'])
+        self.assertEqual(stop.json()['state'], 'STOPPED')
+        self.assertTrue(stop.json()['cancel_requested'])
         self.assertEqual(client.get('/healthz').json(), {'status': 'ok'})
         self.assertEqual(docs.status_code, 200)
         self.assertIn('swagger-ui', docs.text)

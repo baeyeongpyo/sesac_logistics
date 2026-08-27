@@ -4,7 +4,6 @@ import sys
 import unittest
 
 from fastapi import HTTPException
-from websockets.exceptions import WebSocketException
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
@@ -31,6 +30,7 @@ def fleet() -> FleetConfig:
         vehicles=(VehicleConfig(
             id='robot_1',
             foxglove_uri='ws://10.0.0.11:8766',
+            command_api_url='http://10.0.0.11:8082',
             enabled=True,
             command=CommandConfig(
                 topic='/cmd_vel',
@@ -44,14 +44,14 @@ def fleet() -> FleetConfig:
     )
 
 
-class HandshakeFailingCommandClient:
+class UnreachableVehicleApiClient:
     async def stop(self, _vehicle) -> None:
-        raise WebSocketException('server rejected WebSocket connection: HTTP 400')
+        raise ConnectionError('connection refused')
 
 
 class CommandApiDeliveryErrorTest(unittest.TestCase):
-    def test_websocket_handshake_error_returns_service_unavailable(self):
-        app = create_app(fleet(), HandshakeFailingCommandClient())
+    def test_vehicle_api_connection_error_returns_service_unavailable(self):
+        app = create_app(fleet(), UnreachableVehicleApiClient())
         stop_endpoint = next(
             route.endpoint
             for route in app.routes

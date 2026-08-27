@@ -144,6 +144,7 @@ class ConfigLoaderTest(unittest.TestCase):
                 {
                     'id': 'robot_1',
                     'foxglove_uri': '${ROBOT_1_FOXGLOVE_URI}',
+                    'command_api_url': '${ROBOT_1_COMMAND_API_URL}',
                     'enabled': True,
                     'command': {
                         'topic': '/cmd_vel',
@@ -153,32 +154,61 @@ class ConfigLoaderTest(unittest.TestCase):
                         'max_hold_ms': 1000,
                         'publish_rate_hz': 10,
                     },
-                    'navigation': {
-                        'goal_topic': '/goal_pose',
-                        'goal_type': 'geometry_msgs/msg/PoseStamped',
-                        'cancel_service': '/navigate_to_pose/_action/cancel_goal',
-                        'cancel_service_type': 'action_msgs/srv/CancelGoal',
-                    },
                 },
             ],
         }
 
         loaded = load_fleet(
             self.write_yaml('fleet.yaml', fleet),
-            {'ROBOT_1_FOXGLOVE_URI': 'ws://10.0.0.11:8766'},
+            {
+                'ROBOT_1_FOXGLOVE_URI': 'ws://10.0.0.11:8766',
+                'ROBOT_1_COMMAND_API_URL': 'http://10.0.0.11:8082',
+            },
         )
 
         self.assertEqual(loaded.server.domain_id, 225)
         self.assertEqual(loaded.server.command_api.host, '127.0.0.1')
         self.assertEqual(loaded.server.command_api.port, 8080)
         self.assertEqual(loaded.vehicles[0].foxglove_uri, 'ws://10.0.0.11:8766')
+        self.assertEqual(loaded.vehicles[0].command_api_url, 'http://10.0.0.11:8082')
         self.assertEqual(loaded.vehicles[0].namespace, '/robot_1')
         self.assertEqual(loaded.vehicles[0].command.topic, '/cmd_vel')
         self.assertEqual(loaded.vehicles[0].command.max_hold_ms, 1000)
-        self.assertEqual(loaded.vehicles[0].navigation.goal_topic, '/goal_pose')
+
+    def test_load_fleet_expands_vehicle_command_api_url(self):
+        fleet = {
+            'server': {
+                'domain_id': 225,
+                'foxglove_port': 8765,
+                'command_api': {'host': '127.0.0.1', 'port': 8080},
+            },
+            'vehicles': [{
+                'id': 'robot_1',
+                'foxglove_uri': '${ROBOT_1_FOXGLOVE_URI}',
+                'command_api_url': '${ROBOT_1_COMMAND_API_URL}',
+                'enabled': True,
+                'command': {
+                    'topic': '/cmd_vel',
+                    'type': 'geometry_msgs/msg/Twist',
+                    'max_linear_x': 0.3,
+                    'max_angular_z': 1.0,
+                    'max_hold_ms': 1000,
+                    'publish_rate_hz': 10,
+                },
+            }],
+        }
+
+        loaded = load_fleet(
+            self.write_yaml('fleet-command-api.yaml', fleet),
+            {
+                'ROBOT_1_FOXGLOVE_URI': 'ws://10.0.0.11:8766',
+                'ROBOT_1_COMMAND_API_URL': 'http://10.0.0.11:8082/',
+            },
+        )
+
         self.assertEqual(
-            loaded.vehicles[0].navigation.cancel_service,
-            '/navigate_to_pose/_action/cancel_goal',
+            loaded.vehicles[0].command_api_url,
+            'http://10.0.0.11:8082',
         )
 
     def test_load_fleet_rejects_missing_environment_value(self):
@@ -192,6 +222,7 @@ class ConfigLoaderTest(unittest.TestCase):
                 {
                     'id': 'robot_1',
                     'foxglove_uri': '${ROBOT_1_FOXGLOVE_URI}',
+                    'command_api_url': '${ROBOT_1_COMMAND_API_URL}',
                     'enabled': True,
                     'command': {
                         'topic': '/cmd_vel',
@@ -218,6 +249,7 @@ class ConfigLoaderTest(unittest.TestCase):
             'vehicles': [{
                 'id': 'robot_1',
                 'foxglove_uri': 'ws://10.0.0.11:8766',
+                'command_api_url': 'http://10.0.0.11:8082',
                 'enabled': True,
                 'command': {
                     'topic': '/cmd_vel',
@@ -245,7 +277,7 @@ class ConfigLoaderTest(unittest.TestCase):
                 with self.assertRaisesRegex(ConfigError, field):
                     load_fleet(self.write_yaml(f'{field}.yaml', invalid), {})
 
-    def test_load_fleet_rejects_wrong_nav2_interface_types(self):
+    def test_load_fleet_rejects_non_http_vehicle_command_api_url(self):
         fleet = {
             'server': {
                 'domain_id': 225,
@@ -255,6 +287,7 @@ class ConfigLoaderTest(unittest.TestCase):
             'vehicles': [{
                 'id': 'robot_1',
                 'foxglove_uri': 'ws://10.0.0.11:8766',
+                'command_api_url': 'http://10.0.0.11:8082',
                 'enabled': True,
                 'command': {
                     'topic': '/cmd_vel',
@@ -264,25 +297,19 @@ class ConfigLoaderTest(unittest.TestCase):
                     'max_hold_ms': 1000,
                     'publish_rate_hz': 10,
                 },
-                'navigation': {
-                    'goal_topic': '/goal_pose',
-                    'goal_type': 'geometry_msgs/msg/PoseStamped',
-                    'cancel_service': '/navigate_to_pose/_action/cancel_goal',
-                    'cancel_service_type': 'action_msgs/srv/CancelGoal',
-                },
             }],
         }
         cases = (
-            ('goal_type', 'geometry_msgs/msg/Pose'),
-            ('cancel_service_type', 'std_srvs/srv/Empty'),
+            'ws://10.0.0.11:8766',
+            'http://10.0.0.11:8082/v1',
         )
 
-        for field, value in cases:
-            with self.subTest(field=field):
+        for value in cases:
+            with self.subTest(value=value):
                 invalid = yaml.safe_load(yaml.safe_dump(fleet))
-                invalid['vehicles'][0]['navigation'][field] = value
-                with self.assertRaisesRegex(ConfigError, field):
-                    load_fleet(self.write_yaml(f'nav-{field}.yaml', invalid), {})
+                invalid['vehicles'][0]['command_api_url'] = value
+                with self.assertRaisesRegex(ConfigError, 'command_api_url'):
+                    load_fleet(self.write_yaml('invalid-command-api-url.yaml', invalid), {})
 
     def test_load_telemetry_rejects_duplicate_target(self):
         duplicated = yaml.safe_load(yaml.safe_dump(VALID_TELEMETRY))
@@ -499,6 +526,8 @@ class ConfigLoaderTest(unittest.TestCase):
             {
                 'ROBOT_1_FOXGLOVE_URI': 'ws://10.0.0.11:8766',
                 'ROBOT_2_FOXGLOVE_URI': 'ws://10.0.0.12:8766',
+                'ROBOT_1_COMMAND_API_URL': 'http://10.0.0.11:8082',
+                'ROBOT_2_COMMAND_API_URL': 'http://10.0.0.12:8082',
             },
         )
         topics = load_telemetry(BUNDLE / 'config/telemetry.yaml', 'robot_1')
@@ -512,11 +541,7 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertEqual(fleet.server.domain_id, 225)
         self.assertEqual(fleet.server.command_api.port, 8080)
         self.assertEqual(fleet.vehicles[0].command.topic, '/cmd_vel')
-        self.assertEqual(fleet.vehicles[0].navigation.goal_topic, '/goal_pose')
-        self.assertEqual(
-            fleet.vehicles[0].navigation.cancel_service,
-            '/navigate_to_pose/_action/cancel_goal',
-        )
+        self.assertEqual(fleet.vehicles[0].command_api_url, 'http://10.0.0.11:8082')
         self.assertTrue(all(topic.enabled for topic in topics))
         battery = next(
             topic for topic in topics

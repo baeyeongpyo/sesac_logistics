@@ -69,7 +69,7 @@ class ServerComposeContractTest(unittest.TestCase):
         )
         self.assertTrue(config_mount['read_only'])
 
-    def test_command_api_uses_vehicle_uri_and_configured_swagger_port(self):
+    def test_command_api_uses_vehicle_http_apis_and_configured_swagger_port(self):
         api = compose_config('docker-compose.server.yaml')['services']['command-api']
         environment = environment_values()
 
@@ -83,8 +83,12 @@ class ServerComposeContractTest(unittest.TestCase):
             environment['COMMAND_API_PORT'],
         )
         self.assertEqual(
-            api['environment']['ROBOT_1_FOXGLOVE_URI'],
-            environment['ROBOT_1_FOXGLOVE_URI'],
+            api['environment']['ROBOT_1_COMMAND_API_URL'],
+            environment['ROBOT_1_COMMAND_API_URL'],
+        )
+        self.assertEqual(
+            api['environment']['ROBOT_2_COMMAND_API_URL'],
+            environment['ROBOT_2_COMMAND_API_URL'],
         )
         self.assertEqual(
             api['command'],

@@ -1,4 +1,4 @@
-"""Test-only REST command API for vehicle Foxglove Bridges."""
+"""REST command API that delegates commands to vehicle HTTP command APIs."""
 
 import argparse
 import os
@@ -6,22 +6,21 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
-from websockets.exceptions import WebSocketException
 
 from fleet_bridge_config.loader import load_fleet
 from fleet_bridge_config.models import FleetConfig, VehicleConfig
 
 from .command import (
     CommandValidationError,
-    FoxgloveCommandClient,
-    StopDeliveryError,
+    VehicleCommandApiError,
+    VehicleCommandClient,
+    VehicleCommandTransportError,
     validate_command,
 )
-from .protocol import ProtocolError
 
 
 class CmdVelRequest(BaseModel):
-    """Planar velocity command accepted by the test command endpoint."""
+    """Planar velocity command accepted by the Fleet Manager endpoint."""
 
     model_config = ConfigDict(extra='forbid')
 
@@ -91,12 +90,21 @@ class GoalPoseRequest(BaseModel):
     pose: PoseRequest
 
 
+class NavigationCancelRequest(BaseModel):
+    """Optional vehicle-generated operation ID to cancel a specific goal."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    operation_id: str | None = Field(default=None, min_length=1)
+
+
 class CommandAccepted(BaseModel):
     robot_id: str
     command: str
     hold_ms: int | None = None
-    nav2_return_code: int | None = None
-    nav2_goals_canceling: int | None = None
+    operation_id: str | None = None
+    state: str | None = None
+    cancel_requested: bool | None = None
 
 
 def _active_vehicle(fleet: FleetConfig, robot_id: str) -> VehicleConfig:
@@ -116,20 +124,50 @@ def _active_vehicle(fleet: FleetConfig, robot_id: str) -> VehicleConfig:
 
 
 def _delivery_error(error: Exception) -> HTTPException:
+    if isinstance(error, VehicleCommandApiError):
+        status_code = error.status_code
+        if status_code < 400 or status_code > 599:
+            status_code = status.HTTP_502_BAD_GATEWAY
+        return HTTPException(
+            status_code=status_code,
+            detail=f'vehicle command API rejected command: {error.detail}',
+        )
     return HTTPException(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         detail=f'command delivery failed: {error}',
     )
 
 
+def _command_accepted(
+    robot_id: str,
+    command: str,
+    result: dict[str, Any],
+    *,
+    hold_ms: int | None = None,
+) -> CommandAccepted:
+    operation_id = result.get('operation_id')
+    state = result.get('state')
+    cancel_requested = result.get('cancel_requested')
+    return CommandAccepted(
+        robot_id=robot_id,
+        command=command,
+        hold_ms=hold_ms,
+        operation_id=operation_id if isinstance(operation_id, str) else None,
+        state=state if isinstance(state, str) else None,
+        cancel_requested=(
+            cancel_requested if isinstance(cancel_requested, bool) else None
+        ),
+    )
+
+
 def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
-    """Create the documented test command API with injected command transport."""
+    """Create the documented Fleet Manager API with injected vehicle transport."""
 
     app = FastAPI(
-        title='Fleet Bridge Test Command API',
+        title='Fleet Manager Vehicle Command API',
         version='1.0.0',
         description=(
-            '테스트 목적의 cmd_vel, Nav2 goal/cancel 및 통합 stop API입니다. '
+            '차량별 vehicle_command_api에 cmd_vel, Nav2 goal/cancel, stop을 전달합니다. '
             '운영 환경에서는 인증과 네트워크 접근 제어를 추가해야 합니다.'
         ),
     )
@@ -143,7 +181,7 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
         status_code=status.HTTP_202_ACCEPTED,
         response_model=CommandAccepted,
         tags=['commands'],
-        summary='Send a bounded cmd_vel test command',
+        summary='Send a bounded cmd_vel command to the vehicle API',
     )
     async def cmd_vel(robot_id: str, request: CmdVelRequest) -> CommandAccepted:
         vehicle = _active_vehicle(fleet, robot_id)
@@ -154,7 +192,7 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
                 request.angular_z,
                 request.hold_ms,
             )
-            await command_client.send_twist(
+            result = await command_client.send_twist(
                 vehicle,
                 request.linear_x,
                 request.angular_z,
@@ -165,12 +203,18 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=str(error),
             ) from error
-        except (ConnectionError, OSError, ProtocolError, WebSocketException) as error:
+        except (
+            ConnectionError,
+            OSError,
+            VehicleCommandApiError,
+            VehicleCommandTransportError,
+        ) as error:
             raise _delivery_error(error) from error
-        return CommandAccepted(
+        return _command_accepted(
             robot_id=robot_id,
             command='cmd_vel',
             hold_ms=request.hold_ms,
+            result=result,
         )
 
     @app.post(
@@ -186,15 +230,18 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
     ) -> CommandAccepted:
         vehicle = _active_vehicle(fleet, robot_id)
         try:
-            await command_client.send_goal_pose(vehicle, request.model_dump())
+            result = await command_client.send_goal_pose(
+                vehicle,
+                request.model_dump(),
+            )
         except (
             ConnectionError,
             OSError,
-            ProtocolError,
-            WebSocketException,
+            VehicleCommandApiError,
+            VehicleCommandTransportError,
         ) as error:
             raise _delivery_error(error) from error
-        return CommandAccepted(robot_id=robot_id, command='nav2_goal_pose')
+        return _command_accepted(robot_id, 'nav2_goal_pose', result)
 
     @app.post(
         '/api/v1/robots/{robot_id}/nav2/cancel',
@@ -203,23 +250,24 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
         tags=['commands'],
         summary='Cancel all active Nav2 NavigateToPose goals',
     )
-    async def nav2_cancel(robot_id: str) -> CommandAccepted:
+    async def nav2_cancel(
+        robot_id: str,
+        request: NavigationCancelRequest | None = None,
+    ) -> CommandAccepted:
         vehicle = _active_vehicle(fleet, robot_id)
         try:
-            result = await command_client.cancel_navigation(vehicle)
+            result = await command_client.cancel_navigation(
+                vehicle,
+                request.operation_id if request is not None else None,
+            )
         except (
             ConnectionError,
             OSError,
-            ProtocolError,
-            WebSocketException,
+            VehicleCommandApiError,
+            VehicleCommandTransportError,
         ) as error:
             raise _delivery_error(error) from error
-        return CommandAccepted(
-            robot_id=robot_id,
-            command='nav2_cancel',
-            nav2_return_code=result.return_code,
-            nav2_goals_canceling=result.goals_canceling,
-        )
+        return _command_accepted(robot_id, 'nav2_cancel', result)
 
     @app.post(
         '/api/v1/robots/{robot_id}/stop',
@@ -235,24 +283,18 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
         except (
             ConnectionError,
             OSError,
-            ProtocolError,
-            StopDeliveryError,
-            WebSocketException,
+            VehicleCommandApiError,
+            VehicleCommandTransportError,
         ) as error:
             raise _delivery_error(error) from error
-        return CommandAccepted(
-            robot_id=robot_id,
-            command='stop',
-            nav2_return_code=result.return_code,
-            nav2_goals_canceling=result.goals_canceling,
-        )
+        return _command_accepted(robot_id, 'stop', result)
 
     return app
 
 
 def _arguments(argv=None):
     parser = argparse.ArgumentParser(
-        description='Serve the Fleet Bridge test command REST API.',
+        description='Serve the Fleet Manager vehicle command REST API.',
     )
     parser.add_argument(
         '--fleet-config',
@@ -277,7 +319,7 @@ def main(argv=None) -> None:
     import uvicorn
 
     uvicorn.run(
-        create_app(fleet, FoxgloveCommandClient()),
+        create_app(fleet, VehicleCommandClient()),
         host=args.host or fleet.server.command_api.host,
         port=args.port or fleet.server.command_api.port,
     )

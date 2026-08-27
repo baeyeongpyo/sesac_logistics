@@ -1,45 +1,40 @@
 # Fleet Foxglove Server Bridge
 
-이 번들은 서버에서만 실행한다. 각 차량이 제공하는 Foxglove Bridge WebSocket을
-수신해 ROS 2 Domain 225의 차량별 `/{robot_id}/*` topic으로 재발행하고, 시험용
-`cmd_vel`·Nav2 goal/cancel·통합 `stop` REST API와 Swagger UI를 제공한다.
+이 번들은 서버에서만 실행한다. 각 차량의 Foxglove Bridge WebSocket은 telemetry를
+ROS 2 Domain 225의 차량별 `/{robot_id}/*` topic으로 재발행하는 데만 사용한다.
+명령 API는 차량별 `vehicle_command_api` HTTP endpoint로 `cmd_vel`, Nav2 goal/cancel,
+`stop`을 전달하고 Swagger UI를 제공한다.
 
 ```text
 robot_1 Foxglove Bridge :8766          server / Humble / Domain 225
   /odom, /tf, /amcl_pose  ────────>  worker-robot-1 -> /robot_1/*
-  /cmd_vel  <─────────────────────  Command API :8080
-  /goal_pose <────────────────────  Command API :8080
-  NavigateToPose cancel service <─  Command API :8080
+robot_1 vehicle_command_api :8082  <── Command API :8080
+  /v1/cmd-vel, /v1/navigation/*,
+  /v1/stop
 
 robot_2 Foxglove Bridge :8766          server Foxglove Bridge :8765
   /odom, /tf, /amcl_pose  ────────>  worker-robot-2 -> /robot_2/*
 ```
 
 차량용 Docker 이미지, Compose 파일, ROS topic filter는 이 저장소에 포함하지 않는다.
-차량 주행 컨테이너 또는 차량 운영 환경에서 Foxglove Bridge를 직접 실행해야 한다.
-차량 Bridge는 서버가 연결할 `:8766` endpoint를 제공하고, telemetry 원본 topic을
-노출해야 한다. 원격 명령을 사용할 경우 `clientPublish`는 `/cmd_vel`과 `/goal_pose`만
-허용하고, `services` capability와 hidden
-`/navigate_to_pose/_action/cancel_goal` service만 추가로 허용해야 한다.
+차량 주행 컨테이너 또는 차량 운영 환경에서 Foxglove Bridge와
+`vehicle_command_api`를 실행해야 한다. 차량 Bridge는 서버가 연결할 `:8766` endpoint로
+telemetry 원본 topic을 노출하고, 차량 API는 `:8082`에서 명령을 수신한다.
 
-차량의 `foxglove_bridge` 설정은 최소한 다음 접근 범위를 제공해야 한다. 정규식 문법과
-파라미터 이름은 차량에 설치한 Bridge 버전에서 다시 확인한다.
+차량 Foxglove Bridge는 telemetry 관측 전용으로 운용한다. 명령 토픽 publish, service
+호출 capability는 Fleet Manager 명령 경로에 필요하지 않다. 정규식 문법과 파라미터
+이름은 차량에 설치한 Bridge 버전에서 다시 확인한다.
 
 ```yaml
 foxglove_bridge:
   ros__parameters:
-    capabilities: [clientPublish, services]
-    include_hidden: true
-    client_topic_whitelist:
-      - ^/(cmd_vel|goal_pose)$
-    service_whitelist:
-      - ^/navigate_to_pose/_action/cancel_goal$
+    capabilities: []
 ```
 
 ## 서버 설정
 
-[`config/fleet.yaml`](config/fleet.yaml)은 차량 ID, Foxglove URI, 안전한 속도 명령 상한,
-Nav2 goal topic과 cancel service를 정의한다. `id`가 server ROS topic prefix가 되므로
+[`config/fleet.yaml`](config/fleet.yaml)은 차량 ID, telemetry용 Foxglove URI, 차량 명령
+API URL, 안전한 속도 명령 상한을 정의한다. `id`가 server ROS topic prefix가 되므로
 `robot_1`은 `/robot_1/*`,
 `robot_2`는 `/robot_2/*`로 분리된다.
 
@@ -47,6 +42,8 @@ Nav2 goal topic과 cancel service를 정의한다. `id`가 server ROS topic pref
 SERVER_ROS_DOMAIN_ID=225
 ROBOT_1_FOXGLOVE_URI=ws://192.168.10.215:8766
 ROBOT_2_FOXGLOVE_URI=ws://192.168.10.216:8766
+ROBOT_1_COMMAND_API_URL=http://192.168.10.215:8082
+ROBOT_2_COMMAND_API_URL=http://192.168.10.216:8082
 COMMAND_API_HOST=127.0.0.1
 COMMAND_API_PORT=8080
 ```
@@ -72,10 +69,10 @@ docker build \
 ```
 
 이미지는 ROS 2 Humble/Jammy와 서버 관제용 Foxglove Bridge 0.8.5 commit
-`41f96cc6053632a472d9a821989952771b1117f2`를 사용한다. 차량에 접속하는 server
-worker와 Command API는 차량 Bridge의 `foxglove.sdk.v1`을 우선 요청하고, 기존
-`foxglove.websocket.v1` Bridge는 fallback으로 유지한다. 따라서 차량 Bridge와
-서버 관제용 Bridge의 protocol 버전은 서로 독립적으로 관리한다.
+`41f96cc6053632a472d9a821989952771b1117f2`를 사용한다. 차량 telemetry worker는
+차량 Bridge의 `foxglove.sdk.v1`을 우선 요청하고, 기존
+`foxglove.websocket.v1` Bridge는 fallback으로 유지한다. Command API는 Foxglove
+WebSocket을 열지 않고 차량 HTTP API만 호출한다.
 
 Docker Compose plugin이 있는 서버에서는 다음을 실행한다.
 
@@ -93,6 +90,8 @@ docker run -d --name fleet-command-api --restart unless-stopped \
   -v "$(pwd)/fleet_bridge/config/fleet.yaml:/config/fleet.yaml:ro" \
   -e ROBOT_1_FOXGLOVE_URI=ws://192.168.10.215:8766 \
   -e ROBOT_2_FOXGLOVE_URI=ws://192.168.10.216:8766 \
+  -e ROBOT_1_COMMAND_API_URL=http://192.168.10.215:8082 \
+  -e ROBOT_2_COMMAND_API_URL=http://192.168.10.216:8082 \
   -e COMMAND_API_HOST=0.0.0.0 \
   -e COMMAND_API_PORT=8080 \
   mentorpi-fleet-bridge-server:humble \
@@ -102,35 +101,6 @@ docker run -d --name fleet-command-api --restart unless-stopped \
 서버 관제에는 Foxglove 앱에서 `ws://<server-ip>:8765` 하나만 연결한다. 이 endpoint는
 `/robot_1/*`, `/robot_2/*`, `/fleet/map`만 제공하며 observation-only이다. 서버에서
 topic publish, service 호출, parameter 변경은 허용하지 않는다.
-
-### 차량 Bridge protocol probe
-
-차량 Bridge의 WebSocket protocol을 확인할 때는 컨테이너 내부에 편집기를 설치하거나
-긴 Python 코드를 붙여 넣을 필요가 없다. 서버 호스트의 probe 스크립트를 표준입력으로
-`command-api` 컨테이너에 전달한다. 아래 명령은 연결 및 `serverInfo`만 확인하며 ROS
-명령을 발행하지 않는다.
-
-```bash
-docker compose -f docker-compose.server.yaml exec -T command-api \
-  python3 - < tools/foxglove_sdk_probe.py
-```
-
-`foxglove.sdk.v1`, `clientPublish`, `json`을 지원하는 Bridge에만 정지 명령을 시험할
-때는 아래처럼 명시적으로 옵션을 준다. 이 명령은 `/cmd_vel`에 zero `Twist` 하나를
-발행하므로 차량이 움직이는 중이라면 정지한다.
-
-```bash
-docker compose -f docker-compose.server.yaml exec -T command-api \
-  python3 - --send-zero-cmd-vel < tools/foxglove_sdk_probe.py
-```
-
-기본 URI는 `command-api` 컨테이너의 `ROBOT_2_FOXGLOVE_URI`다. 다른 endpoint를
-확인하려면 다음처럼 `--uri`를 준다.
-
-```bash
-docker compose -f docker-compose.server.yaml exec -T command-api \
-  python3 - --uri ws://<robot-ip>:<port> < tools/foxglove_sdk_probe.py
-```
 
 ## telemetry mapping
 
@@ -270,19 +240,28 @@ docker compose --env-file .env.server -f docker-compose.server.yaml \
   ```
 
 - `POST /api/v1/robots/{robot_id}/nav2/cancel`
+
+  현재 활성 작업 전체를 취소하려면 본문 없이 호출한다. 특정 차량 작업만 취소하려면 차량이
+  goal 응답으로 발급한 `operation_id`를 전달한다.
+
+  ```json
+  {"operation_id":"f1c191f4-4f51-4b49-b748-5577fbf0b4e1"}
+  ```
+
 - `POST /api/v1/robots/{robot_id}/stop`
 
-`cmd_vel`은 `config/fleet.yaml`의 선속도·각속도·유지 시간 상한을 검증한다. 지정한
-`hold_ms` 동안만 command를 발행하며 종료와 오류 경로에서 반드시 zero Twist를 보낸다.
-`nav2/cancel`은 UUID와 timestamp가 모두 0인 `action_msgs/srv/CancelGoal` 요청으로 현재
-NavigateToPose goal을 모두 취소한다. 응답의 `nav2_return_code`와
-`nav2_goals_canceling`으로 차량이 수락한 결과를 확인할 수 있다.
+`cmd_vel`은 `config/fleet.yaml`의 선속도·각속도·유지 시간 상한을 먼저 검증한 뒤 차량의
+`POST /v1/cmd-vel`로 전달한다. 차량 API가 유지 시간 경과 후 zero Twist를 발행한다.
 
-`stop`은 Nav2 cancel과 zero Twist를 동시에 요청한다. 어느 한 경로가 실패해도 다른
-경로를 계속 시도하고, 하나 이상의 전송이 실패하면 결과를 HTTP 503 detail에 남긴다.
-차량 URI 연결 실패, 필요한 `clientPublish`/`services` capability 미허용, hidden cancel
-service 미노출, CDR 미지원도 HTTP 503으로 반환한다. cancel service 광고와 응답은 각각
-최대 5초 기다리며, 최초 `serverInfo` 응답도 5초 안에 오지 않으면 실패한다.
+`nav2/goal_pose`는 기존 `PoseStamped` JSON 요청을 차량 API 형식
+`{frame_id, x, y, yaw}`로 변환하여 `POST /v1/navigation/goals`로 보낸다. 응답의
+`operation_id`, `state`는 차량이 생성·관리하는 작업 식별자와 상태다. `nav2/cancel`은
+`POST /v1/navigation/cancel`, `stop`은 `POST /v1/stop`으로 전달한다. `stop`의 Nav2
+취소·zero Twist·정지 래치는 차량 API가 책임진다.
+
+Fleet Manager는 차량 HTTP API로 자동 폴백하지 않는다. 차량 API 연결 실패는 HTTP 503,
+차량 API가 반환한 409/422/503 등의 상태는 그대로 Fleet Manager 응답으로 전달한다.
+따라서 중복 명령 전송 없이 실패 원인을 호출자에게 확인시킬 수 있다.
 
 ```bash
 curl -X POST http://127.0.0.1:8080/api/v1/robots/robot_1/cmd_vel \
