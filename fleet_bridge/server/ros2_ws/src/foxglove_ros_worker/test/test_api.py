@@ -17,6 +17,7 @@ from fleet_bridge_config.models import (
 from foxglove_ros_worker.api import create_app
 from foxglove_ros_worker.command import (
     VehicleCommandApiError,
+    VehicleCommandResponse,
     VehicleCommandTransportError,
 )
 
@@ -46,12 +47,17 @@ def fleet(*, enabled=True):
 
 
 class RecordingCommandClient:
-    def __init__(self, error=None):
+    def __init__(self, error=None, relay_response=None):
         self.error = error
+        self.relay_response = relay_response or VehicleCommandResponse(
+            status_code=200,
+            body={'vehicle_response': 'preserved'},
+        )
         self.twists = []
         self.goal_poses = []
         self.nav_cancels = []
         self.stops = []
+        self.relay_calls = []
 
     async def send_twist(self, vehicle, linear_x, angular_z, hold_ms):
         if self.error:
@@ -87,6 +93,12 @@ class RecordingCommandClient:
             'cancel_requested': True,
         }
 
+    async def relay(self, vehicle, method, path, payload=None):
+        if self.error:
+            raise self.error
+        self.relay_calls.append((vehicle.id, method, path, payload))
+        return self.relay_response
+
 
 class CommandApiTest(unittest.TestCase):
     @classmethod
@@ -95,8 +107,11 @@ class CommandApiTest(unittest.TestCase):
 
         cls.TestClient = TestClient
 
-    def client(self, *, enabled=True, error=None):
-        commands = RecordingCommandClient(error=error)
+    def client(self, *, enabled=True, error=None, relay_response=None):
+        commands = RecordingCommandClient(
+            error=error,
+            relay_response=relay_response,
+        )
         return self.TestClient(create_app(fleet(enabled=enabled), commands)), commands
 
     def test_cmd_vel_returns_accepted_and_delivers_valid_request(self):
@@ -251,6 +266,74 @@ class CommandApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertIn('NAVIGATION_SERVER_UNAVAILABLE', response.json()['detail'])
 
+    def test_vehicle_command_relay_exposes_every_vehicle_api_path(self):
+        client, commands = self.client(
+            relay_response=VehicleCommandResponse(
+                status_code=202,
+                body={'operation_id': 'vehicle-generated', 'state': 'ACCEPTED'},
+            ),
+        )
+        requests = [
+            ('get', '/healthz', None, '/healthz'),
+            ('get', '/openapi.json', None, '/openapi.json'),
+            ('get', '/operation-status', None, '/v1/operation-status'),
+            ('get', '/vehicle-status', None, '/v1/vehicle-status'),
+            ('post', '/cmd-vel', {
+                'linear_x': 0.1,
+                'angular_z': 0.0,
+                'hold_ms': 300,
+            }, '/v1/cmd-vel'),
+            ('post', '/navigation/goals', {
+                'x': 1.5,
+                'y': 0.0,
+                'yaw': 0.0,
+            }, '/v1/navigation/goals'),
+            ('post', '/navigation/cancel', {
+                'operation_id': 'vehicle-generated',
+            }, '/v1/navigation/cancel'),
+            ('post', '/localization/initial-pose', {
+                'x': 1.5,
+                'y': 0.0,
+                'yaw': 0.0,
+            }, '/v1/localization/initial-pose'),
+            ('post', '/stop', None, '/v1/stop'),
+        ]
+
+        for method, suffix, payload, _vehicle_path in requests:
+            with self.subTest(method=method, suffix=suffix):
+                response = client.request(
+                    method.upper(),
+                    f'/api/v1/vehicle-command/robot_1{suffix}',
+                    json=payload,
+                )
+                self.assertEqual(response.status_code, 202)
+                self.assertEqual(response.json(), {
+                    'operation_id': 'vehicle-generated',
+                    'state': 'ACCEPTED',
+                })
+
+        self.assertEqual(commands.relay_calls, [
+            ('robot_1', method.upper(), vehicle_path, payload)
+            for method, _suffix, payload, vehicle_path in requests
+        ])
+
+    def test_vehicle_command_relay_preserves_vehicle_error_response(self):
+        client, _commands = self.client(
+            error=VehicleCommandApiError(
+                409,
+                'VEHICLE_MOTION_ACTIVE',
+                {'error': 'VEHICLE_MOTION_ACTIVE'},
+            ),
+        )
+
+        response = client.post(
+            '/api/v1/vehicle-command/robot_1/localization/initial-pose',
+            json={'x': 1.5, 'y': 0.0, 'yaw': 0.0},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json(), {'error': 'VEHICLE_MOTION_ACTIVE'})
+
     def test_stop_docs_and_openapi_are_available(self):
         client, commands = self.client()
         stop = client.post('/api/v1/robots/robot_1/stop')
@@ -268,6 +351,15 @@ class CommandApiTest(unittest.TestCase):
         self.assertIn('/api/v1/robots/{robot_id}/nav2/goal_pose', schema['paths'])
         self.assertIn('/api/v1/robots/{robot_id}/nav2/cancel', schema['paths'])
         self.assertIn('/api/v1/robots/{robot_id}/stop', schema['paths'])
+        self.assertIn('/api/v1/vehicle-command/{robot_id}/healthz', schema['paths'])
+        self.assertIn('/api/v1/vehicle-command/{robot_id}/openapi.json', schema['paths'])
+        self.assertIn('/api/v1/vehicle-command/{robot_id}/operation-status', schema['paths'])
+        self.assertIn('/api/v1/vehicle-command/{robot_id}/vehicle-status', schema['paths'])
+        self.assertIn('/api/v1/vehicle-command/{robot_id}/cmd-vel', schema['paths'])
+        self.assertIn('/api/v1/vehicle-command/{robot_id}/navigation/goals', schema['paths'])
+        self.assertIn('/api/v1/vehicle-command/{robot_id}/navigation/cancel', schema['paths'])
+        self.assertIn('/api/v1/vehicle-command/{robot_id}/localization/initial-pose', schema['paths'])
+        self.assertIn('/api/v1/vehicle-command/{robot_id}/stop', schema['paths'])
 
 
 if __name__ == '__main__':

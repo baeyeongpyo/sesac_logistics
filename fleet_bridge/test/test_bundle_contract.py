@@ -240,6 +240,8 @@ class ReadmeContractTest(unittest.TestCase):
             'http://<server-ip>:8080/docs',
             'POST /api/v1/robots/{robot_id}/cmd_vel',
             'POST /api/v1/robots/{robot_id}/stop',
+            'GET /api/v1/vehicle-command/{robot_id}/vehicle-status',
+            'POST /api/v1/vehicle-command/{robot_id}/localization/initial-pose',
             'clientPublish',
             'zero Twist',
             '8766',

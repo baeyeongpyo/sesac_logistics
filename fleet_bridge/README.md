@@ -3,7 +3,7 @@
 이 번들은 서버에서만 실행한다. 각 차량의 Foxglove Bridge WebSocket은 telemetry를
 ROS 2 Domain 225의 차량별 `/{robot_id}/*` topic으로 재발행하는 데만 사용한다.
 명령 API는 차량별 `vehicle_command_api` HTTP endpoint로 `cmd_vel`, Nav2 goal/cancel,
-`stop`을 전달하고 Swagger UI를 제공한다.
+초기 위치, 상태 조회, `stop`을 전달하고 Swagger UI를 제공한다.
 
 ```text
 robot_1 Foxglove Bridge :8766          server / Humble / Domain 225
@@ -276,6 +276,46 @@ curl -X POST http://127.0.0.1:8080/api/v1/robots/robot_1/nav2/cancel
 
 curl -X POST http://127.0.0.1:8080/api/v1/robots/robot_1/stop
 ```
+
+### 차량 API 전체 중계
+
+차량 `vehicle_command_api`의 모든 공개 경로는 아래 짧은 Fleet Manager 경로로도 사용할 수
+있다. `{robot_id}`는 `config/fleet.yaml`에 등록된 차량을 선택하며, Fleet Manager는 해당
+차량의 `command_api_url`로만 요청을 전달한다. 이 경로는 차량 API의 요청 본문, HTTP 상태
+코드, JSON 응답 본문을 바꾸지 않는다. 따라서 차량 API의 OpenAPI 문서에서 정의한
+차량-native 요청 형식을 그대로 사용한다.
+
+| Fleet Manager 경로 | 차량 API 경로 |
+| --- | --- |
+| `GET /api/v1/vehicle-command/{robot_id}/healthz` | `GET /healthz` |
+| `GET /api/v1/vehicle-command/{robot_id}/openapi.json` | `GET /openapi.json` |
+| `GET /api/v1/vehicle-command/{robot_id}/operation-status` | `GET /v1/operation-status` |
+| `GET /api/v1/vehicle-command/{robot_id}/vehicle-status` | `GET /v1/vehicle-status` |
+| `POST /api/v1/vehicle-command/{robot_id}/cmd-vel` | `POST /v1/cmd-vel` |
+| `POST /api/v1/vehicle-command/{robot_id}/navigation/goals` | `POST /v1/navigation/goals` |
+| `POST /api/v1/vehicle-command/{robot_id}/navigation/cancel` | `POST /v1/navigation/cancel` |
+| `POST /api/v1/vehicle-command/{robot_id}/localization/initial-pose` | `POST /v1/localization/initial-pose` |
+| `POST /api/v1/vehicle-command/{robot_id}/stop` | `POST /v1/stop` |
+
+예를 들어 차량-native Nav2 목표와 AMCL 초기 위치 요청은 다음과 같다. 주행 중
+`initial-pose`가 차량에서 `409 {"error":"VEHICLE_MOTION_ACTIVE"}`로 거부되면 이 응답도
+Fleet Manager에서 동일하게 반환된다. 호출자는 먼저 별도의 `stop`을 성공시킨 뒤 초기 위치를
+다시 요청해야 한다.
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/vehicle-command/robot_1/navigation/goals \
+  -H 'content-type: application/json' \
+  -d '{"x":1.0,"y":2.0,"yaw":0.0}'
+
+curl -X POST http://127.0.0.1:8080/api/v1/vehicle-command/robot_1/localization/initial-pose \
+  -H 'content-type: application/json' \
+  -d '{"x":1.0,"y":2.0,"yaw":0.0}'
+
+curl http://127.0.0.1:8080/api/v1/vehicle-command/robot_1/vehicle-status
+```
+
+기존 `/api/v1/robots/{robot_id}/...` 명령 경로는 호환성을 위해 유지한다. 기존 경로는
+Fleet Manager가 속도 상한 검증 또는 `PoseStamped` 변환을 수행한 뒤 차량 API에 전달한다.
 
 ## 상태와 네트워크 확인
 

@@ -4,7 +4,8 @@ import argparse
 import os
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import Body, FastAPI, HTTPException, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from fleet_bridge_config.loader import load_fleet
@@ -175,6 +176,137 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
     @app.get('/healthz', tags=['health'])
     async def healthz() -> dict[str, str]:
         return {'status': 'ok'}
+
+    async def relay_vehicle_command(
+        robot_id: str,
+        method: str,
+        vehicle_path: str,
+        payload: Any | None = None,
+    ) -> JSONResponse:
+        """Forward one allowlisted vehicle API request without changing its result."""
+
+        vehicle = _active_vehicle(fleet, robot_id)
+        try:
+            response = await command_client.relay(
+                vehicle,
+                method,
+                vehicle_path,
+                payload,
+            )
+        except VehicleCommandApiError as error:
+            return JSONResponse(
+                status_code=error.status_code,
+                content=error.body,
+            )
+        except (
+            ConnectionError,
+            OSError,
+            VehicleCommandTransportError,
+        ) as error:
+            raise _delivery_error(error) from error
+        return JSONResponse(status_code=response.status_code, content=response.body)
+
+    @app.get(
+        '/api/v1/vehicle-command/{robot_id}/healthz',
+        tags=['vehicle-command relay'],
+        summary='Relay vehicle command API health status',
+    )
+    async def vehicle_command_healthz(robot_id: str) -> JSONResponse:
+        return await relay_vehicle_command(robot_id, 'GET', '/healthz')
+
+    @app.get(
+        '/api/v1/vehicle-command/{robot_id}/openapi.json',
+        tags=['vehicle-command relay'],
+        summary='Relay the vehicle command API OpenAPI document',
+    )
+    async def vehicle_command_openapi(robot_id: str) -> JSONResponse:
+        return await relay_vehicle_command(robot_id, 'GET', '/openapi.json')
+
+    @app.get(
+        '/api/v1/vehicle-command/{robot_id}/operation-status',
+        tags=['vehicle-command relay'],
+        summary='Relay current vehicle operation status',
+    )
+    async def vehicle_operation_status(robot_id: str) -> JSONResponse:
+        return await relay_vehicle_command(robot_id, 'GET', '/v1/operation-status')
+
+    @app.get(
+        '/api/v1/vehicle-command/{robot_id}/vehicle-status',
+        tags=['vehicle-command relay'],
+        summary='Relay vehicle status including battery and operation state',
+    )
+    async def vehicle_status(robot_id: str) -> JSONResponse:
+        return await relay_vehicle_command(robot_id, 'GET', '/v1/vehicle-status')
+
+    @app.post(
+        '/api/v1/vehicle-command/{robot_id}/cmd-vel',
+        tags=['vehicle-command relay'],
+        summary='Relay a vehicle-native cmd_vel request',
+    )
+    async def vehicle_cmd_vel(
+        robot_id: str,
+        payload: Any = Body(default=None),
+    ) -> JSONResponse:
+        return await relay_vehicle_command(robot_id, 'POST', '/v1/cmd-vel', payload)
+
+    @app.post(
+        '/api/v1/vehicle-command/{robot_id}/navigation/goals',
+        tags=['vehicle-command relay'],
+        summary='Relay a vehicle-native Nav2 goal request',
+    )
+    async def vehicle_navigation_goal(
+        robot_id: str,
+        payload: Any = Body(default=None),
+    ) -> JSONResponse:
+        return await relay_vehicle_command(
+            robot_id,
+            'POST',
+            '/v1/navigation/goals',
+            payload,
+        )
+
+    @app.post(
+        '/api/v1/vehicle-command/{robot_id}/navigation/cancel',
+        tags=['vehicle-command relay'],
+        summary='Relay a vehicle-native Nav2 cancel request',
+    )
+    async def vehicle_navigation_cancel(
+        robot_id: str,
+        payload: Any = Body(default=None),
+    ) -> JSONResponse:
+        return await relay_vehicle_command(
+            robot_id,
+            'POST',
+            '/v1/navigation/cancel',
+            payload,
+        )
+
+    @app.post(
+        '/api/v1/vehicle-command/{robot_id}/localization/initial-pose',
+        tags=['vehicle-command relay'],
+        summary='Relay a vehicle-native AMCL initial-pose request',
+    )
+    async def vehicle_initial_pose(
+        robot_id: str,
+        payload: Any = Body(default=None),
+    ) -> JSONResponse:
+        return await relay_vehicle_command(
+            robot_id,
+            'POST',
+            '/v1/localization/initial-pose',
+            payload,
+        )
+
+    @app.post(
+        '/api/v1/vehicle-command/{robot_id}/stop',
+        tags=['vehicle-command relay'],
+        summary='Relay a vehicle-native stop request',
+    )
+    async def vehicle_stop(
+        robot_id: str,
+        payload: Any = Body(default=None),
+    ) -> JSONResponse:
+        return await relay_vehicle_command(robot_id, 'POST', '/v1/stop', payload)
 
     @app.post(
         '/api/v1/robots/{robot_id}/cmd_vel',

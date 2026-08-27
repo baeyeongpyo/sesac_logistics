@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 import json
 import math
 from typing import Any
@@ -18,14 +19,28 @@ class CommandValidationError(ValueError):
 class VehicleCommandApiError(RuntimeError):
     """The vehicle API returned a non-success HTTP response."""
 
-    def __init__(self, status_code: int, detail: str) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        detail: str,
+        body: dict[str, Any] | None = None,
+    ) -> None:
         self.status_code = status_code
         self.detail = detail
+        self.body = body or {'error': detail}
         super().__init__(detail)
 
 
 class VehicleCommandTransportError(RuntimeError):
     """The vehicle API could not be reached or returned invalid JSON."""
+
+
+@dataclass(frozen=True)
+class VehicleCommandResponse:
+    """The exact successful HTTP status and JSON object returned by a vehicle."""
+
+    status_code: int
+    body: dict[str, Any]
 
 
 def validate_command(
@@ -61,8 +76,10 @@ class VehicleCommandClient:
     def __init__(
         self,
         *,
-        request: Callable[[str, str, dict[str, Any] | None], Awaitable[dict[str, Any]]]
-        | None = None,
+        request: Callable[
+            [str, str, Any | None],
+            Awaitable[VehicleCommandResponse | dict[str, Any]],
+        ] | None = None,
         timeout_sec: float = 5.0,
     ) -> None:
         if timeout_sec <= 0:
@@ -110,41 +127,62 @@ class VehicleCommandClient:
     async def stop(self, vehicle: VehicleConfig) -> dict[str, Any]:
         return await self._post(vehicle, '/v1/stop', None)
 
+    async def relay(
+        self,
+        vehicle: VehicleConfig,
+        method: str,
+        path: str,
+        payload: Any | None = None,
+    ) -> VehicleCommandResponse:
+        response = await self._request(
+            method,
+            f'{vehicle.command_api_url.rstrip("/")}{path}',
+            payload,
+        )
+        if isinstance(response, VehicleCommandResponse):
+            return response
+        if isinstance(response, dict):
+            return VehicleCommandResponse(status_code=200, body=response)
+        raise VehicleCommandTransportError('vehicle command API returned a non-object response')
+
     async def _post(
         self,
         vehicle: VehicleConfig,
         path: str,
-        payload: dict[str, Any] | None,
+        payload: Any | None,
     ) -> dict[str, Any]:
-        return await self._request(
-            'POST',
-            f'{vehicle.command_api_url.rstrip("/")}{path}',
-            payload,
-        )
+        return (await self.relay(vehicle, 'POST', path, payload)).body
 
     async def _default_request(
         self,
         method: str,
         url: str,
-        payload: dict[str, Any] | None,
-    ) -> dict[str, Any]:
+        payload: Any | None,
+    ) -> VehicleCommandResponse:
         return await asyncio.to_thread(self._request_sync, method, url, payload)
 
     def _request_sync(
         self,
         method: str,
         url: str,
-        payload: dict[str, Any] | None,
-    ) -> dict[str, Any]:
+        payload: Any | None,
+    ) -> VehicleCommandResponse:
         data = None if payload is None else json.dumps(payload).encode('utf-8')
         headers = {} if data is None else {'Content-Type': 'application/json'}
         request = Request(url, data=data, headers=headers, method=method)
         try:
             with urlopen(request, timeout=self._timeout_sec) as response:
-                return self._decode_response(response.read(), response.status)
+                return VehicleCommandResponse(
+                    status_code=response.status,
+                    body=self._decode_response(response.read(), response.status),
+                )
         except HTTPError as error:
-            detail = self._error_detail(error.read())
-            raise VehicleCommandApiError(error.code, detail) from error
+            try:
+                body = self._error_body(error.read())
+            finally:
+                error.close()
+            detail = self._error_detail(body)
+            raise VehicleCommandApiError(error.code, detail, body) from error
         except (OSError, URLError) as error:
             raise VehicleCommandTransportError(
                 f'vehicle command API unavailable: {error}',
@@ -165,13 +203,19 @@ class VehicleCommandClient:
         return response
 
     @staticmethod
-    def _error_detail(body: bytes) -> str:
+    def _error_body(body: bytes) -> dict[str, Any]:
         try:
             response = json.loads(body)
         except json.JSONDecodeError:
-            return 'vehicle command API returned an error response'
-        if isinstance(response, dict) and isinstance(response.get('error'), str):
-            return response['error']
+            return {}
+        if isinstance(response, dict):
+            return response
+        return {}
+
+    @staticmethod
+    def _error_detail(body: dict[str, Any]) -> str:
+        if isinstance(body.get('error'), str):
+            return body['error']
         return 'vehicle command API returned an error response'
 
     @staticmethod

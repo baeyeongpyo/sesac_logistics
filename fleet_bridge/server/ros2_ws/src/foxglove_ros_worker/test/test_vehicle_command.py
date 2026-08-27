@@ -13,7 +13,7 @@ PACKAGE = Path(__file__).resolve().parents[1]
 COMMON = PACKAGE.parents[3] / 'common' / 'fleet_bridge_config'
 sys.path[:0] = [str(COMMON), str(PACKAGE)]
 
-from foxglove_ros_worker.command import VehicleCommandClient
+from foxglove_ros_worker.command import VehicleCommandApiError, VehicleCommandClient
 
 
 class RecordingRequest:
@@ -143,6 +143,85 @@ class VehicleCommandClientTest(unittest.TestCase):
             '/v1/cmd-vel',
             {'linear_x': 0.1, 'angular_z': 0.0, 'hold_ms': 300},
         )])
+
+    def test_relay_preserves_vehicle_status_code_and_response_body(self):
+        """Changing a relayed vehicle response must fail Fleet Manager API parity."""
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b'{"robot_id":"robot_2","operation":{"state":"IDLE"}}'
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format, *_args):
+                return
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        vehicle = SimpleNamespace(
+            id='robot_2',
+            command_api_url=f'http://127.0.0.1:{server.server_port}',
+            command=self.vehicle.command,
+        )
+        try:
+            response = asyncio.run(VehicleCommandClient().relay(
+                vehicle,
+                'GET',
+                '/v1/vehicle-status',
+            ))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.body, {
+            'robot_id': 'robot_2',
+            'operation': {'state': 'IDLE'},
+        })
+
+    def test_relay_preserves_vehicle_error_status_and_body(self):
+        """Replacing a vehicle error response must fail Fleet Manager API parity."""
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = b'{"error":"VEHICLE_MOTION_ACTIVE"}'
+                self.send_response(409)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format, *_args):
+                return
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        vehicle = SimpleNamespace(
+            id='robot_2',
+            command_api_url=f'http://127.0.0.1:{server.server_port}',
+            command=self.vehicle.command,
+        )
+        try:
+            with self.assertRaises(VehicleCommandApiError) as raised:
+                asyncio.run(VehicleCommandClient().relay(
+                    vehicle,
+                    'POST',
+                    '/v1/localization/initial-pose',
+                    {'x': 1.5, 'y': 0.0, 'yaw': 0.0},
+                ))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(raised.exception.detail, 'VEHICLE_MOTION_ACTIVE')
+        self.assertEqual(raised.exception.body, {'error': 'VEHICLE_MOTION_ACTIVE'})
+        self.assertTrue(raised.exception.__cause__.closed)
 
 
 if __name__ == '__main__':
