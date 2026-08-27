@@ -314,6 +314,9 @@ class YoloSymbolSeg(Node):
         self.depth_camera_to_fork_tip_offset_cm = float(
             pose_config.get("depth_camera_to_fork_tip_offset_cm", 14.0)
         )
+        self.individual_tag_depth_max_age_sec = float(
+            pose_config.get("individual_tag_depth_max_age_sec", 0.35)
+        )
         self.friction_coefficient = float(pose_config.get("friction_coefficient", 1.0))
         self.yaw_bias_deg = float(
             pose_config.get("yaw_bias_deg", self.get_parameter("yaw_bias_deg").value)
@@ -769,6 +772,54 @@ class YoloSymbolSeg(Node):
             "distance_reference": "fork tip to target front face",
         }
 
+    def attach_individual_tag_depth(self, detections, rgb_stamp_ns):
+        """Attach registered center depth to every visible symbol detection."""
+        with self.lock:
+            depth = None if self.latest_depth is None else self.latest_depth.copy()
+            depth_stamp_ns = self.latest_depth_stamp_ns
+            matrix = None if self.camera_matrix is None else self.camera_matrix.copy()
+        maximum_age_ns = int(
+            self.individual_tag_depth_max_age_sec * 1_000_000_000
+        )
+        if (
+            depth is None or matrix is None or depth_stamp_ns <= 0
+            or abs(depth_stamp_ns - rgb_stamp_ns) > maximum_age_ns
+        ):
+            return
+        fx, cx = float(matrix[0, 0]), float(matrix[0, 2])
+        for detection in detections:
+            if detection.get("class") == "pallet":
+                continue
+            u, v = (round(value) for value in detection_center(detection))
+            y0, y1 = max(0, v - 2), min(depth.shape[0], v + 3)
+            x0, x1 = max(0, u - 2), min(depth.shape[1], u + 3)
+            if y0 >= y1 or x0 >= x1:
+                continue
+            values = depth[y0:y1, x0:x1].astype(np.float32).reshape(-1)
+            if depth.dtype == np.uint16:
+                values *= 0.001
+            values = values[
+                np.isfinite(values) & (values >= 0.15) & (values <= 6.0)
+            ]
+            if values.size < 5:
+                continue
+            camera_depth_m = float(np.median(values))
+            ground_forward_m = camera_depth_m * math.cos(
+                math.radians(self.camera_pitch_deg)
+            )
+            forward_distance_cm = (
+                ground_forward_m * 100.0 - self.depth_camera_to_fork_tip_offset_cm
+            )
+            horizontal_m = (float(u) - cx) * camera_depth_m / fx
+            detection["depth"] = {
+                "camera_depth_m": camera_depth_m,
+                "forward_distance_cm": forward_distance_cm,
+                "bearing_deg": math.degrees(
+                    math.atan2(horizontal_m, camera_depth_m)
+                ),
+                "distance_reference": "fork tip to tag face",
+            }
+
     def start_telemetry(self, session):
         safe_session = re.sub(r"[^A-Za-z0-9_.-]", "_", session)
         directory = str(self.get_parameter("telemetry_dir").value)
@@ -984,6 +1035,7 @@ class YoloSymbolSeg(Node):
             cv2.rectangle(annotated, (bx1, by1), (bx2, by2), color, 2)
             cv2.putText(annotated, f"{NAMES[class_id]} {score:.2f}", (bx1, max(20, by1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
             results.append({"class": NAMES[class_id], "confidence": score, "box": box})
+        self.attach_individual_tag_depth(results, source_stamp_ns)
         map_entities = [
             entity for entity in pallet_entities(results)
             if entity["complete"]
