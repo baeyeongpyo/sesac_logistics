@@ -269,8 +269,13 @@ class InventoryStore:
                     "SELECT COALESCE(SUM(quantity), 0) AS occupied FROM pallet_stocks WHERE zone_id = ?",
                     (zone.zone_id,),
                 ).fetchone()["occupied"]
-                if occupied > zone.capacity:
-                    raise ConflictError("zone capacity cannot be lower than current stock")
+                inbound_reservations = self._destination_reservation_count(
+                    connection, zone.zone_id
+                )
+                if occupied + inbound_reservations > zone.capacity:
+                    raise ConflictError(
+                        "zone capacity cannot be lower than current stock and inbound reservations"
+                    )
             connection.execute(
                 """
                 INSERT INTO zones (
@@ -337,7 +342,10 @@ class InventoryStore:
                     """,
                     (zone_id, payload_type.value),
                 ).fetchone()["quantity"]
-                if other_quantity + quantity > zone["capacity"]:
+                inbound_reservations = self._destination_reservation_count(
+                    connection, zone_id
+                )
+                if other_quantity + quantity + inbound_reservations > zone["capacity"]:
                     raise ConflictError("zone capacity would be exceeded")
             existing = connection.execute(
                 """
@@ -405,14 +413,11 @@ class InventoryStore:
 
     def create_operation(
         self,
-        operation_id: str,
         payload_type: PayloadType,
         source_zone_id: str,
         destination_zone_id: str,
         priority: int = 0,
     ) -> Operation:
-        if not operation_id:
-            raise ValueError("operation_id must not be empty")
         if source_zone_id == destination_zone_id:
             raise ValueError("source and destination zones must differ")
 
@@ -420,6 +425,19 @@ class InventoryStore:
         with self._write_connection() as connection:
             self._require_zone(connection, source_zone_id)
             self._require_zone(connection, destination_zone_id)
+            destination = connection.execute(
+                "SELECT capacity FROM zones WHERE zone_id = ?", (destination_zone_id,)
+            ).fetchone()
+            if destination["capacity"] is not None:
+                occupied = connection.execute(
+                    "SELECT COALESCE(SUM(quantity), 0) AS occupied FROM pallet_stocks WHERE zone_id = ?",
+                    (destination_zone_id,),
+                ).fetchone()["occupied"]
+                inbound_reservations = self._destination_reservation_count(
+                    connection, destination_zone_id
+                )
+                if occupied + inbound_reservations + 1 > destination["capacity"]:
+                    raise ConflictError("destination zone capacity is full")
             reservation = connection.execute(
                 """
                 UPDATE pallet_stocks
@@ -436,6 +454,7 @@ class InventoryStore:
                 raise InsufficientStockError(
                     f"no available {payload_type.value} stock in {source_zone_id}"
                 )
+            operation_id = str(uuid4())
             try:
                 connection.execute(
                     """
@@ -876,6 +895,23 @@ class InventoryStore:
         ).fetchone()
         if row is None:
             raise NotFoundError(f"unknown zone: {zone_id}")
+
+    @staticmethod
+    def _destination_reservation_count(
+        connection: sqlite3.Connection, zone_id: str
+    ) -> int:
+        return connection.execute(
+            """
+            SELECT COUNT(*) AS reserved
+            FROM transport_operations
+            WHERE destination_zone_id = ?
+              AND status IN (
+                  'QUEUED', 'TO_PICK', 'PICKING', 'TO_PLACE', 'PLACING',
+                  'RECOVERY_REQUIRED'
+              )
+            """,
+            (zone_id,),
+        ).fetchone()["reserved"]
 
     @staticmethod
     def _operation_from_row(row: sqlite3.Row) -> Operation:

@@ -1,6 +1,7 @@
 from pathlib import Path
 import tempfile
 import unittest
+from uuid import UUID
 import warnings
 
 from fastapi.testclient import TestClient
@@ -47,22 +48,21 @@ class InventoryApiTest(unittest.TestCase):
             ).status_code,
             200,
         )
-        self.assertEqual(
-            self.client.post(
-                "/api/v1/operations",
-                json={
-                    "operation_id": "op-1",
-                    "payload_type": "FRESH",
-                    "source_zone_id": "source",
-                    "destination_zone_id": "destination",
-                    "priority": 0,
-                },
-            ).status_code,
-            201,
+        operation_response = self.client.post(
+            "/api/v1/operations",
+            json={
+                "payload_type": "FRESH",
+                "source_zone_id": "source",
+                "destination_zone_id": "destination",
+                "priority": 0,
+            },
         )
+        self.assertEqual(operation_response.status_code, 201)
+        self.operation_id = operation_response.json()["operation_id"]
         self.assertEqual(
             self.client.post(
-                "/api/v1/operations/op-1/assignments", json={"robot_id": "robot_1"}
+                f"/api/v1/operations/{self.operation_id}/assignments",
+                json={"robot_id": "robot_1"},
             ).status_code,
             200,
         )
@@ -75,11 +75,11 @@ class InventoryApiTest(unittest.TestCase):
         self,
     ) -> None:
         response = self.client.post(
-            "/api/v1/operations/op-1/pick-completions",
+            f"/api/v1/operations/{self.operation_id}/pick-completions",
             json={"robot_id": "robot_1", "idempotency_key": "pick-op-1"},
         )
         repeated = self.client.post(
-            "/api/v1/operations/op-1/pick-completions",
+            f"/api/v1/operations/{self.operation_id}/pick-completions",
             json={"robot_id": "robot_1", "idempotency_key": "pick-op-1"},
         )
 
@@ -94,17 +94,32 @@ class InventoryApiTest(unittest.TestCase):
         self.assertEqual(response.json()["action"], "PICK")
         self.assertEqual(response.json()["zone_id"], "source")
 
+    def test_operation_creation_generates_an_inventory_owned_uuid(self) -> None:
+        response = self.client.post(
+            "/api/v1/operations",
+            json={
+                "payload_type": "FRESH",
+                "source_zone_id": "source",
+                "destination_zone_id": "destination",
+                "priority": 5,
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        UUID(response.json()["operation_id"])
+        self.assertEqual(response.json()["status"], "QUEUED")
+
     def test_place_completion_endpoint_clears_robot_load(self) -> None:
         self.assertEqual(
             self.client.post(
-                "/api/v1/operations/op-1/pick-completions",
+                f"/api/v1/operations/{self.operation_id}/pick-completions",
                 json={"robot_id": "robot_1", "idempotency_key": "pick-op-1"},
             ).status_code,
             200,
         )
 
         response = self.client.post(
-            "/api/v1/operations/op-1/place-completions",
+            f"/api/v1/operations/{self.operation_id}/place-completions",
             json={"robot_id": "robot_1", "idempotency_key": "place-op-1"},
         )
 
@@ -134,7 +149,8 @@ class InventoryApiTest(unittest.TestCase):
 
     def test_conflicting_assignment_returns_http_409(self) -> None:
         response = self.client.post(
-            "/api/v1/operations/op-1/assignments", json={"robot_id": "robot_2"}
+            f"/api/v1/operations/{self.operation_id}/assignments",
+            json={"robot_id": "robot_2"},
         )
 
         self.assertEqual(response.status_code, 409)

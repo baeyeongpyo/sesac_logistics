@@ -57,10 +57,12 @@ class InventoryStoreTest(unittest.TestCase):
     def test_pick_moves_reserved_stock_to_robot_once_when_notification_is_retried(
         self,
     ) -> None:
-        store, _ = self._assigned_fresh_operation()
+        store, assigned = self._assigned_fresh_operation()
 
-        event = store.complete_pick("op-1", "robot_1", "pick-op-1")
-        duplicate = store.complete_pick("op-1", "robot_1", "pick-op-1")
+        event = store.complete_pick(assigned.operation_id, "robot_1", "pick-op-1")
+        duplicate = store.complete_pick(
+            assigned.operation_id, "robot_1", "pick-op-1"
+        )
 
         self.assertEqual(event.event_id, duplicate.event_id)
         self.assertEqual(store.stock("source", PayloadType.FRESH).quantity, 2)
@@ -71,13 +73,13 @@ class InventoryStoreTest(unittest.TestCase):
     def test_place_returns_robot_to_empty_state_and_increases_destination_stock(
         self,
     ) -> None:
-        store = self._picked_fresh_operation()
+        store, operation_id = self._picked_fresh_operation()
 
-        store.complete_place("op-1", "robot_1", "place-op-1")
+        store.complete_place(operation_id, "robot_1", "place-op-1")
 
         self.assertEqual(store.stock("destination", PayloadType.FRESH).quantity, 1)
         self.assertFalse(store.get_robot_pallet_state("robot_1").has_pallet)
-        self.assertEqual(store.operation("op-1").status, OperationStatus.COMPLETED)
+        self.assertEqual(store.operation(operation_id).status, OperationStatus.COMPLETED)
 
     def test_second_operation_cannot_reserve_the_same_last_pallet(self) -> None:
         store = InventoryStore(self.database_path)
@@ -87,29 +89,84 @@ class InventoryStoreTest(unittest.TestCase):
         store.upsert_zone(Zone("dest-b", "B", "map", 2.0, 0.0, 0.0, 8, True))
         store.set_stock("source", PayloadType.EMPTY, 1)
 
-        store.create_operation("op-a", PayloadType.EMPTY, "source", "dest-a")
+        store.create_operation(PayloadType.EMPTY, "source", "dest-a")
         with self.assertRaises(InsufficientStockError):
-            store.create_operation("op-b", PayloadType.EMPTY, "source", "dest-b")
+            store.create_operation(PayloadType.EMPTY, "source", "dest-b")
 
         stock = store.stock("source", PayloadType.EMPTY)
         self.assertEqual(stock.quantity, 1)
         self.assertEqual(stock.reserved_quantity, 1)
 
-    def test_full_destination_keeps_robot_loaded_and_operation_ready_to_place(
+    def test_destination_capacity_reserves_a_slot_when_an_operation_is_created(
         self,
     ) -> None:
-        store, _ = self._assigned_fresh_operation()
+        store = InventoryStore(self.database_path)
+        store.initialize()
+        store.upsert_zone(Zone("source", "Source", "map", 0.0, 0.0, 0.0, 8, True))
         store.upsert_zone(
             Zone("destination", "Destination", "map", 2.0, 0.0, 0.0, 1, True)
         )
-        store.set_stock("destination", PayloadType.NORMAL, 1)
-        store.complete_pick("op-1", "robot_1", "pick-op-1")
+        store.set_stock("source", PayloadType.FRESH, 2)
+
+        store.create_operation(PayloadType.FRESH, "source", "destination")
+
+        with self.assertRaisesRegex(ConflictError, "destination zone capacity is full"):
+            store.create_operation(PayloadType.FRESH, "source", "destination")
+
+        self.assertEqual(store.stock("source", PayloadType.FRESH).reserved_quantity, 1)
+
+    def test_stock_update_cannot_consume_a_destination_slot_reserved_by_an_operation(
+        self,
+    ) -> None:
+        store = InventoryStore(self.database_path)
+        store.initialize()
+        store.upsert_zone(Zone("source", "Source", "map", 0.0, 0.0, 0.0, 8, True))
+        store.upsert_zone(
+            Zone("destination", "Destination", "map", 2.0, 0.0, 0.0, 1, True)
+        )
+        store.set_stock("source", PayloadType.FRESH, 1)
+        store.create_operation(PayloadType.FRESH, "source", "destination")
+
+        with self.assertRaisesRegex(ConflictError, "zone capacity would be exceeded"):
+            store.set_stock("destination", PayloadType.FRESH, 1)
+
+    def test_zone_capacity_cannot_be_reduced_below_inbound_reservations(self) -> None:
+        store = InventoryStore(self.database_path)
+        store.initialize()
+        store.upsert_zone(Zone("source", "Source", "map", 0.0, 0.0, 0.0, 8, True))
+        store.upsert_zone(
+            Zone("destination", "Destination", "map", 2.0, 0.0, 0.0, None, True)
+        )
+        store.set_stock("source", PayloadType.FRESH, 1)
+        store.create_operation(PayloadType.FRESH, "source", "destination")
+
+        with self.assertRaisesRegex(
+            ConflictError, "current stock and inbound reservations"
+        ):
+            store.upsert_zone(
+                Zone("destination", "Destination", "map", 2.0, 0.0, 0.0, 0, True)
+            )
+
+    def test_destination_slot_remains_reserved_after_pick(
+        self,
+    ) -> None:
+        store, assigned = self._assigned_fresh_operation()
+        store.upsert_zone(
+            Zone("destination", "Destination", "map", 2.0, 0.0, 0.0, 1, True)
+        )
 
         with self.assertRaises(ConflictError):
-            store.complete_place("op-1", "robot_1", "place-op-1")
+            store.set_stock("destination", PayloadType.NORMAL, 1)
+
+        store.complete_pick(assigned.operation_id, "robot_1", "pick-op-1")
+
+        with self.assertRaises(ConflictError):
+            store.set_stock("destination", PayloadType.NORMAL, 1)
 
         self.assertTrue(store.get_robot_pallet_state("robot_1").has_pallet)
-        self.assertEqual(store.operation("op-1").status, OperationStatus.TO_PLACE)
+        self.assertEqual(
+            store.operation(assigned.operation_id).status, OperationStatus.TO_PLACE
+        )
 
     def test_stock_cannot_be_lowered_below_reserved_quantity(self) -> None:
         store, _ = self._assigned_fresh_operation()
@@ -162,16 +219,14 @@ class InventoryStoreTest(unittest.TestCase):
             Zone("destination", "Destination", "map", 2.0, 0.0, 0.0, 8, True)
         )
         store.set_stock("source", PayloadType.FRESH, 3)
-        operation = store.create_operation(
-            "op-1", PayloadType.FRESH, "source", "destination"
-        )
+        operation = store.create_operation(PayloadType.FRESH, "source", "destination")
         assigned = store.assign_operation(operation.operation_id, "robot_1")
         return store, assigned
 
-    def _picked_fresh_operation(self) -> InventoryStore:
-        store, _ = self._assigned_fresh_operation()
-        store.complete_pick("op-1", "robot_1", "pick-op-1")
-        return store
+    def _picked_fresh_operation(self) -> tuple[InventoryStore, str]:
+        store, assigned = self._assigned_fresh_operation()
+        store.complete_pick(assigned.operation_id, "robot_1", "pick-op-1")
+        return store, assigned.operation_id
 
 
 if __name__ == "__main__":

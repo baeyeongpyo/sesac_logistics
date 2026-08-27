@@ -40,11 +40,16 @@ class StockRequest(RequestModel):
 
 
 class OperationRequest(RequestModel):
-    operation_id: str = Field(min_length=1)
-    payload_type: PayloadType
-    source_zone_id: str = Field(min_length=1)
-    destination_zone_id: str = Field(min_length=1)
-    priority: int = 0
+    payload_type: PayloadType = Field(
+        description="운송할 파렛트 적재물 유형입니다."
+    )
+    source_zone_id: str = Field(
+        min_length=1, description="파렛트를 픽업할 출발 zone ID입니다."
+    )
+    destination_zone_id: str = Field(
+        min_length=1, description="파렛트를 place할 목적지 zone ID입니다."
+    )
+    priority: int = Field(default=0, description="값이 클수록 먼저 처리하는 우선순위입니다.")
 
 
 class AssignmentRequest(RequestModel):
@@ -124,10 +129,17 @@ def create_app(database_path: str) -> FastAPI:
     def list_stocks(request: Request) -> list[dict]:
         return [_response(stock) for stock in _store(request).list_stocks()]
 
-    @app.post("/api/v1/operations", status_code=status.HTTP_201_CREATED)
+    @app.post(
+        "/api/v1/operations",
+        status_code=status.HTTP_201_CREATED,
+        summary="파렛트 운송 작업 생성 및 양쪽 zone 예약",
+        description=(
+            "inventory가 operation_id UUID를 생성합니다. source 파렛트 1개와 "
+            "destination 적치 슬롯 1개를 하나의 트랜잭션으로 예약합니다."
+        ),
+    )
     def create_operation(body: OperationRequest, request: Request) -> dict:
         operation = _store(request).create_operation(
-            body.operation_id,
             body.payload_type,
             body.source_zone_id,
             body.destination_zone_id,
