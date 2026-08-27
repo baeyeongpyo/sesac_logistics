@@ -358,6 +358,21 @@ def test_clipped_slot_grid_reverses_slowly_for_camera_view(monkeypatch):
     assert commands == [(-0.04, 0.0, 0.0)]
 
 
+@pytest.mark.parametrize("reason", [
+    "slot_grid_not_found",
+    "slot_grid_too_small",
+    "slot_grid_corners",
+    "slot_grid_clipped",
+    "slot_grid_pose_reprojection",
+])
+def test_all_slot_view_failures_request_same_recovery(reason):
+    assert AutoDockNode.slot_view_error_recoverable(reason) is True
+
+
+def test_non_view_slot_error_does_not_request_motion():
+    assert AutoDockNode.slot_view_error_recoverable("empty_image") is False
+
+
 def test_clipped_slot_grid_does_not_reverse_into_rear_obstacle(monkeypatch):
     fake = type("FakeDock", (), {})()
     fake.slot_grid_recovery_requested = True

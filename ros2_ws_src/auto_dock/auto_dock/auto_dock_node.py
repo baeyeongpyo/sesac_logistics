@@ -987,7 +987,7 @@ class AutoDockNode(Node):
             distortion=self.slot_distortion,
         )
         if observations is None:
-            if error == "slot_grid_clipped":
+            if AutoDockNode.slot_view_error_recoverable(error):
                 self.slot_grid_recovery_requested = True
                 if (
                     self.slot_grid_recovery_start_position is None
@@ -1083,6 +1083,16 @@ class AutoDockNode(Node):
             slot_yaw_error_deg=round(math.degrees(yaw_error), 1),
         )
         return True
+
+    @staticmethod
+    def slot_view_error_recoverable(error):
+        return error in {
+            "slot_grid_not_found",
+            "slot_grid_too_small",
+            "slot_grid_corners",
+            "slot_grid_clipped",
+            "slot_grid_pose_reprojection",
+        }
 
     @staticmethod
     def slot_row_column(slot_id):
