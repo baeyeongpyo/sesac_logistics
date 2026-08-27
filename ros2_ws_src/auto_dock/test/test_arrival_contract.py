@@ -1,5 +1,6 @@
 import json
 import math
+import time
 
 import cv2
 import numpy as np
@@ -381,7 +382,7 @@ def test_clipped_slot_grid_does_not_reverse_into_rear_obstacle(monkeypatch):
     fake.odom_position = (1.0, 2.0)
     fake.odom_yaw = 0.0
     fake.scan_updated_at = 9.9
-    fake.nearest_by_direction = {"rear": (0.18, math.pi, 0.20)}
+    fake.nearest_by_direction = {"rear": (0.12, math.pi, 0.20)}
     fake.number = lambda key, default, *_args: default
     stopped = []
     fake.stop_drive = lambda *_args: stopped.append(True)
@@ -427,6 +428,8 @@ def test_slot_docking_uses_locked_pose_without_symbol_measurement():
     fake.insertion_start_due_at = None
     fake.odom_position = (0.0, 0.0)
     fake.odom_yaw = 0.0
+    fake.scan_updated_at = time.monotonic()
+    fake.nearest_by_direction = {"rear": (0.20, math.pi, 0.20)}
     fake.publish_status = lambda *_args, **_kwargs: None
     commands = []
     fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
@@ -434,6 +437,25 @@ def test_slot_docking_uses_locked_pose_without_symbol_measurement():
     AutoDockNode.tick_docking(fake)
 
     assert commands == [(0.08, 0.08, 0.0)]
+
+
+def test_slot_alignment_moves_only_forward_until_rear_has_13cm(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.slot_docking_active = True
+    fake.insertion_start_due_at = None
+    fake.alignment_recovery_pose = (1.0, 0.0, 0.0)
+    fake.scan_updated_at = 9.9
+    fake.nearest_by_direction = {"rear": (0.12, math.pi, 0.20)}
+    fake.number = lambda key, default, *_args: default
+    fake.publish_status = lambda *_args, **_kwargs: None
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
+
+    AutoDockNode.tick_docking(fake)
+
+    assert commands == [(0.03, 0.0, 0.0)]
+    assert fake.alignment_recovery_pose is None
 
 
 class CapturePublisher:

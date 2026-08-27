@@ -1654,13 +1654,16 @@ class AutoDockNode(Node):
             self.stop_drive()
             self.publish_status("waiting", "slot_grid_recovery_lidar_stale")
             return
-        rear_distance, rear_angle, rear_clearance = self.nearest_by_direction["rear"]
-        if rear_distance < rear_clearance:
+        rear_distance, rear_angle, _rear_clearance = self.nearest_by_direction["rear"]
+        minimum_rear = self.number(
+            "slot_alignment_min_rear_range_m", 0.13, 0.08, 0.50
+        )
+        if rear_distance < minimum_rear:
             self.stop_drive()
             self.publish_status(
                 "waiting", "slot_grid_recovery_rear_blocked",
                 range_m=round(rear_distance, 3),
-                clearance_m=round(rear_clearance, 3),
+                minimum_range_m=round(minimum_rear, 3),
                 angle_deg=(
                     None if rear_angle is None
                     else round(math.degrees(rear_angle), 1)
@@ -1701,6 +1704,32 @@ class AutoDockNode(Node):
             reversed_cm=round(reverse_actual * 100.0, 1),
             max_reverse_cm=round(maximum * 100.0, 1),
         )
+
+    def ensure_slot_alignment_rear_clearance(self):
+        if time.monotonic() - getattr(self, "scan_updated_at", 0.0) > 0.5:
+            self.stop_drive()
+            self.publish_status("waiting", "slot_alignment_rear_lidar_stale")
+            return False
+        rear_distance, rear_angle, _clearance = self.nearest_by_direction["rear"]
+        minimum_rear = self.number(
+            "slot_alignment_min_rear_range_m", 0.13, 0.08, 0.50
+        )
+        if rear_distance >= minimum_rear:
+            return True
+        speed = self.number(
+            "slot_alignment_rear_clearance_speed_m_s", 0.03, 0.01, 0.06
+        )
+        self.publish_drive(speed, 0.0, 0.0)
+        self.publish_status(
+            "recovering", "slot_alignment_forward_for_rear_clearance",
+            rear_range_m=round(rear_distance, 3),
+            minimum_range_m=round(minimum_rear, 3),
+            angle_deg=(
+                None if rear_angle is None
+                else round(math.degrees(rear_angle), 1)
+            ),
+        )
+        return False
 
     def tick_scan_sweep(self):
         """Sweep a small yaw arc after Nav2 arrival and lock a visible target."""
@@ -2448,6 +2477,7 @@ class AutoDockNode(Node):
 
     def tick_docking(self):
         now = time.monotonic()
+        slot_docking = getattr(self, "slot_docking_active", False)
         insertion_start_due_at = getattr(self, "insertion_start_due_at", None)
         if insertion_start_due_at is not None:
             self.stop_drive()
@@ -2459,10 +2489,16 @@ class AutoDockNode(Node):
             self.state = "inserting"
             self.publish_status("running", "aligned_inserting")
             return
-        if getattr(self, "alignment_recovery_pose", None) is not None:
+        if slot_docking:
+            # A slot target is fixed only after view recovery.  Never return
+            # toward an older pose here because that could reverse into the
+            # rear wall while lateral/yaw alignment is active.
+            self.alignment_recovery_pose = None
+            if not AutoDockNode.ensure_slot_alignment_rear_clearance(self):
+                return
+        elif getattr(self, "alignment_recovery_pose", None) is not None:
             AutoDockNode.tick_alignment_recovery(self)
             return
-        slot_docking = getattr(self, "slot_docking_active", False)
         if slot_docking:
             candidate = {"depth_yaw": {}}
             pnp = {"depth_fallback": True}
@@ -2577,6 +2613,11 @@ class AutoDockNode(Node):
                 "alignment_worsening_frames", 3, 1, 20
             )):
                 self.stop_drive()
+                if slot_docking:
+                    self.publish_status(
+                        "waiting", "slot_alignment_error_worsening_holding"
+                    )
+                    return
                 self.alignment_recovery_pose = getattr(
                     self, "alignment_best_pose", None
                 )
