@@ -195,8 +195,6 @@ class ConfigurationContractTest(unittest.TestCase):
             'FASTDDS_BUILTIN_TRANSPORTS=DEFAULT',
             'COMMAND_API_HOST=',
             'COMMAND_API_PORT=8080',
-            'ROSBAG_HOST_DIRECTORY=',
-            'ROSBAG_SESSION_ID=',
         ):
             self.assertIn(required, content)
         for removed in (

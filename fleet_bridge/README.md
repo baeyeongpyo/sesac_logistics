@@ -188,23 +188,6 @@ Nav2의 plan, local plan, costmap, behavior tree log, `/goal_pose`도 권위 목
 커밋에서 빌드한다. 차량 측 topic rate 또는 message type이 바뀌면 권위 목록과
 `telemetry.yaml`을 함께 갱신한다.
 
-### rosbag recorder
-
-`rosbag-recorder`는 기본 기동 대상이 아니다. 녹화가 필요한 경우에만 `recording` profile로
-활성 차량 target, 각 차량의 `/fleet_bridge/status`, 활성 중앙 topic을 새 rosbag2 세션에
-기록한다. `ROSBAG_SESSION_ID`가 비어 있으면 UTC 시각 기반 이름을 쓰고, 이미 있는
-디렉터리는 덮어쓰지 않는다. Compose를 올리기 전에 호스트 저장 경로를 만든다.
-
-```bash
-sudo mkdir -p /srv/fleet-rosbag
-docker compose --env-file .env.server -f docker-compose.server.yaml \
-  --profile recording up -d --force-recreate rosbag-recorder
-```
-
-특정 세션 이름이 필요하면 `.env.server`에 `ROSBAG_SESSION_ID=inspection-001`처럼 설정한 뒤
-같은 명령으로 recorder를 다시 생성한다. 기록 시작 뒤 `/rosbag/<session>/metadata.yaml`이
-생성됐는지 확인한다.
-
 ## 테스트 Command API와 Swagger
 
 `command-api`는 FastAPI 기반이다. Swagger UI는

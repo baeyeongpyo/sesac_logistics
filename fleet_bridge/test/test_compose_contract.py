@@ -105,28 +105,10 @@ class ServerComposeContractTest(unittest.TestCase):
         )
         self.assertTrue(config_mount['read_only'])
 
-    def test_rosbag_recorder_uses_server_domain_and_read_only_configs(self):
-        recorder = compose_config('docker-compose.server.yaml')['services']['rosbag-recorder']
+    def test_server_compose_does_not_start_a_rosbag_recorder(self):
+        services = compose_config('docker-compose.server.yaml')['services']
 
-        self.assertEqual(recorder['profiles'], ['recording'])
-        self.assertEqual(recorder['network_mode'], 'host')
-        self.assertEqual(recorder['ipc'], 'host')
-        self.assertEqual(recorder['environment']['ROS_DOMAIN_ID'], '225')
-        self.assertEqual(recorder['environment']['ROBOT_IDS'], 'robot_1,robot_2')
-        self.assertEqual(
-            recorder['command'],
-            ['ros2', 'run', 'foxglove_ros_worker', 'fleet_rosbag_recorder'],
-        )
-        for target in (
-            '/config/fleet.yaml',
-            '/config/telemetry.yaml',
-            '/config/central_topics.yaml',
-        ):
-            mount = next(
-                mount for mount in recorder['volumes']
-                if mount['target'] == target
-            )
-            self.assertTrue(mount['read_only'])
+        self.assertNotIn('rosbag-recorder', services)
 
     def test_central_topic_republisher_replays_map_on_server_domain(self):
         relay = compose_config('docker-compose.server.yaml')['services'][
