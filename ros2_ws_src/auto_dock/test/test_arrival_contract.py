@@ -45,6 +45,9 @@ def test_warning_tape_detector_rejects_blank_floor():
 
 @pytest.mark.parametrize(("internal", "operation", "expected"), [
     ("idle", "PICK", "IDLE"),
+    ("scan_sweep", "PICK", "SEARCHING"),
+    ("scan_forward_search", "PICK", "SEARCHING"),
+    ("scan_approach", "PICK", "ALIGNING"),
     ("search", "PICK", "SEARCHING"),
     ("confirm", "PICK", "SEARCHING"),
     ("docking", "PICK", "ALIGNING"),
@@ -89,7 +92,7 @@ def test_test_load_state_is_rejected_while_busy():
 
 
 @pytest.mark.parametrize(("angle_deg", "direction", "distance"), [
-    (0.0, "front", 0.36),
+    (0.0, "front", 0.31),
     (180.0, "rear", 0.20),
     (90.0, "left", 0.20),
     (-90.0, "right", 0.20),
@@ -147,10 +150,10 @@ def test_known_front_chassis_return_is_self_masked():
     fake.number = lambda key, default, *_args: default
 
     assert AutoDockNode.is_lidar_self_return(
-        fake, math.radians(-16.5), 0.13
+        fake, math.radians(-16.5), 0.20
     ) is True
     assert AutoDockNode.is_lidar_self_return(
-        fake, math.radians(-16.5), 0.25
+        fake, math.radians(-16.5), 0.201
     ) is False
 
 
@@ -429,6 +432,30 @@ def test_reverse_starts_right_turn_when_swept_circle_is_clear():
     assert fake.drive_ready_pub.messages == []
 
 
+def test_reverse_waits_for_fresh_scan_before_skipping_turn(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.state = "reversing_after_lift"
+    fake.post_lift_reverse_start = (0.0, 0.0)
+    fake.post_lift_reverse_start_yaw = 0.0
+    fake.post_lift_reverse_target_m = 0.27
+    fake.odom_position = (-0.28, 0.0)
+    fake.odom_yaw = 0.0
+    fake.right_turn_clearance_wait_started_at = None
+    fake.number = lambda key, default, *_args: default
+    fake.stop_drive = lambda *_args: None
+    fake.drive_ready_pub = CapturePublisher()
+    fake.publish_status = lambda *_args, **_kwargs: None
+    fake.right_turn_clearance_available = lambda: (False, None, None)
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
+
+    AutoDockNode.tick_reversing_after_lift(fake)
+
+    assert fake.state == "reversing_after_lift"
+    assert fake.post_lift_reverse_target_m == pytest.approx(0.27)
+    assert fake.right_turn_clearance_wait_started_at == 10.0
+    assert fake.drive_ready_pub.messages == []
+
+
 def test_right_turn_ignores_close_point_outside_actual_swept_footprint(monkeypatch):
     fake = type("FakeDock", (), {})()
     fake.scan_updated_at = 10.0
@@ -511,6 +538,115 @@ def test_first_matching_frame_schedules_stop_after_point_two_seconds(monkeypatch
     assert commands == [(pytest.approx(0.02), 0.12, 0.0)]
 
 
+def test_experimental_scan_locks_valid_target_before_approach(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    candidate = {"entity_id": 4}
+    pnp = {"distance_source": "depth"}
+    fake.valid_measurement = lambda: (candidate, pnp, None)
+    fake.stop_drive = lambda *_args: None
+    fake.update_world_target = lambda got_candidate, got_pnp: (
+        got_candidate == candidate and got_pnp == pnp
+    )
+    fake.target_entity_id = None
+    fake.scan_candidate_seen_at = None
+    fake.publish_status = lambda *_args, **_kwargs: None
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
+
+    AutoDockNode.tick_scan_sweep(fake)
+
+    assert fake.state == "scan_approach"
+    assert fake.target_entity_id == 4
+
+
+def test_experimental_scan_sweeps_toward_left_endpoint(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.valid_measurement = lambda: (None, None, "no_selected_candidate")
+    fake.selected_candidate = lambda: (None, None)
+    fake.odom_yaw = 0.0
+    fake.scan_sweep_started_yaw = 0.0
+    fake.scan_sweep_phase = 0
+    fake.scan_candidate_seen_at = None
+    fake.number = lambda key, default, *_args: default
+    fake.publish_status = lambda *_args, **_kwargs: None
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
+
+    AutoDockNode.tick_scan_sweep(fake)
+
+    assert commands == [(0.0, 0.0, pytest.approx(0.18))]
+
+
+def test_scan_remembers_leftmost_tag_world_bearing(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.latest_detection = {
+        "detections": [
+            {"class": "heart", "box": [400, 100, 440, 140]},
+            {"class": "spade", "box": [80, 100, 120, 140]},
+            {"class": "pallet", "box": [20, 50, 200, 300]},
+        ]
+    }
+    fake.latest_detection_at = 10.0
+    fake.odom_yaw = 0.0
+    fake.scan_sweep_started_yaw = 0.0
+    fake.scan_leftmost_tag_yaw = None
+    fake.number = lambda key, default, *_args: default
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.remember_leftmost_scan_tag(fake)
+
+    assert math.degrees(fake.scan_leftmost_tag_yaw) == pytest.approx(20.625)
+
+
+def test_forward_search_moves_and_sweeps_about_tag_bearing():
+    fake = type("FakeDock", (), {})()
+    fake.valid_measurement = lambda: (None, None, "no_target")
+    fake.odom_yaw = 0.0
+    fake.odom_position = (0.0, 0.0)
+    fake.scan_leftmost_tag_yaw = math.radians(10.0)
+    fake.scan_forward_started_position = (0.0, 0.0)
+    fake.scan_forward_phase = 0
+    fake.number = lambda key, default, *_args: default
+    fake.publish_status = lambda *_args, **_kwargs: None
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+
+    AutoDockNode.tick_scan_forward_search(fake)
+
+    assert commands[0][0] == pytest.approx(0.08)
+    assert commands[0][1] == 0.0
+    assert commands[0][2] > 0.0
+
+
+def test_experimental_scan_approach_drives_forward_and_steers():
+    fake = type("FakeDock", (), {})()
+    fake.valid_measurement = lambda: (None, None, "stale")
+    fake.target_in_body = lambda: (0.60, 0.12, 0.0)
+    fake.number = lambda key, default, *_args: default
+    fake.publish_status = lambda *_args, **_kwargs: None
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+
+    AutoDockNode.tick_scan_approach(fake)
+
+    assert commands[0][0] == pytest.approx(0.08)
+    assert commands[0][1] == 0.0
+    assert 0.0 < commands[0][2] <= 0.16
+
+
+def test_experimental_scan_approach_hands_off_near_target():
+    fake = type("FakeDock", (), {})()
+    fake.valid_measurement = lambda: (None, None, "stale")
+    fake.target_in_body = lambda: (0.21, 0.0, 0.0)
+    fake.number = lambda key, default, *_args: default
+    fake.stop_drive = lambda *_args: None
+    fake.publish_status = lambda *_args, **_kwargs: None
+
+    AutoDockNode.tick_scan_approach(fake)
+
+    assert fake.state == "docking"
+
+
 def test_lateral_search_caps_compensation_to_keep_wheels_out_of_low_speed(monkeypatch):
     fake = type("FakeDock", (), {})()
     fake.candidate_stop_due_at = None
@@ -534,6 +670,180 @@ def test_lateral_search_caps_compensation_to_keep_wheels_out_of_low_speed(monkey
 
     assert commands[0][0] == pytest.approx(0.02)
     assert commands[0][1:] == (-0.12, 0.0)
+
+
+def test_tag_guided_search_uses_image_centered_individual_tag_depth(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.latest_detection = {
+        "detections": [
+            {
+                "class": "heart",
+                "box": [350, 100, 500, 300],
+                "depth": {"forward_distance_cm": 28.0, "bearing_deg": 10.0},
+            },
+            {
+                "class": "spade",
+                "box": [50, 100, 200, 300],
+                "depth": {"forward_distance_cm": 22.0, "bearing_deg": -20.0},
+            },
+        ]
+    }
+    fake.latest_detection_at = 10.0
+    fake.number = lambda key, default, *_args: default
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    observation = AutoDockNode.front_search_entity_observation(fake)
+
+    assert observation == ("heart", 28.0, 10.0)
+
+
+def test_tag_guided_search_rejects_depth_over_thirty_cm_as_noise(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.latest_detection = {
+        "detections": [{
+            "class": "heart",
+            "box": [250, 100, 390, 300],
+            "depth": {"forward_distance_cm": 30.1, "bearing_deg": 0.0},
+        }]
+    }
+    fake.latest_detection_at = 10.0
+    fake.number = lambda key, default, *_args: default
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    assert AutoDockNode.front_search_entity_observation(fake) is None
+
+
+def test_tag_guided_search_corrects_forward_when_front_tag_exceeds_twenty_cm(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.candidate_stop_due_at = None
+    fake.candidate_retry_not_before = 0.0
+    fake.selected_candidate = lambda: (None, None)
+    fake.config = {
+        "search_lateral_direction": "left",
+        "tag_guided_lateral_search_enabled": True,
+    }
+    fake.search_heading_yaw = 0.0
+    fake.odom_yaw = 0.0
+    fake.latest_detection = {
+        "detections": [{
+            "class": "spade",
+            "box": [250, 100, 390, 300],
+            "depth": {"forward_distance_cm": 25.0, "bearing_deg": 0.0},
+        }]
+    }
+    fake.latest_detection_at = 10.0
+    fake.number = lambda key, default, *_args: {
+        "search_lateral_speed_m_s": 0.12,
+    }.get(key, default)
+    fake.publish_status = lambda *_args, **_kwargs: None
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_search(fake)
+
+    assert commands == [(0.12, 0.0, 0.0)]
+
+
+def test_tag_guided_search_corrects_yaw_before_distance_or_lateral(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.candidate_stop_due_at = None
+    fake.candidate_retry_not_before = 0.0
+    fake.selected_candidate = lambda: (None, None)
+    fake.config = {
+        "search_lateral_direction": "left",
+        "tag_guided_lateral_search_enabled": True,
+    }
+    fake.search_heading_yaw = 0.0
+    fake.odom_yaw = math.radians(10.0)
+    fake.latest_detection = {
+        "detections": [{
+            "class": "spade",
+            "box": [250, 100, 390, 300],
+            "depth": {"forward_distance_cm": 18.0, "bearing_deg": 0.0},
+        }]
+    }
+    fake.latest_detection_at = 10.0
+    fake.number = lambda key, default, *_args: {
+        "search_lateral_speed_m_s": 0.12,
+    }.get(key, default)
+    fake.publish_status = lambda *_args, **_kwargs: None
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_search(fake)
+
+    assert commands == [(0.0, 0.0, pytest.approx(-0.06))]
+
+
+def rear_lidar_search_fake(rear_distance_m):
+    fake = type("FakeDock", (), {})()
+    fake.candidate_stop_due_at = None
+    fake.candidate_retry_not_before = 0.0
+    fake.selected_candidate = lambda: (None, None)
+    fake.config = {
+        "search_lateral_direction": "left",
+        "search_rear_lidar_guidance_enabled": True,
+    }
+    fake.search_heading_yaw = 0.0
+    fake.odom_yaw = 0.0
+    fake.scan_updated_at = 10.0
+    fake.nearest_by_direction = {
+        "rear": (rear_distance_m, math.pi, 0.20),
+    }
+    fake.number = lambda key, default, *_args: {
+        "search_lateral_speed_m_s": 0.12,
+        "search_rear_lidar_min_distance_cm": 30.0,
+    }.get(key, default)
+    fake.commands = []
+    fake.statuses = []
+    fake.publish_drive = lambda x, y, yaw: fake.commands.append((x, y, yaw))
+    fake.publish_status = lambda state, reason, **extra: fake.statuses.append(
+        (state, reason, extra)
+    )
+    return fake
+
+
+def test_rear_lidar_search_corrects_forward_below_thirty_cm(monkeypatch):
+    fake = rear_lidar_search_fake(0.29)
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_search(fake)
+
+    assert fake.commands == [(0.12, 0.0, 0.0)]
+    assert fake.statuses[-1][1] == "rear_lidar_distance_correction"
+    assert fake.statuses[-1][2]["rear_distance_cm"] == pytest.approx(29.0)
+
+
+def test_rear_lidar_search_strafes_at_thirty_cm(monkeypatch):
+    fake = rear_lidar_search_fake(0.30)
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_search(fake)
+
+    assert fake.commands == [(0.0, 0.12, 0.0)]
+    assert fake.statuses[-1][1] == "rear_lidar_clearance_held_lateral_search"
+    assert fake.statuses[-1][2]["rear_distance_cm"] == pytest.approx(30.0)
+
+
+def test_combined_search_checks_rear_then_uses_front_yolo(monkeypatch):
+    fake = rear_lidar_search_fake(0.30)
+    fake.config["tag_guided_lateral_search_enabled"] = True
+    fake.latest_detection = {
+        "detections": [{
+            "class": "spade",
+            "box": [250, 100, 390, 300],
+            "depth": {"forward_distance_cm": 25.0, "bearing_deg": 0.0},
+        }]
+    }
+    fake.latest_detection_at = 10.0
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_search(fake)
+
+    assert fake.commands == [(0.12, 0.0, 0.0)]
+    assert fake.statuses[-1][1] == "front_tag_distance_correction"
 
 
 def tape_search_fake(angle_deg):
@@ -866,14 +1176,19 @@ def test_good_pnp_distance_is_used_when_depth_is_missing():
 
 def test_close_valid_target_pauses_before_insertion(monkeypatch):
     fake = type("FakeDock", (), {})()
-    fake.valid_measurement = lambda: (None, None, "not_visible")
+    candidate = {"depth_yaw": {"yaw_deg": 0.0}}
+    pnp = {"yaw_deg": 0.0, "depth_fallback": False}
+    fake.valid_measurement = lambda: (candidate, pnp, None)
+    fake.update_world_target = lambda *_args, **_kwargs: True
     fake.target_in_body = lambda: (0.159, 0.0, 0.0)
     fake.number = lambda key, default, *_args: {
         "dock_standoff_m": 0.20,
         "motion_transition_pause_sec": 0.10,
+        "alignment_yaw_confirmation_frames": 1,
     }.get(key, default)
     fake.stop_drive = lambda *_args: None
     fake.odom_position = (1.0, 2.0)
+    fake.odom_yaw = 0.0
     fake.insertion_start_due_at = None
     fake.publish_status = lambda *_args, **_kwargs: None
     now = [10.0]
@@ -888,6 +1203,90 @@ def test_close_valid_target_pauses_before_insertion(monkeypatch):
     assert fake.insert_start_position == (1.0, 2.0)
     assert fake.insert_start_yaw == 0.0
     assert fake.insertion_entry_gap_m == pytest.approx(0.159)
+
+
+def test_translation_first_alignment_limits_but_keeps_large_yaw_correction():
+    fake = type("FakeDock", (), {})()
+    candidate = {"depth_yaw": {"yaw_deg": 0.0}}
+    pnp = {"yaw_deg": 0.0, "depth_fallback": False}
+    fake.valid_measurement = lambda: (candidate, pnp, None)
+    fake.update_world_target = lambda *_args, **_kwargs: True
+    fake.target_in_body = lambda: (0.50, 0.08, math.radians(80.0))
+    fake.config = {"translation_first_alignment_enabled": True}
+    fake.number = lambda key, default, *_args: (
+        1 if key == "alignment_yaw_confirmation_frames" else default
+    )
+    fake.insertion_start_due_at = None
+    fake.odom_position = (0.0, 0.0)
+    fake.odom_yaw = 0.0
+    fake.publish_status = lambda *_args, **_kwargs: None
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+
+    AutoDockNode.tick_docking(fake)
+
+    assert commands == [(0.08, 0.064, 0.12)]
+
+
+def test_translation_first_alignment_enforces_minimum_yaw_speed():
+    fake = type("FakeDock", (), {})()
+    candidate = {"depth_yaw": {"yaw_deg": 0.0}}
+    pnp = {"yaw_deg": 0.0, "depth_fallback": False}
+    fake.valid_measurement = lambda: (candidate, pnp, None)
+    fake.update_world_target = lambda *_args, **_kwargs: True
+    fake.target_in_body = lambda: (0.20, 0.0, math.radians(4.0))
+    fake.config = {"translation_first_alignment_enabled": True}
+    fake.number = lambda key, default, *_args: (
+        1 if key == "alignment_yaw_confirmation_frames" else default
+    )
+    fake.insertion_start_due_at = None
+    fake.odom_position = (0.0, 0.0)
+    fake.odom_yaw = 0.0
+    fake.publish_status = lambda *_args, **_kwargs: None
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+
+    AutoDockNode.tick_docking(fake)
+
+    assert commands == [(0.0, 0.0, 0.10)]
+
+
+def test_alignment_holds_when_yaw_sources_disagree():
+    fake = type("FakeDock", (), {})()
+    candidate = {"depth_yaw": {"yaw_deg": 15.0}}
+    pnp = {"yaw_deg": 20.0, "depth_fallback": False}
+    fake.valid_measurement = lambda: (candidate, pnp, None)
+    fake.number = lambda key, default, *_args: default
+    fake.insertion_start_due_at = None
+    fake.stop_drive = lambda *_args: stopped.append(True)
+    fake.publish_status = lambda *args, **kwargs: statuses.append((args, kwargs))
+    stopped = []
+    statuses = []
+
+    AutoDockNode.tick_docking(fake)
+
+    assert stopped == [True]
+    assert statuses[-1][0][1] == "alignment_yaw_disagreement_holding"
+
+
+def test_lost_alignment_returns_toward_best_pose(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.valid_measurement = lambda: (None, None, "not_visible")
+    fake.number = lambda key, default, *_args: default
+    fake.insertion_start_due_at = None
+    fake.alignment_lost_since = 9.0
+    fake.alignment_best_pose = (0.0, 0.0, 0.0)
+    fake.odom_position = (0.05, 0.0)
+    fake.odom_yaw = 0.0
+    fake.stop_drive = lambda *_args: None
+    fake.publish_status = lambda *_args, **_kwargs: None
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
+
+    AutoDockNode.tick_docking(fake)
+
+    assert commands == [(-0.04, 0.0, 0.0)]
 
 
 def test_camera_target_is_converted_from_physical_to_calibrated_odom_units():

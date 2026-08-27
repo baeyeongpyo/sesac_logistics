@@ -1,78 +1,105 @@
 #!/usr/bin/env python3
+"""Independent GPIO fork controller with ROS command/result topics."""
 
+import json
 import os
 import time
+from pathlib import Path
 
 import rclpy
-
 from gpiozero import Button, Motor
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from std_msgs.msg import Empty, String
+from std_msgs.msg import String
 
 
 class ForkController(Node):
     LIMIT_RELEASE_SEC = 0.4
 
-    def __init__(self) -> None:
+    def __init__(self):
         super().__init__("fork_controller")
-
         self.declare_parameter("vehicle", 0)
-        self.declare_parameter("entry_complete_topic", "")
-        self.declare_parameter("lift_up_complete_topic", "")
+        self.declare_parameter("command_topic", "/fork/command")
+        self.declare_parameter("state_topic", "")
+        self.declare_parameter("pose_config", "/shared/vehicle_pose_config.json")
+
         requested_vehicle = int(self.get_parameter("vehicle").value)
         domain_vehicle = {215: 1, 216: 2}.get(
             int(os.environ.get("ROS_DOMAIN_ID", "0") or 0)
         )
         self.vehicle = requested_vehicle or domain_vehicle
         if self.vehicle not in (1, 2):
-            raise RuntimeError(
-                "vehicle must be 1/2, or ROS_DOMAIN_ID must be 215/216"
-            )
+            raise RuntimeError("vehicle must be 1/2, or ROS_DOMAIN_ID must be 215/216")
         robot = f"/robot_{self.vehicle}"
-        entry_complete_topic = (
-            str(self.get_parameter("entry_complete_topic").value).strip()
-            or f"{robot}/auto_dock/entry_complete"
-        )
-        lift_up_complete_topic = (
-            str(self.get_parameter("lift_up_complete_topic").value).strip()
-            or f"{robot}/lift/up_complete"
-        )
+        state_topic = str(self.get_parameter("state_topic").value).strip() or f"{robot}/fork/state"
 
         self.motor = Motor(forward=17, backward=18)
         self.lower_limit_switch = Button(27, pull_up=False, bounce_time=0.05)
         self.upper_limit_switch = Button(22, pull_up=False, bounce_time=0.05)
-
         self.lower_limit_latched = self.lower_limit_switch.is_pressed
         self.upper_limit_latched = self.upper_limit_switch.is_pressed
         self.lower_release_started_at = None
         self.upper_release_started_at = None
         self.active_command = "STOP"
-        self.auto_lift_pending = False
+        self.up_started_at = None
+        self.pose_config_path = Path(str(self.get_parameter("pose_config").value))
+        self.runtime_config = {}
+        self.runtime_config_mtime_ns = None
+        self.refresh_runtime_config(force=True)
 
         self.lower_limit_switch.when_pressed = self.lower_limit_pressed
         self.upper_limit_switch.when_pressed = self.upper_limit_pressed
-        self.limit_latch_timer = self.create_timer(0.05, self.update_limit_latches)
-
-        self.subscription = self.create_subscription(
-            String, "/fork/command", self.command_callback, 10
+        self.create_timer(0.05, self.update_limit_latches)
+        self.create_subscription(
+            String, str(self.get_parameter("command_topic").value),
+            self.command_callback, 10,
         )
-        self.entry_complete_subscription = self.create_subscription(
-            Empty, entry_complete_topic, self.entry_complete_callback, 10
-        )
-        self.lift_up_complete_pub = self.create_publisher(
-            Empty, lift_up_complete_topic, 10
-        )
+        self.state_pub = self.create_publisher(String, state_topic, 10)
 
         if self.lower_limit_latched or self.upper_limit_latched:
             self.motor.stop()
-        if self.lower_limit_latched:
-            self.get_logger().info("Lower limit active at startup. Motor stopped.")
-        if self.upper_limit_latched:
-            self.get_logger().info("Upper limit active at startup. Motor stopped.")
-        self.get_logger().info("Fork motor controller started.")
+        self.get_logger().info(
+            f"Fork controller ready: command=/fork/command state={state_topic}"
+        )
 
-    def lower_limit_pressed(self) -> None:
+    def publish_state(self, state, error=""):
+        payload = json.dumps({"state": state, "error": error}, separators=(",", ":"))
+        self.state_pub.publish(String(data=payload))
+        self.get_logger().info(f"Published fork state: {payload}")
+
+    def complete(self, command):
+        self.motor.stop()
+        self.active_command = "STOP"
+        self.up_started_at = None
+        self.publish_state(f"{command}_COMPLETE")
+
+    def refresh_runtime_config(self, force=False):
+        try:
+            mtime_ns = self.pose_config_path.stat().st_mtime_ns
+            if not force and mtime_ns == self.runtime_config_mtime_ns:
+                return
+            payload = json.loads(self.pose_config_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("pose config must be a JSON object")
+            self.runtime_config = payload
+            self.runtime_config_mtime_ns = mtime_ns
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            self.get_logger().warning(f"Fork runtime config read failed: {exc}")
+
+    def runtime_boolean(self, key, default=False):
+        value = self.runtime_config.get(key, default)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def runtime_number(self, key, default, minimum, maximum):
+        try:
+            value = float(self.runtime_config.get(key, default))
+        except (TypeError, ValueError):
+            value = float(default)
+        return min(maximum, max(minimum, value))
+
+    def lower_limit_pressed(self):
         was_moving_down = self.active_command == "DOWN"
         self.motor.stop()
         self.active_command = "STOP"
@@ -81,9 +108,9 @@ class ForkController(Node):
             return
         self.lower_limit_latched = True
         if was_moving_down:
-            self.get_logger().warning("Lower limit reached. Motor stopped.")
+            self.complete("DOWN")
 
-    def upper_limit_pressed(self) -> None:
+    def upper_limit_pressed(self):
         was_moving_up = self.active_command == "UP"
         self.motor.stop()
         self.active_command = "STOP"
@@ -92,113 +119,100 @@ class ForkController(Node):
             return
         self.upper_limit_latched = True
         if was_moving_up:
-            self.get_logger().warning("Upper limit reached. Motor stopped.")
-        if self.auto_lift_pending:
-            self.auto_lift_pending = False
-            self.lift_up_complete_pub.publish(Empty())
-            self.get_logger().info("Published lift-up completion.")
+            self.complete("UP")
 
-    def entry_complete_callback(self, _message: Empty) -> None:
-        if self.upper_limit_latched or self.upper_limit_switch.is_pressed:
+    def start_command(self, command):
+        # Record intent before energizing the motor.  A limit callback can run
+        # immediately from the GPIO thread when motion begins; it must see the
+        # command that caused the motion so it can publish *_COMPLETE.
+        self.active_command = command
+        if command == "UP":
+            self.up_started_at = time.monotonic()
+            if self.upper_limit_latched or self.upper_limit_switch.is_pressed:
+                self.complete("UP")
+                return
+            self.motor.forward()
+        elif command == "DOWN":
+            self.up_started_at = None
+            if self.lower_limit_latched or self.lower_limit_switch.is_pressed:
+                self.complete("DOWN")
+                return
+            self.motor.backward()
+        self.get_logger().info(f"Motor: {command}")
+
+    def command_callback(self, message):
+        command = message.data.strip().upper()
+        if command in {"UP", "DOWN"}:
+            self.start_command(command)
+        elif command == "STOP":
             self.motor.stop()
             self.active_command = "STOP"
-            self.auto_lift_pending = False
-            self.lift_up_complete_pub.publish(Empty())
-            self.get_logger().info(
-                "Entry complete received; lift already up, completion published."
-            )
-            return
-        self.auto_lift_pending = True
-        self.motor.forward()
-        self.active_command = "UP"
-        self.get_logger().info("Entry complete received; motor lifting UP.")
+            self.up_started_at = None
+        else:
+            self.motor.stop()
+            self.active_command = "STOP"
+            self.up_started_at = None
+            self.publish_state("FAILED", f"unknown command: {command}")
 
-    def update_limit_latches(self) -> None:
+    def update_limit_latches(self):
         now = time.monotonic()
+        self.refresh_runtime_config()
+        # Polling backs up gpiozero's edge callback so a completion event is
+        # not lost if the limit changes during motor startup or contact bounce.
+        if self.active_command == "UP" and self.upper_limit_switch.is_pressed:
+            self.upper_limit_latched = True
+            self.complete("UP")
+        elif self.active_command == "DOWN" and self.lower_limit_switch.is_pressed:
+            self.lower_limit_latched = True
+            self.complete("DOWN")
+        elif (
+            self.active_command == "UP"
+            and self.up_started_at is not None
+            and self.runtime_boolean("fork_timed_up_complete_enabled", False)
+            and now - self.up_started_at >= self.runtime_number(
+                "fork_timed_up_complete_sec", 3.0, 0.5, 10.0
+            )
+        ):
+            self.get_logger().warning(
+                "Using temporary timed UP completion fallback; upper limit was not seen"
+            )
+            self.complete("UP")
         self.lower_release_started_at = self.update_limit_latch(
-            "Lower",
-            self.lower_limit_switch.is_pressed,
-            self.lower_limit_latched,
-            self.lower_release_started_at,
-            now,
+            self.lower_limit_switch.is_pressed, self.lower_limit_latched,
+            self.lower_release_started_at, now, "lower",
         )
-        if self.lower_release_started_at is False:
-            self.lower_limit_latched = False
-            self.lower_release_started_at = None
-
         self.upper_release_started_at = self.update_limit_latch(
-            "Upper",
-            self.upper_limit_switch.is_pressed,
-            self.upper_limit_latched,
-            self.upper_release_started_at,
-            now,
+            self.upper_limit_switch.is_pressed, self.upper_limit_latched,
+            self.upper_release_started_at, now, "upper",
         )
-        if self.upper_release_started_at is False:
-            self.upper_limit_latched = False
-            self.upper_release_started_at = None
 
-    def update_limit_latch(
-        self, name, is_pressed, is_latched, release_started_at, now
-    ):
-        if not is_latched or is_pressed:
+    def update_limit_latch(self, pressed, latched, release_started_at, now, which):
+        if not latched or pressed:
             return None
         if release_started_at is None:
             return now
         if now - release_started_at < self.LIMIT_RELEASE_SEC:
             return release_started_at
-        if self.active_command != "STOP":
-            self.get_logger().info(f"{name} limit released and re-armed.")
-        return False
-
-    def command_callback(self, message: String) -> None:
-        command = message.data.strip().upper()
-        self.get_logger().info(f"Received command: {command}")
-
-        if command == "UP":
-            self.auto_lift_pending = False
-            if self.upper_limit_latched or self.upper_limit_switch.is_pressed:
-                self.motor.stop()
-                self.active_command = "STOP"
-                self.get_logger().warning("UP blocked: upper limit switch pressed.")
-                return
-            self.motor.forward()
-            self.active_command = "UP"
-            self.get_logger().info("Motor: UP")
-        elif command == "DOWN":
-            self.auto_lift_pending = False
-            if self.lower_limit_latched or self.lower_limit_switch.is_pressed:
-                self.motor.stop()
-                self.active_command = "STOP"
-                self.get_logger().warning("DOWN blocked: lower limit switch pressed.")
-                return
-            self.motor.backward()
-            self.active_command = "DOWN"
-            self.get_logger().info("Motor: DOWN")
-        elif command == "STOP":
-            self.auto_lift_pending = False
-            self.motor.stop()
-            self.active_command = "STOP"
-            self.get_logger().info("Motor: STOP")
+        if which == "lower":
+            self.lower_limit_latched = False
         else:
-            self.auto_lift_pending = False
-            self.motor.stop()
-            self.active_command = "STOP"
-            self.get_logger().warning(f"Unknown command: {command}")
+            self.upper_limit_latched = False
+        return None
 
-    def cleanup(self) -> None:
+    def cleanup(self):
         self.motor.stop()
         self.lower_limit_switch.close()
         self.upper_limit_switch.close()
         self.motor.close()
 
 
-def main(args=None) -> None:
+def main(args=None):
     rclpy.init(args=args)
     node = ForkController()
     try:
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):
-        node.get_logger().info("Ctrl+C received. Stopping motor.")
+        pass
     finally:
         node.cleanup()
         node.destroy_node()

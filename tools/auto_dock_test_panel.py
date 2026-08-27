@@ -29,7 +29,42 @@ from std_msgs.msg import Empty, String
 
 SYMBOLS = ("spade", "heart", "clover", "diamond", "star")
 LOCATIONS = ("DOCK_1", "NORMAL", "FRESH", "Y1", "Y2", "Y3", "Y4")
+CHECKBOX_FIELDS = (
+    ("tag_guided_lateral_search_enabled", "옵션 1 · 정면 YOLO bbox/depth"),
+    ("search_rear_lidar_guidance_enabled", "옵션 2 · 후방 LiDAR 30cm"),
+    ("lidar_safety_enabled", "LiDAR safety"),
+    ("lidar_backoff_enabled", "LiDAR backoff"),
+    ("fork_timed_up_complete_enabled", "임시 UP 3초 완료 · 위험"),
+)
+CHECKBOX_KEYS = {key for key, _label in CHECKBOX_FIELDS}
 TUNING_FIELDS = (
+    ("tag_guided_lateral_search_enabled", "정면태그 자세 횡탐색(1/0)", 0, int, 0, 1),
+    ("search_rear_lidar_guidance_enabled", "후방LiDAR 횡탐색(1/0)", 0, int, 0, 1),
+    ("lidar_safety_enabled", "LiDAR safety(1/0)", 0, int, 0, 1),
+    ("lidar_backoff_enabled", "LiDAR backoff(1/0)", 0, int, 0, 1),
+    ("fork_timed_up_complete_enabled", "임시 UP 시간완료(1/0)", 0, int, 0, 1),
+    ("fork_timed_up_complete_sec", "임시 UP 완료시간(초)", 3.0, float, 0.5, 10.0),
+    ("tag_search_max_distance_cm", "탐색 정면태그 최대거리(cm)", 20.0, float, 5.0, 100.0),
+    ("tag_search_noise_max_distance_cm", "탐색 depth 노이즈 상한(cm)", 30.0, float, 10.0, 100.0),
+    ("tag_search_yaw_tolerance_deg", "탐색 태그각도 허용(°)", 3.0, float, 0.5, 15.0),
+    ("tag_search_max_angular_speed_rad_s", "탐색 회전보정 제한(rad/s)", 0.06, float, 0.02, 0.15),
+    ("tag_search_forward_correction_speed_m_s", "정면태그 전진보정(m/s)", 0.12, float, 0.08, 0.20),
+    ("search_rear_lidar_min_distance_cm", "옵션2 후방LiDAR 최소거리(cm)", 30.0, float, 5.0, 100.0),
+    ("search_rear_lidar_max_age_sec", "옵션2 LiDAR 유효시간(초)", 0.50, float, 0.10, 2.0),
+    ("search_rear_lidar_forward_speed_m_s", "옵션2 전진보정(m/s)", 0.12, float, 0.05, 0.20),
+    ("translation_first_alignment_enabled", "이동우선 정렬(1/0)", 0, int, 0, 1),
+    ("alignment_max_trusted_yaw_deg", "신뢰 회전오차 한계(°)", 12.0, float, 3.0, 30.0),
+    ("translation_alignment_min_angular_speed_rad_s", "이동정렬 최소회전(rad/s)", 0.10, float, 0.0, 0.20),
+    ("translation_alignment_max_angular_speed_rad_s", "이동정렬 최대회전(rad/s)", 0.12, float, 0.0, 0.20),
+    ("nav2_scan_approach_enabled", "도착후 회전스캔 접근(1/0)", 0, int, 0, 1),
+    ("nav2_scan_angle_deg", "회전스캔 좌우각(°)", 20.0, float, 2.0, 30.0),
+    ("nav2_scan_angular_speed_rad_s", "회전스캔 속도(rad/s)", 0.18, float, 0.05, 0.40),
+    ("nav2_scan_confirmation_sec", "스캔 검출확인(초)", 0.8, float, 0.1, 3.0),
+    ("nav2_forward_search_speed_m_s", "태그기준 전진속도(m/s)", 0.08, float, 0.05, 0.15),
+    ("nav2_forward_search_max_distance_m", "태그기준 최대전진(m)", 1.0, float, 0.20, 3.0),
+    ("nav2_approach_standoff_m", "접근후 정렬거리(m)", 0.22, float, 0.12, 1.0),
+    ("nav2_approach_speed_m_s", "목표 접근속도(m/s)", 0.08, float, 0.05, 0.15),
+    ("nav2_approach_max_angular_speed_rad_s", "접근 회전제한(rad/s)", 0.16, float, 0.05, 0.25),
     ("stable_detection_frames", "확정 프레임", 2, int, 1, 30),
     ("candidate_stop_delay_sec", "추가 이동(초)", 0.2, float, 0.0, 5.0),
     ("candidate_confirmation_timeout_sec", "확인 제한(초)", 0.8, float, 0.1, 10.0),
@@ -58,16 +93,17 @@ TUNING_FIELDS = (
     ("lidar_rear_clearance_m", "차체 밖 후방 여유(m)", 0.01, float, 0.0, 1.0),
     ("lidar_left_clearance_m", "차체 밖 좌측 여유(m)", 0.01, float, 0.0, 1.0),
     ("lidar_right_clearance_m", "차체 밖 우측 여유(m)", 0.01, float, 0.0, 1.0),
-    ("lidar_body_front_extent_m", "LiDAR→차체 전방(m)", 0.35, float, 0.01, 1.0),
-    ("lidar_body_rear_extent_m", "LiDAR→차체 후방(m)", 0.05, float, 0.01, 1.0),
-    ("lidar_body_half_width_m", "LiDAR→바퀴 측면(m)", 0.085, float, 0.01, 0.50),
+    ("lidar_body_front_extent_m", "LiDAR→차체 전방(m)", 0.30, float, 0.01, 1.0),
+    ("lidar_body_rear_extent_m", "LiDAR→차체 후방(m)", 0.06, float, 0.01, 1.0),
+    ("lidar_body_half_width_m", "LiDAR→바퀴 측면(m)", 0.06, float, 0.01, 0.50),
     ("lidar_loaded_front_extent_m", "LiDAR→적재물 앞끝(m)", 0.48, float, 0.10, 1.50),
     ("lidar_loaded_half_width_m", "LiDAR→적재물 측면(m)", 0.085, float, 0.01, 0.50),
     ("lidar_sensor_radius_m", "LiDAR 센서 반경(m)", 0.015, float, 0.005, 0.10),
     ("ready_right_turn_speed_rad_s", "Ready 우회전 속도(rad/s)", 0.20, float, 0.05, 0.50),
     ("ready_right_turn_tolerance_deg", "Ready 우회전 오차(°)", 3.0, float, 0.5, 15.0),
+    ("right_turn_scan_wait_timeout_sec", "우회전 LiDAR 대기(초)", 2.0, float, 0.5, 5.0),
     ("lidar_self_mask_front_half_angle_deg", "차체마스크 반각(°)", 20.0, float, 0.0, 90.0),
-    ("lidar_self_mask_front_max_range_m", "차체마스크 거리(m)", 0.18, float, 0.0, 1.0),
+    ("lidar_self_mask_front_max_range_m", "차체마스크 거리(m)", 0.20, float, 0.0, 1.0),
 )
 
 
@@ -96,7 +132,6 @@ class TestPanelNode(Node):
 
         self.arrival_pub = self.create_publisher(String, f"{robot}/nav2/arrival", 10)
         self.fork_command_pub = self.create_publisher(String, "/fork/command", 10)
-        self.fork_state_pub = self.create_publisher(String, f"{robot}/fork/state", 10)
         self.stop_pub = self.create_publisher(Empty, f"{robot}/auto_dock/stop", 10)
         self.load_state_pub = self.create_publisher(
             String, f"{robot}/auto_dock/test/load_state", 10
@@ -160,7 +195,7 @@ class TestPanelNode(Node):
                 continue
             angle = message.angle_min + index * message.angle_increment
             angle = math.atan2(math.sin(angle), math.cos(angle))
-            if abs(angle) <= math.radians(20.0) and distance <= 0.18:
+            if abs(angle) <= math.radians(20.0) and distance <= 0.20:
                 continue
             x, y = math.cos(angle), math.sin(angle)
             if abs(x) >= abs(y):
@@ -168,7 +203,7 @@ class TestPanelNode(Node):
             else:
                 direction = "left" if y >= 0.0 else "right"
             nearest[direction] = min(nearest[direction], float(distance))
-        self.lidar_callback(nearest)
+        self.lidar_callback(message, nearest)
 
     def received_status(self, topic, value):
         try:
@@ -296,11 +331,6 @@ class TestPanelNode(Node):
         self.arrival_pub.publish(String(data=data))
         self.log_callback("PUB", self.arrival_pub.topic_name, data)
 
-    def publish_fork_state(self, state, error=""):
-        data = json.dumps({"state": state, "error": error}, separators=(",", ":"))
-        self.fork_state_pub.publish(String(data=data))
-        self.log_callback("PUB", self.fork_state_pub.topic_name, data)
-
     def publish_fork_command(self, command):
         command = command.strip().upper()
         self.fork_command_pub.publish(String(data=command))
@@ -337,7 +367,6 @@ class TestPanel:
         self.left_symbol = tk.StringVar(value="spade")
         self.right_symbol = tk.StringVar(value="spade")
         self.slot_id = tk.StringVar(value="AUTO")
-        self.error_text = tk.StringVar(value="test failure")
         self.fsm_state = tk.StringVar(value="연결 대기")
         self.fsm_detail = tk.StringVar(value="Auto Dock status 수신 전")
         # Match the established vehicle teleop defaults.  The previous
@@ -346,6 +375,7 @@ class TestPanel:
         self.manual_angular_speed = tk.StringVar(value="0.35")
         self.manual_status = tk.StringVar(value="정지")
         self.lidar_ranges = tk.StringVar(value="LiDAR 수신 대기")
+        self.lidar_record_status = tk.StringVar(value="LiDAR 기록 꺼짐")
         self.motion_watchdog_enabled = tk.BooleanVar(value=False)
         self.motion_watchdog_status = tk.StringVar(value="꺼짐")
         self.last_lidar_log_at = 0.0
@@ -355,6 +385,10 @@ class TestPanel:
         self.manual_release_jobs = {}
         self.last_yolo_signature = None
         self.log_entries = deque(maxlen=10)
+        self.lidar_record_file = None
+        self.lidar_record_path = None
+        self.lidar_record_scan_count = 0
+        self.lidar_record_cmd_count = 0
         self.config_path = Path(args.config)
         self.tuning_vars = {
             key: tk.StringVar(value=str(default))
@@ -487,7 +521,43 @@ class TestPanel:
             manual, textvariable=self.lidar_ranges,
             font=("DejaVu Sans Mono", 10),
         ).grid(row=3, column=0, columnspan=4, sticky="w", pady=(7, 0))
+        self.lidar_record_button = ttk.Button(
+            manual, text="LiDAR 기록 시작", command=self.toggle_lidar_recording,
+            style="Compact.TButton",
+        )
+        self.lidar_record_button.grid(
+            row=4, column=0, columnspan=2, sticky="ew", pady=(7, 0), padx=(0, 4)
+        )
+        ttk.Label(
+            manual, textvariable=self.lidar_record_status,
+            font=("DejaVu Sans Mono", 9),
+        ).grid(row=4, column=2, columnspan=2, sticky="w", pady=(7, 0))
         manual.columnconfigure(3, weight=1)
+
+        search_options = ttk.LabelFrame(
+            monitor, text="SEARCHING 방식 · 복수 선택 가능", padding=6
+        )
+        search_options.pack(fill="x", padx=4, pady=(3, 3))
+        for index, (key, label) in enumerate(CHECKBOX_FIELDS):
+            ttk.Checkbutton(
+                search_options, text=label, variable=self.tuning_vars[key],
+                onvalue="1", offvalue="0",
+            ).grid(
+                row=index // 2, column=index % 2, sticky="w", padx=5, pady=2
+            )
+        ttk.Label(
+            search_options,
+            text=(
+                "둘 다 선택하면 후방 30cm를 먼저 확보한 뒤 YOLO 기준으로 탐색 · "
+                "backoff는 safety가 켜져야 동작"
+            ),
+        ).grid(row=3, column=0, columnspan=2, sticky="w", padx=5, pady=(3, 0))
+        self.add_action_button(
+            search_options, "체크박스 설정 저장 · 다음 Arrival부터 적용",
+            self.save_tuning, row=4, column=0, columnspan=2, padx=5, pady=(5, 2),
+        )
+        for column in range(2):
+            search_options.columnconfigure(column, weight=1)
 
         fsm = ttk.LabelFrame(controls, text="현재 Auto Dock 상태머신", padding=8)
         fsm.pack(fill="x", padx=12, pady=6)
@@ -617,8 +687,11 @@ class TestPanel:
         )
         tuning = self.tuning_frame
         tuning_columns = 5
+        entry_fields = [
+            field for field in TUNING_FIELDS if field[0] not in CHECKBOX_KEYS
+        ]
         for index, (key, label, _default, _kind, _minimum, _maximum) in enumerate(
-            TUNING_FIELDS
+            entry_fields
         ):
             column = index % tuning_columns
             label_row = (index // tuning_columns) * 2
@@ -629,7 +702,7 @@ class TestPanel:
                 tuning, textvariable=self.tuning_vars[key], width=12
             ).grid(row=label_row + 1, column=column, sticky="ew", padx=3)
             tuning.columnconfigure(column, weight=1)
-        action_row = ((len(TUNING_FIELDS) - 1) // tuning_columns + 1) * 2
+        action_row = ((len(entry_fields) - 1) // tuning_columns + 1) * 2
         self.add_action_button(
             tuning, "설정 저장", self.save_tuning,
             row=action_row, column=0, columnspan=tuning_columns, pady=(8, 3),
@@ -638,7 +711,7 @@ class TestPanel:
             row=action_row + 1, column=0, columnspan=tuning_columns, sticky="w", padx=3
         )
 
-        actions = ttk.LabelFrame(controls, text="적재·포크 시험 버튼", padding=4)
+        actions = ttk.LabelFrame(controls, text="적재·포크 명령", padding=4)
         self.actions_frame = actions
         actions.pack(fill="x", padx=12, pady=4)
         for column, state in enumerate(("UNLOADED", "LOADED")):
@@ -653,16 +726,11 @@ class TestPanel:
                 lambda value=command: self.publish_fork_command(value),
                 row=0, column=column + 2, padx=2, pady=1,
             )
-        for column, (text, command) in enumerate((
-            ("UP_COMPLETE", lambda: self.publish_fork("UP_COMPLETE")),
-            ("DOWN_COMPLETE", lambda: self.publish_fork("DOWN_COMPLETE")),
-            ("FAILED", lambda: self.publish_fork("FAILED")),
-        )):
-            self.add_action_button(
-                actions, text, command, row=1, column=column, padx=2, pady=1
-            )
-        ttk.Entry(actions, textvariable=self.error_text).grid(
-            row=1, column=3, columnspan=2, sticky="ew", padx=2, pady=1
+        ttk.Label(
+            actions,
+            text="완료 상태는 fork_controller 리미트 스위치에서 자동 발행",
+        ).grid(
+            row=1, column=0, columnspan=5, sticky="w", padx=2, pady=2
         )
         for column in range(5):
             actions.columnconfigure(column, weight=1)
@@ -831,6 +899,7 @@ class TestPanel:
     def publish_manual_velocity(self):
         if not self.require_enabled() or not self.manual_engaged:
             self.node.publish_cmd_vel()
+            self.record_manual_velocity(0.0, 0.0, 0.0)
             self.manual_status.set("정지")
             return
         speeds = self.manual_speeds()
@@ -842,6 +911,7 @@ class TestPanel:
         linear_y = linear * (("a" in self.manual_keys) - ("d" in self.manual_keys))
         angular_z = angular * (("q" in self.manual_keys) - ("e" in self.manual_keys))
         self.node.publish_cmd_vel(linear_x, linear_y, angular_z)
+        self.record_manual_velocity(linear_x, linear_y, angular_z)
         keys = "+".join(sorted(self.manual_keys)) or "정지"
         self.manual_status.set(
             f"{keys.upper()} · x={linear_x:+.2f} y={linear_y:+.2f} yaw={angular_z:+.2f}"
@@ -871,7 +941,13 @@ class TestPanel:
             self.tuning_notice.set(f"설정 읽기 실패: {exc}")
             return
         for key, _label, default, _kind, _minimum, _maximum in TUNING_FIELDS:
-            self.tuning_vars[key].set(str(payload.get(key, default)))
+            value = payload.get(key, default)
+            if key in CHECKBOX_KEYS:
+                if isinstance(value, str):
+                    value = value.strip().lower() in {"1", "true", "yes", "on"}
+                self.tuning_vars[key].set("1" if bool(value) else "0")
+            else:
+                self.tuning_vars[key].set(str(value))
 
     def save_tuning(self):
         if not self.require_enabled():
@@ -953,11 +1029,6 @@ class TestPanel:
         self.manual_takeover_active = False
         self.node.publish_arrival(self.arrival_payload())
 
-    def publish_fork(self, state):
-        if self.require_enabled():
-            error = self.error_text.get().strip() if state == "FAILED" else ""
-            self.node.publish_fork_state(state, error)
-
     def publish_fork_command(self, command):
         if self.require_enabled():
             self.node.publish_fork_command(command)
@@ -1005,7 +1076,100 @@ class TestPanel:
         }
         self.fsm_state_label.configure(bg=colors.get(state, "#334155"))
 
-    def update_lidar_ranges(self, nearest):
+    @staticmethod
+    def record_timestamp():
+        return datetime.now().astimezone().isoformat(timespec="milliseconds")
+
+    def write_lidar_record(self, payload):
+        if self.lidar_record_file is None:
+            return
+        payload = {"recorded_at": self.record_timestamp(), **payload}
+        try:
+            self.lidar_record_file.write(
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+            )
+            self.lidar_record_file.flush()
+        except OSError as exc:
+            self.stop_lidar_recording(f"기록 실패: {exc}")
+
+    def toggle_lidar_recording(self):
+        if self.lidar_record_file is None:
+            self.start_lidar_recording()
+        else:
+            self.stop_lidar_recording()
+
+    def start_lidar_recording(self):
+        record_dir = Path(self.args.lidar_record_dir).expanduser()
+        filename = datetime.now().strftime(
+            f"vehicle_{self.args.vehicle}_lidar_%Y%m%d_%H%M%S_%f.jsonl"
+        )
+        path = record_dir / filename
+        try:
+            record_dir.mkdir(parents=True, exist_ok=True)
+            self.lidar_record_file = path.open("x", encoding="utf-8", buffering=1)
+        except OSError as exc:
+            self.lidar_record_status.set(f"기록 시작 실패: {exc}")
+            self.append_log("ERR", "lidar_record", str(exc))
+            return
+        self.lidar_record_path = path
+        self.lidar_record_scan_count = 0
+        self.lidar_record_cmd_count = 0
+        self.lidar_record_button.configure(text="LiDAR 기록 종료")
+        self.lidar_record_status.set(f"기록 중: {path.name}")
+        self.write_lidar_record({
+            "event": "recording_started",
+            "vehicle": self.args.vehicle,
+            "scan_topic": "/scan_raw",
+            "cmd_vel_topic": "/controller/cmd_vel",
+            "max_range_cm": 30.0,
+        })
+        self.append_log("REC", "lidar_record", str(path))
+
+    def stop_lidar_recording(self, status=None):
+        record_file = self.lidar_record_file
+        if record_file is None:
+            return
+        self.lidar_record_file = None
+        if status is None:
+            try:
+                payload = {
+                    "recorded_at": self.record_timestamp(),
+                    "event": "recording_stopped",
+                    "scan_count": self.lidar_record_scan_count,
+                    "manual_cmd_count": self.lidar_record_cmd_count,
+                }
+                record_file.write(
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                    + "\n"
+                )
+                record_file.flush()
+            except OSError as exc:
+                status = f"기록 종료 실패: {exc}"
+        try:
+            record_file.close()
+        except OSError:
+            pass
+        self.lidar_record_button.configure(text="LiDAR 기록 시작")
+        summary = status or (
+            f"저장 완료: {self.lidar_record_path} "
+            f"(scan {self.lidar_record_scan_count}, cmd {self.lidar_record_cmd_count})"
+        )
+        self.lidar_record_status.set(summary)
+        self.append_log("REC", "lidar_record", summary)
+
+    def record_manual_velocity(self, linear_x, linear_y, angular_z):
+        if self.lidar_record_file is None:
+            return
+        self.lidar_record_cmd_count += 1
+        self.write_lidar_record({
+            "event": "manual_cmd_vel",
+            "keys": sorted(self.manual_keys),
+            "linear_x_m_s": round(float(linear_x), 4),
+            "linear_y_m_s": round(float(linear_y), 4),
+            "angular_z_rad_s": round(float(angular_z), 4),
+        })
+
+    def update_lidar_ranges(self, message, nearest):
         def shown(direction):
             distance = nearest.get(direction, math.inf)
             return "---" if not math.isfinite(distance) else f"{distance * 100.0:.1f}cm"
@@ -1019,6 +1183,34 @@ class TestPanel:
         if now - self.last_lidar_log_at >= 1.0:
             self.last_lidar_log_at = now
             self.append_log("SUB", "/scan_raw", text)
+        if self.lidar_record_file is not None:
+            points = []
+            minimum = max(float(message.range_min), 0.03)
+            for index, distance in enumerate(message.ranges):
+                distance = float(distance)
+                if not math.isfinite(distance) or distance < minimum or distance > 0.30:
+                    continue
+                angle = float(message.angle_min) + index * float(message.angle_increment)
+                points.append({
+                    "index": index,
+                    "angle_deg": round(math.degrees(angle), 3),
+                    "range_cm": round(distance * 100.0, 2),
+                })
+            self.lidar_record_scan_count += 1
+            self.write_lidar_record({
+                "event": "scan",
+                "ros_stamp_sec": int(message.header.stamp.sec),
+                "ros_stamp_nanosec": int(message.header.stamp.nanosec),
+                "frame_id": message.header.frame_id,
+                "nearest_cm": {
+                    direction: (
+                        None if not math.isfinite(distance)
+                        else round(float(distance) * 100.0, 2)
+                    )
+                    for direction, distance in nearest.items()
+                },
+                "points_within_30cm": points,
+            })
 
     def update_yolo(self, raw):
         try:
@@ -1068,6 +1260,7 @@ class TestPanel:
 
     def close(self):
         self.stop_manual_drive()
+        self.stop_lidar_recording()
         self.node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
@@ -1079,6 +1272,10 @@ def parse_args():
     parser.add_argument("--vehicle", type=int, choices=(1, 2), default=1)
     parser.add_argument("--ros-domain-id", type=int)
     parser.add_argument("--config", default="/shared/vehicle_pose_config.json")
+    parser.add_argument(
+        "--lidar-record-dir", default="/shared/lidar_records",
+        help="directory for manual-search LiDAR JSONL recordings",
+    )
     parser.add_argument(
         "--image-topic", default="/ascamera/camera_publisher/rgb0/image"
     )

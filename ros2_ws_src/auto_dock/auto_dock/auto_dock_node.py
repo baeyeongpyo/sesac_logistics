@@ -48,6 +48,9 @@ def public_fsm_state(internal_state, operation, event_state="", was_docking=Fals
     return {
         "idle": "IDLE",
         "ready": "READY",
+        "scan_sweep": "SEARCHING",
+        "scan_forward_search": "SEARCHING",
+        "scan_approach": "ALIGNING",
         "search": "SEARCHING",
         "confirm": "SEARCHING",
         "coarse_align": "ALIGNING",
@@ -598,9 +601,22 @@ class AutoDockNode(Node):
         self.coarse_alignment_started_at = None
         self.coarse_depth_fallback_frames = 0
         self.coarse_last_counted_stamp = None
+        self.alignment_best_pose = None
+        self.alignment_best_score = math.inf
+        self.alignment_bad_frames = 0
+        self.alignment_good_frames = 0
+        self.alignment_last_good_stamp = None
+        self.alignment_lost_since = None
+        self.alignment_recovery_pose = None
         self.odom_position = None
         self.odom_yaw = None
         self.search_heading_yaw = None
+        self.scan_sweep_started_yaw = None
+        self.scan_sweep_phase = 0
+        self.scan_candidate_seen_at = None
+        self.scan_leftmost_tag_yaw = None
+        self.scan_forward_started_position = None
+        self.scan_forward_phase = 0
         self.nearest_range = math.inf
         self.nearest_angle = None
         self.scan_points = []
@@ -621,6 +637,7 @@ class AutoDockNode(Node):
         self.post_lift_reverse_target_m = None
         self.completed_insertion_distance_m = None
         self.right_turn_target_yaw = None
+        self.right_turn_clearance_wait_started_at = None
         self.backoff_until = None
         self.backoff_command = (0.0, 0.0)
         self.backoff_direction = None
@@ -805,6 +822,7 @@ class AutoDockNode(Node):
         self.post_lift_reverse_target_m = None
         self.completed_insertion_distance_m = None
         self.right_turn_target_yaw = None
+        self.right_turn_clearance_wait_started_at = None
         self.candidate_stop_due_at = None
         self.candidate_confirmation_started_at = None
         self.candidate_retry_not_before = 0.0
@@ -815,10 +833,25 @@ class AutoDockNode(Node):
         self.tape_recovery_direction = None
         self.tape_recovery_done = False
         self.reset_coarse_alignment()
+        self.reset_alignment_recovery()
         self.search_heading_yaw = self.odom_yaw
         self.send_yolo_target()
-        self.state = "search"
-        self.reason = "search_started"
+        if self.boolean("nav2_scan_approach_enabled", False):
+            if self.odom_yaw is None:
+                self.state = "search"
+                self.reason = "scan_approach_odom_missing_fallback_search"
+            else:
+                self.scan_sweep_started_yaw = self.odom_yaw
+                self.scan_sweep_phase = 0
+                self.scan_candidate_seen_at = None
+                self.scan_leftmost_tag_yaw = None
+                self.scan_forward_started_position = None
+                self.scan_forward_phase = 0
+                self.state = "scan_sweep"
+                self.reason = "nav2_scan_sweep_started"
+        else:
+            self.state = "search"
+            self.reason = "search_started"
         self.publish_status(
             "running", self.reason, left=self.target_left,
             right=self.target_right, target_type=target["type"],
@@ -884,15 +917,23 @@ class AutoDockNode(Node):
         self.candidate_stop_due_at = None
         self.candidate_confirmation_started_at = None
         self.candidate_retry_not_before = 0.0
+        self.scan_sweep_started_yaw = None
+        self.scan_sweep_phase = 0
+        self.scan_candidate_seen_at = None
+        self.scan_leftmost_tag_yaw = None
+        self.scan_forward_started_position = None
+        self.scan_forward_phase = 0
         self.tape_recovery_start_position = None
         self.tape_recovery_direction = None
         self.tape_recovery_done = False
         self.reset_coarse_alignment()
+        self.reset_alignment_recovery()
         self.post_lift_reverse_start = None
         self.post_lift_reverse_start_yaw = None
         self.post_lift_reverse_target_m = None
         self.completed_insertion_distance_m = None
         self.right_turn_target_yaw = None
+        self.right_turn_clearance_wait_started_at = None
         self.insert_start_yaw = None
         self.insertion_entry_gap_m = None
         self.insertion_start_due_at = None
@@ -1022,7 +1063,7 @@ class AutoDockNode(Node):
             "lidar_self_mask_front_half_angle_deg", 20.0, 0.0, 90.0
         ))
         max_range = self.number(
-            "lidar_self_mask_front_max_range_m", 0.18, 0.0, 1.0
+            "lidar_self_mask_front_max_range_m", 0.20, 0.0, 1.0
         )
         if abs(normalize_angle(angle)) <= half_angle and distance <= max_range:
             return True
@@ -1043,8 +1084,8 @@ class AutoDockNode(Node):
         """Check the actual rectangular footprint swept through a right turn."""
         if time.monotonic() - getattr(self, "scan_updated_at", 0.0) > 0.5:
             return False, None, None
-        body_front = self.number("lidar_body_front_extent_m", 0.35, 0.01, 2.0)
-        body_rear = self.number("lidar_body_rear_extent_m", 0.05, 0.01, 2.0)
+        body_front = self.number("lidar_body_front_extent_m", 0.30, 0.01, 2.0)
+        body_rear = self.number("lidar_body_rear_extent_m", 0.06, 0.01, 2.0)
         # Pure angular cmd_vel rotates around base_footprint, not around the
         # rear-mounted LiDAR.  For the 40 cm body that center is 15 cm ahead
         # of the LiDAR origin.
@@ -1055,7 +1096,7 @@ class AutoDockNode(Node):
                 "lidar_loaded_front_extent_m", 0.48, body_front, 1.50
             ) - center_x
         rear = body_rear + center_x
-        half_width = self.number("lidar_body_half_width_m", 0.085, 0.01, 1.0)
+        half_width = self.number("lidar_body_half_width_m", 0.06, 0.01, 1.0)
         edge_clearance = max(
             self.number(f"lidar_{direction}_clearance_m", 0.01, 0.0, 2.0)
             for direction in ("front", "rear", "left", "right")
@@ -1095,11 +1136,11 @@ class AutoDockNode(Node):
         )
 
     def lidar_body_boundary_distance(self, angle):
-        """Distance from the LiDAR origin to the 40 x 17 cm vehicle outline."""
-        front = self.number("lidar_body_front_extent_m", 0.35, 0.01, 2.0)
-        rear = self.number("lidar_body_rear_extent_m", 0.05, 0.01, 2.0)
+        """Distance from the LiDAR origin to the 36 x 12 cm vehicle outline."""
+        front = self.number("lidar_body_front_extent_m", 0.30, 0.01, 2.0)
+        rear = self.number("lidar_body_rear_extent_m", 0.06, 0.01, 2.0)
         half_width = self.number(
-            "lidar_body_half_width_m", 0.085, 0.01, 1.0
+            "lidar_body_half_width_m", 0.06, 0.01, 1.0
         )
         x_component = math.cos(angle)
         y_component = math.sin(angle)
@@ -1303,6 +1344,30 @@ class AutoDockNode(Node):
         self.coarse_depth_fallback_frames = 0
         self.coarse_last_counted_stamp = None
 
+    def reset_alignment_recovery(self):
+        self.alignment_best_pose = None
+        self.alignment_best_score = math.inf
+        self.alignment_bad_frames = 0
+        self.alignment_good_frames = 0
+        self.alignment_last_good_stamp = None
+        self.alignment_lost_since = None
+        self.alignment_recovery_pose = None
+
+    def yaw_source_disagreement_deg(self, candidate, pnp):
+        if pnp.get("depth_fallback"):
+            return 0.0
+        depth_yaw = (candidate.get("depth_yaw") or {}).get("yaw_deg")
+        pnp_yaw = pnp.get("yaw_deg")
+        if depth_yaw is None or pnp_yaw is None:
+            return 0.0
+        return abs(math.degrees(normalize_angle(
+            math.radians(-float(pnp_yaw) - float(depth_yaw))
+        )))
+
+    def yaw_sources_agree(self, candidate, pnp):
+        maximum = self.number("alignment_yaw_source_max_delta_deg", 8.0, 1.0, 30.0)
+        return AutoDockNode.yaw_source_disagreement_deg(self, candidate, pnp) <= maximum
+
     def enter_alignment(self, candidate, pnp):
         entity_id = candidate.get("entity_id")
         if entity_id is not None:
@@ -1313,10 +1378,17 @@ class AutoDockNode(Node):
         if pnp.get("depth_fallback"):
             self.enter_coarse_alignment("pnp_quality_fallback")
             return True
+        if not AutoDockNode.yaw_sources_agree(self, candidate, pnp):
+            self.stop_drive()
+            self.enter_coarse_alignment("yaw_sources_disagree")
+            return True
         if not self.update_world_target(candidate, pnp):
             return False
         self.state = "docking"
         self.reset_coarse_alignment()
+        self.reset_alignment_recovery()
+        if self.odom_position is not None and self.odom_yaw is not None:
+            self.alignment_best_pose = (*self.odom_position, self.odom_yaw)
         self.publish_status(
             "running", "virtual_target_locked_docking",
             measurement_source=pnp.get("distance_source", "depth"),
@@ -1396,9 +1468,11 @@ class AutoDockNode(Node):
             return False
         default_clearance = self.number("lidar_stop_distance_m", 0.35, 0.05, 2.0)
         violations = []
-        if self.state == "search":
+        if self.state in {"search", "scan_forward_search"}:
             monitored = ("front", "rear", "left", "right")
-        elif self.state in {"coarse_align", "docking", "inserting"}:
+        elif self.state in {
+            "scan_approach", "coarse_align", "docking", "inserting"
+        }:
             # The selected pallet is intentionally inside the front clearance.
             monitored = ("left", "right", "rear")
         elif self.state == "reversing_after_lift":
@@ -1460,7 +1534,13 @@ class AutoDockNode(Node):
             return
         if self.state == "idle":
             return
-        if self.state == "search":
+        if self.state == "scan_sweep":
+            self.tick_scan_sweep()
+        elif self.state == "scan_forward_search":
+            self.tick_scan_forward_search()
+        elif self.state == "scan_approach":
+            self.tick_scan_approach()
+        elif self.state == "search":
             self.tick_search()
         elif self.state == "confirm":
             self.tick_confirm()
@@ -1478,6 +1558,247 @@ class AutoDockNode(Node):
             self.tick_turning_right_for_ready()
         elif self.state == "safety_backoff":
             self.tick_backoff()
+
+    def tick_scan_sweep(self):
+        """Sweep a small yaw arc after Nav2 arrival and lock a visible target."""
+        now = time.monotonic()
+        AutoDockNode.remember_leftmost_scan_tag(self)
+        candidate, pnp, reason = self.valid_measurement()
+        if candidate is not None:
+            self.stop_drive(5)
+            if not self.update_world_target(candidate, pnp):
+                self.cancel("odom_missing")
+                return
+            self.target_entity_id = candidate.get("entity_id")
+            self.state = "scan_approach"
+            self.scan_candidate_seen_at = None
+            self.publish_status(
+                "running", "scan_target_locked_approaching",
+                measurement_source=pnp.get("distance_source", "depth"),
+            )
+            return
+
+        raw, _raw_pnp = self.selected_candidate()
+        if raw is not None:
+            if self.scan_candidate_seen_at is None:
+                self.scan_candidate_seen_at = now
+            self.stop_drive()
+            confirmation_wait = self.number(
+                "nav2_scan_confirmation_sec", 0.8, 0.1, 3.0
+            )
+            if now - self.scan_candidate_seen_at < confirmation_wait:
+                self.publish_status(
+                    "running", "scan_candidate_confirming",
+                    measurement_reason=reason,
+                )
+                return
+            self.scan_candidate_seen_at = None
+        else:
+            self.scan_candidate_seen_at = None
+
+        if self.odom_yaw is None or self.scan_sweep_started_yaw is None:
+            self.state = "search"
+            self.publish_status("running", "scan_odom_missing_fallback_search")
+            return
+        angle = math.radians(self.number("nav2_scan_angle_deg", 20.0, 2.0, 30.0))
+        targets = (angle, -angle, 0.0)
+        phase = min(self.scan_sweep_phase, len(targets) - 1)
+        target_offset = targets[phase]
+        current_offset = normalize_angle(self.odom_yaw - self.scan_sweep_started_yaw)
+        error = normalize_angle(target_offset - current_offset)
+        tolerance = math.radians(
+            self.number("nav2_scan_tolerance_deg", 1.5, 0.5, 5.0)
+        )
+        if abs(error) <= tolerance:
+            self.stop_drive()
+            self.scan_sweep_phase += 1
+            if self.scan_sweep_phase >= len(targets):
+                if (
+                    self.scan_leftmost_tag_yaw is not None
+                    and self.odom_position is not None
+                ):
+                    self.state = "scan_forward_search"
+                    self.scan_forward_started_position = self.odom_position
+                    self.scan_forward_phase = 0
+                    self.publish_status(
+                        "running", "scan_complete_leftmost_tag_forward_search",
+                        reference_yaw_deg=round(
+                            math.degrees(self.scan_leftmost_tag_yaw), 1
+                        ),
+                    )
+                else:
+                    self.state = "search"
+                    self.search_heading_yaw = self.odom_yaw
+                    self.publish_status(
+                        "running", "scan_complete_no_tag_fallback_lateral_search"
+                    )
+                return
+            self.publish_status(
+                "running", "scan_sweep_endpoint",
+                phase=self.scan_sweep_phase,
+                yaw_offset_deg=round(math.degrees(current_offset), 1),
+            )
+            return
+        speed = self.number("nav2_scan_angular_speed_rad_s", 0.18, 0.05, 0.40)
+        angular = math.copysign(min(speed, max(0.08, abs(error))), error)
+        self.publish_drive(0.0, 0.0, angular)
+        self.publish_status(
+            "running", "nav2_scan_sweeping",
+            phase=phase,
+            target_yaw_offset_deg=round(math.degrees(target_offset), 1),
+            yaw_error_deg=round(math.degrees(error), 1),
+        )
+
+    def remember_leftmost_scan_tag(self):
+        """Remember the world bearing of the leftmost visible non-pallet tag."""
+        detection = getattr(self, "latest_detection", None)
+        if (
+            detection is None
+            or time.monotonic() - getattr(self, "latest_detection_at", 0.0) > 0.8
+            or getattr(self, "odom_yaw", None) is None
+        ):
+            return
+        tags = [
+            item for item in (detection.get("detections") or [])
+            if isinstance(item, dict)
+            and item.get("class") in SYMBOLS
+            and isinstance(item.get("box"), list)
+            and len(item["box"]) == 4
+        ]
+        if not tags:
+            return
+        leftmost = min(tags, key=lambda item: 0.5 * (item["box"][0] + item["box"][2]))
+        center_x = 0.5 * (float(leftmost["box"][0]) + float(leftmost["box"][2]))
+        image_width = self.number("detection_image_width_px", 640.0, 100.0, 4000.0)
+        horizontal_fov = math.radians(
+            self.number("camera_horizontal_fov_deg", 60.0, 20.0, 120.0)
+        )
+        # Image-left is positive body yaw.
+        image_error = clamp((0.5 * image_width - center_x) / (0.5 * image_width), -1.0, 1.0)
+        observed_yaw = normalize_angle(
+            self.odom_yaw + image_error * 0.5 * horizontal_fov
+        )
+        if self.scan_sweep_started_yaw is None:
+            self.scan_leftmost_tag_yaw = observed_yaw
+            return
+        observed_offset = normalize_angle(observed_yaw - self.scan_sweep_started_yaw)
+        remembered_offset = (
+            -math.inf if self.scan_leftmost_tag_yaw is None
+            else normalize_angle(
+                self.scan_leftmost_tag_yaw - self.scan_sweep_started_yaw
+            )
+        )
+        if observed_offset > remembered_offset:
+            self.scan_leftmost_tag_yaw = observed_yaw
+
+    def tick_scan_forward_search(self):
+        """Move forward while sweeping yaw around the leftmost-tag bearing."""
+        candidate, pnp, _reason = self.valid_measurement()
+        if candidate is not None:
+            self.stop_drive(5)
+            if not self.update_world_target(candidate, pnp):
+                self.cancel("odom_missing")
+                return
+            self.target_entity_id = candidate.get("entity_id")
+            self.state = "scan_approach"
+            self.publish_status("running", "forward_search_target_locked")
+            return
+        if (
+            self.odom_yaw is None
+            or self.odom_position is None
+            or self.scan_leftmost_tag_yaw is None
+            or self.scan_forward_started_position is None
+        ):
+            self.stop_drive()
+            self.state = "search"
+            self.publish_status("running", "forward_search_pose_missing_fallback")
+            return
+        travelled = math.hypot(
+            self.odom_position[0] - self.scan_forward_started_position[0],
+            self.odom_position[1] - self.scan_forward_started_position[1],
+        ) * self.number("distance_coefficient", 1.0, 0.10, 2.0)
+        maximum_distance = self.number(
+            "nav2_forward_search_max_distance_m", 1.0, 0.20, 3.0
+        )
+        if travelled >= maximum_distance:
+            self.stop_drive(5)
+            self.state = "search"
+            self.search_heading_yaw = self.odom_yaw
+            self.publish_status(
+                "running", "forward_search_distance_limit_fallback",
+                travelled_m=round(travelled, 2),
+            )
+            return
+        angle = math.radians(self.number("nav2_scan_angle_deg", 20.0, 2.0, 30.0))
+        offsets = (0.0, angle, -angle)
+        target_yaw = normalize_angle(
+            self.scan_leftmost_tag_yaw + offsets[self.scan_forward_phase]
+        )
+        error = normalize_angle(target_yaw - self.odom_yaw)
+        tolerance = math.radians(
+            self.number("nav2_scan_tolerance_deg", 1.5, 0.5, 5.0)
+        )
+        if abs(error) <= tolerance:
+            self.scan_forward_phase = (self.scan_forward_phase + 1) % len(offsets)
+        speed = self.number("nav2_forward_search_speed_m_s", 0.08, 0.05, 0.15)
+        max_yaw = self.number(
+            "nav2_scan_angular_speed_rad_s", 0.18, 0.05, 0.40
+        )
+        self.publish_drive(
+            speed,
+            0.0,
+            clamp(1.2 * error, -max_yaw, max_yaw),
+        )
+        self.publish_status(
+            "running", "leftmost_tag_forward_sweep_search",
+            travelled_m=round(travelled, 2),
+            yaw_error_deg=round(math.degrees(error), 1),
+        )
+
+    def tick_scan_approach(self):
+        """Approach the locked target, then hand control to existing alignment."""
+        candidate, pnp, _reason = self.valid_measurement()
+        if candidate is not None:
+            entity_id = candidate.get("entity_id")
+            if self.target_entity_id is None or entity_id in {None, self.target_entity_id}:
+                self.update_world_target(candidate, pnp, blend_existing=True)
+        target = self.target_in_body()
+        if target is None:
+            self.cancel("scan_approach_target_missing")
+            return
+        forward, lateral, _target_yaw = target
+        forward_actual = forward * self.number(
+            "distance_coefficient", 1.0, 0.10, 2.0
+        )
+        standoff = self.number("nav2_approach_standoff_m", 0.22, 0.12, 1.0)
+        if forward_actual <= standoff:
+            self.stop_drive(5)
+            if candidate is not None:
+                if not self.enter_alignment(candidate, pnp):
+                    self.cancel("scan_approach_entity_changed")
+            else:
+                self.state = "docking"
+                self.publish_status("running", "scan_approach_complete_aligning")
+            return
+        if forward <= 0.0:
+            self.cancel("scan_approach_target_behind")
+            return
+        bearing = math.atan2(lateral, forward)
+        speed = self.number("nav2_approach_speed_m_s", 0.08, 0.05, 0.15)
+        max_yaw = self.number(
+            "nav2_approach_max_angular_speed_rad_s", 0.16, 0.05, 0.25
+        )
+        self.publish_drive(
+            speed,
+            0.0,
+            clamp(1.2 * bearing, -max_yaw, max_yaw),
+        )
+        self.publish_status(
+            "running", "scan_target_approaching",
+            distance_cm=round(forward_actual * 100.0, 1),
+            bearing_deg=round(math.degrees(bearing), 1),
+            standoff_cm=round(standoff * 100.0, 1),
+        )
 
     def tick_search(self):
         candidate, _pnp = self.selected_candidate()
@@ -1520,6 +1841,147 @@ class AutoDockNode(Node):
             self.config.get("search_lateral_direction", "left")
         ).strip().lower()
         direction_sign = -1.0 if direction == "right" else 1.0
+        front_guidance_enabled = AutoDockNode.boolean(
+            self, "tag_guided_lateral_search_enabled", False
+        )
+        rear_guidance_enabled = AutoDockNode.boolean(
+            self, "search_rear_lidar_guidance_enabled", False
+        )
+        if rear_guidance_enabled:
+            maximum_scan_age = self.number(
+                "search_rear_lidar_max_age_sec", 0.50, 0.10, 2.0
+            )
+            scan_age = now - getattr(self, "scan_updated_at", 0.0)
+            if scan_age > maximum_scan_age:
+                self.stop_drive()
+                self.publish_status(
+                    "waiting", "rear_lidar_search_scan_stale",
+                    scan_age_sec=round(scan_age, 2),
+                    maximum_scan_age_sec=round(maximum_scan_age, 2),
+                )
+                return
+            rear_distance, rear_angle, _rear_threshold = getattr(
+                self, "nearest_by_direction", {}
+            ).get("rear", (math.inf, None, 0.0))
+            if not math.isfinite(rear_distance):
+                self.stop_drive()
+                self.publish_status(
+                    "waiting", "rear_lidar_search_distance_missing"
+                )
+                return
+            minimum_distance_cm = self.number(
+                "search_rear_lidar_min_distance_cm", 30.0, 5.0, 100.0
+            )
+            rear_distance_cm = rear_distance * 100.0
+            if rear_distance_cm < minimum_distance_cm:
+                forward_speed = self.number(
+                    "search_rear_lidar_forward_speed_m_s", 0.12, 0.05, 0.20
+                )
+                self.publish_drive(forward_speed, 0.0, 0.0)
+                self.publish_status(
+                    "running", "rear_lidar_distance_correction",
+                    rear_distance_cm=round(rear_distance_cm, 1),
+                    minimum_distance_cm=round(minimum_distance_cm, 1),
+                    rear_angle_deg=(
+                        None if rear_angle is None
+                        else round(math.degrees(rear_angle), 1)
+                    ),
+                )
+                return
+            if front_guidance_enabled:
+                # Rear clearance is satisfied.  Continue with option 1 so
+                # both checkboxes can be tested as a combined strategy.
+                pass
+            elif self.search_heading_yaw is None or self.odom_yaw is None:
+                self.stop_drive()
+                self.publish_status("waiting", "rear_lidar_search_odom_missing")
+                return
+            else:
+                yaw_deg = math.degrees(normalize_angle(
+                    self.search_heading_yaw - self.odom_yaw
+                ))
+                yaw_tolerance = self.number(
+                    "tag_search_yaw_tolerance_deg", 3.0, 0.5, 15.0
+                )
+                if abs(yaw_deg) > yaw_tolerance:
+                    max_yaw = self.number(
+                        "tag_search_max_angular_speed_rad_s", 0.06, 0.02, 0.15
+                    )
+                    angular = clamp(
+                        math.radians(yaw_deg) * 0.6, -max_yaw, max_yaw
+                    )
+                    self.publish_drive(0.0, 0.0, angular)
+                    self.publish_status(
+                        "running", "rear_lidar_yaw_correction_before_lateral",
+                        rear_distance_cm=round(rear_distance_cm, 1),
+                        yaw_deg=round(yaw_deg, 1),
+                    )
+                    return
+                self.publish_drive(0.0, direction_sign * lateral_speed, 0.0)
+                self.publish_status(
+                    "running", "rear_lidar_clearance_held_lateral_search",
+                    rear_distance_cm=round(rear_distance_cm, 1),
+                    minimum_distance_cm=round(minimum_distance_cm, 1),
+                    yaw_deg=round(yaw_deg, 1),
+                    lateral_speed_m_s=round(direction_sign * lateral_speed, 3),
+                )
+                return
+        if front_guidance_enabled:
+            observation = AutoDockNode.front_search_entity_observation(self)
+            if observation is None:
+                self.stop_drive()
+                self.publish_status("waiting", "tag_guided_search_depth_missing")
+                return
+            tag_class, distance_cm, bearing_deg = observation
+            if self.search_heading_yaw is None or self.odom_yaw is None:
+                self.stop_drive()
+                self.publish_status("waiting", "tag_guided_search_odom_missing")
+                return
+            yaw_deg = math.degrees(normalize_angle(
+                self.search_heading_yaw - self.odom_yaw
+            ))
+            yaw_tolerance = self.number(
+                "tag_search_yaw_tolerance_deg", 3.0, 0.5, 15.0
+            )
+            if abs(yaw_deg) > yaw_tolerance:
+                max_yaw = self.number(
+                    "tag_search_max_angular_speed_rad_s", 0.06, 0.02, 0.15
+                )
+                angular = clamp(
+                    math.radians(yaw_deg) * 0.6, -max_yaw, max_yaw
+                )
+                self.publish_drive(0.0, 0.0, angular)
+                self.publish_status(
+                    "running", "tag_yaw_correction_before_lateral",
+                    tag_class=tag_class,
+                    yaw_deg=round(yaw_deg, 1),
+                )
+                return
+            maximum_distance = self.number(
+                "tag_search_max_distance_cm", 20.0, 5.0, 100.0
+            )
+            if distance_cm > maximum_distance:
+                forward_speed = self.number(
+                    "tag_search_forward_correction_speed_m_s", 0.12, 0.08, 0.20
+                )
+                self.publish_drive(forward_speed, 0.0, 0.0)
+                self.publish_status(
+                    "running", "front_tag_distance_correction",
+                    tag_class=tag_class,
+                    distance_cm=round(distance_cm, 1),
+                    maximum_distance_cm=round(maximum_distance, 1),
+                )
+                return
+            self.publish_drive(0.0, direction_sign * lateral_speed, 0.0)
+            self.publish_status(
+                "running", "front_tag_pose_held_lateral_search",
+                tag_class=tag_class,
+                distance_cm=round(distance_cm, 1),
+                bearing_deg=round(bearing_deg, 1),
+                yaw_deg=round(yaw_deg, 1),
+                lateral_speed_m_s=round(direction_sign * lateral_speed, 3),
+            )
+            return
         # The real mecanum base drifts rearward during a pure strafe.  Keep the
         # proven manual lateral speed and mix in a small forward feed-forward
         # correction without letting either wheel pair enter the unstable
@@ -1541,6 +2003,49 @@ class AutoDockNode(Node):
         self.publish_drive(
             forward_compensation, direction_sign * lateral_speed, 0.0
         )
+
+    def front_search_entity_observation(self):
+        """Return the image-centered individual symbol with registered depth."""
+        detection = getattr(self, "latest_detection", None)
+        if (
+            detection is None
+            or time.monotonic() - getattr(self, "latest_detection_at", 0.0) > 0.8
+        ):
+            return None
+        observations = []
+        maximum_noise_distance = self.number(
+            "tag_search_noise_max_distance_cm", 30.0, 10.0, 100.0
+        )
+        for tag in detection.get("detections") or []:
+            if not isinstance(tag, dict) or tag.get("class") not in SYMBOLS:
+                continue
+            box = tag.get("box")
+            if not isinstance(box, list) or len(box) != 4:
+                continue
+            depth = tag.get("depth") or {}
+            distance = depth.get("forward_distance_cm")
+            bearing = depth.get("bearing_deg")
+            try:
+                distance = float(distance)
+                bearing = float(bearing)
+                center_x = 0.5 * (float(box[0]) + float(box[2]))
+            except (TypeError, ValueError):
+                continue
+            if (
+                not math.isfinite(distance)
+                or not math.isfinite(bearing)
+                or not 5.0 <= distance <= maximum_noise_distance
+                or abs(bearing) > 90.0
+            ):
+                continue
+            observations.append((tag.get("class"), distance, bearing, center_x))
+        if not observations:
+            return None
+        image_center_x = self.number(
+            "detection_image_width_px", 640.0, 100.0, 4000.0
+        ) * 0.5
+        selected = min(observations, key=lambda item: abs(item[3] - image_center_x))
+        return selected[0], selected[1], selected[2]
 
     def tick_missing_tape_recovery(self, now):
         """Nudge once toward the clearer longitudinal side while searching."""
@@ -1698,6 +2203,32 @@ class AutoDockNode(Node):
 
         measured_candidate, measured_pnp, measurement_reason = self.valid_measurement()
         if measured_candidate is not None and not measured_pnp.get("depth_fallback"):
+            if not AutoDockNode.yaw_sources_agree(self, measured_candidate, measured_pnp):
+                self.coarse_depth_fallback_frames = 0
+                self.coarse_last_counted_stamp = None
+                self.stop_drive()
+                self.publish_status(
+                    "waiting", "yaw_sources_disagree_remeasuring",
+                    yaw_delta_deg=round(AutoDockNode.yaw_source_disagreement_deg(self,
+                        measured_candidate, measured_pnp
+                    ), 1),
+                )
+                return
+            source_stamp = (self.latest_detection or {}).get("source_stamp_ns")
+            if source_stamp != self.coarse_last_counted_stamp:
+                self.coarse_last_counted_stamp = source_stamp
+                self.coarse_depth_fallback_frames += 1
+            required = int(self.number(
+                "alignment_yaw_confirmation_frames", 3, 1, 30
+            ))
+            if self.coarse_depth_fallback_frames < required:
+                self.stop_drive()
+                self.publish_status(
+                    "waiting", "yaw_sources_stabilizing",
+                    confirmed_frames=self.coarse_depth_fallback_frames,
+                    required_frames=required,
+                )
+                return
             if not self.enter_alignment(measured_candidate, measured_pnp):
                 self.cancel("odom_missing")
             return
@@ -1785,9 +2316,69 @@ class AutoDockNode(Node):
             self.state = "inserting"
             self.publish_status("running", "aligned_inserting")
             return
-        candidate, pnp, _ = self.valid_measurement()
-        if candidate is not None:
-            self.update_world_target(candidate, pnp, blend_existing=True)
+        if getattr(self, "alignment_recovery_pose", None) is not None:
+            AutoDockNode.tick_alignment_recovery(self)
+            return
+        candidate, pnp, measurement_reason = self.valid_measurement()
+        if candidate is None:
+            self.stop_drive()
+            self.alignment_good_frames = 0
+            self.alignment_last_good_stamp = None
+            if getattr(self, "alignment_lost_since", None) is None:
+                self.alignment_lost_since = now
+            lost_timeout = self.number(
+                "alignment_lost_recovery_sec", 0.5, 0.1, 3.0
+            )
+            if now - self.alignment_lost_since >= lost_timeout:
+                self.alignment_recovery_pose = getattr(
+                    self, "alignment_best_pose", None
+                )
+                AutoDockNode.tick_alignment_recovery(self)
+                return
+            self.publish_status(
+                "waiting", "alignment_target_lost_holding",
+                measurement_reason=measurement_reason,
+            )
+            return
+        self.alignment_lost_since = None
+        if not AutoDockNode.yaw_sources_agree(self, candidate, pnp):
+            self.stop_drive()
+            self.alignment_good_frames = 0
+            self.alignment_last_good_stamp = None
+            self.alignment_bad_frames = getattr(self, "alignment_bad_frames", 0) + 1
+            self.publish_status(
+                "waiting", "alignment_yaw_disagreement_holding",
+                yaw_delta_deg=round(
+                    AutoDockNode.yaw_source_disagreement_deg(self, candidate, pnp), 1
+                ),
+            )
+            if self.alignment_bad_frames >= int(self.number(
+                "alignment_worsening_frames", 3, 1, 20
+            )):
+                self.alignment_recovery_pose = getattr(
+                    self, "alignment_best_pose", None
+                )
+            return
+        source_stamp = (getattr(self, "latest_detection", None) or {}).get(
+            "source_stamp_ns"
+        )
+        if source_stamp is None or source_stamp != getattr(
+            self, "alignment_last_good_stamp", None
+        ):
+            self.alignment_last_good_stamp = source_stamp
+            self.alignment_good_frames = getattr(self, "alignment_good_frames", 0) + 1
+        required_good = int(self.number(
+            "alignment_yaw_confirmation_frames", 3, 1, 30
+        ))
+        if self.alignment_good_frames < required_good:
+            self.stop_drive()
+            self.publish_status(
+                "waiting", "alignment_yaw_stabilizing",
+                confirmed_frames=self.alignment_good_frames,
+                required_frames=required_good,
+            )
+            return
+        self.update_world_target(candidate, pnp, blend_existing=True)
         target = self.target_in_body()
         if target is None:
             self.cancel("odom_missing")
@@ -1800,8 +2391,47 @@ class AutoDockNode(Node):
         lateral_actual = lateral * self.number(
             "lateral_coefficient", 1.0, 0.10, 2.0
         )
+        translation_first = (
+            AutoDockNode.boolean(self, "translation_first_alignment_enabled", False)
+            if hasattr(self, "config") else False
+        )
+        maximum_trusted_yaw = math.radians(
+            self.number("alignment_max_trusted_yaw_deg", 12.0, 3.0, 30.0)
+        )
+        yaw_trusted = abs(yaw) <= maximum_trusted_yaw
+        alignment_score = (
+            abs(forward_actual - standoff)
+            + abs(lateral_actual)
+            + 0.20 * abs(yaw)
+        )
+        improvement = self.number(
+            "alignment_best_pose_improvement_m", 0.005, 0.001, 0.05
+        )
+        worsening = self.number(
+            "alignment_worsening_margin_m", 0.03, 0.005, 0.20
+        )
+        best_score = getattr(self, "alignment_best_score", math.inf)
+        if alignment_score + improvement < best_score:
+            self.alignment_best_score = alignment_score
+            self.alignment_bad_frames = 0
+            if self.odom_position is not None and self.odom_yaw is not None:
+                self.alignment_best_pose = (*self.odom_position, self.odom_yaw)
+        elif alignment_score > best_score + worsening:
+            self.alignment_bad_frames = getattr(self, "alignment_bad_frames", 0) + 1
+            if self.alignment_bad_frames >= int(self.number(
+                "alignment_worsening_frames", 3, 1, 20
+            )):
+                self.stop_drive()
+                self.alignment_recovery_pose = getattr(
+                    self, "alignment_best_pose", None
+                )
+                self.publish_status("recovering", "alignment_error_worsening_returning")
+                return
+        else:
+            self.alignment_bad_frames = 0
         distance_ready = 0.10 <= forward_actual <= standoff + 0.035
-        if distance_ready and abs(lateral_actual) < 0.025 and abs(yaw) < math.radians(3.0):
+        yaw_ready = abs(yaw) < math.radians(3.0)
+        if distance_ready and abs(lateral_actual) < 0.025 and yaw_ready:
             self.stop_drive(5)
             self.insertion_entry_gap_m = max(0.0, forward_actual)
             pause = self.number("motion_transition_pause_sec", 0.10, 0.10, 2.0)
@@ -1810,10 +2440,81 @@ class AutoDockNode(Node):
                 "running", "aligned_pause_before_insertion", pause_sec=pause
             )
             return
+        if translation_first:
+            forward_error = max(0.0, forward_actual - standoff)
+            forward_gain = self.number(
+                "translation_alignment_forward_gain", 0.8, 0.1, 2.0
+            )
+            max_forward = self.number(
+                "translation_alignment_max_forward_speed_m_s", 0.08, 0.03, 0.15
+            )
+            max_lateral = self.number(
+                "translation_alignment_max_lateral_speed_m_s", 0.08, 0.03, 0.15
+            )
+            max_angular = self.number(
+                "translation_alignment_max_angular_speed_rad_s", 0.12, 0.0, 0.20
+            )
+            angular = clamp(0.6 * yaw, -max_angular, max_angular)
+            min_angular = min(max_angular, self.number(
+                "translation_alignment_min_angular_speed_rad_s", 0.10, 0.0, 0.20
+            ))
+            if not yaw_ready and 0.0 < abs(angular) < min_angular:
+                angular = math.copysign(min_angular, angular)
+            self.publish_drive(
+                clamp(forward_gain * forward_error, 0.0, max_forward),
+                clamp(0.80 * lateral, -max_lateral, max_lateral),
+                angular,
+            )
+            self.publish_status(
+                "running", "translation_first_alignment",
+                forward_error_cm=round(forward_error * 100.0, 1),
+                lateral_error_cm=round(lateral_actual * 100.0, 1),
+                yaw_deg=round(math.degrees(yaw), 1),
+                yaw_trusted=yaw_trusted,
+            )
+            return
         self.publish_drive(
             0.0,
             clamp(0.80 * lateral, -0.08, 0.08),
             clamp(1.20 * yaw, -0.35, 0.35),
+        )
+
+    def tick_alignment_recovery(self):
+        pose = self.alignment_recovery_pose
+        if pose is None or self.odom_position is None or self.odom_yaw is None:
+            self.stop_drive()
+            self.publish_status("waiting", "alignment_recovery_pose_unavailable")
+            return
+        dx = pose[0] - self.odom_position[0]
+        dy = pose[1] - self.odom_position[1]
+        c, s = math.cos(self.odom_yaw), math.sin(self.odom_yaw)
+        forward = c * dx + s * dy
+        lateral = -s * dx + c * dy
+        yaw = normalize_angle(pose[2] - self.odom_yaw)
+        if math.hypot(dx, dy) <= 0.01 and abs(yaw) <= math.radians(1.0):
+            self.stop_drive()
+            self.alignment_recovery_pose = None
+            self.alignment_bad_frames = 0
+            self.alignment_good_frames = 0
+            self.alignment_last_good_stamp = None
+            self.alignment_lost_since = time.monotonic()
+            self.publish_status("waiting", "alignment_best_pose_restored")
+            return
+        max_linear = self.number(
+            "alignment_recovery_max_speed_m_s", 0.04, 0.01, 0.08
+        )
+        max_angular = self.number(
+            "alignment_recovery_max_angular_speed_rad_s", 0.08, 0.02, 0.15
+        )
+        self.publish_drive(
+            clamp(0.8 * forward, -max_linear, max_linear),
+            clamp(0.8 * lateral, -max_linear, max_linear),
+            clamp(0.8 * yaw, -max_angular, max_angular),
+        )
+        self.publish_status(
+            "recovering", "returning_to_alignment_best_pose",
+            remaining_cm=round(math.hypot(dx, dy) * 100.0, 1),
+            yaw_error_deg=round(math.degrees(yaw), 1),
         )
 
     def tick_inserting(self):
@@ -1912,8 +2613,31 @@ class AutoDockNode(Node):
             self.publish_drive(-speed, 0.0, 0.0)
             return
         self.stop_drive(10)
-        self.post_lift_reverse_target_m = None
         clear, blocking, turn_front_extent = self.right_turn_clearance_available()
+        if turn_front_extent is None:
+            now = time.monotonic()
+            if self.right_turn_clearance_wait_started_at is None:
+                self.right_turn_clearance_wait_started_at = now
+            timeout = self.number(
+                "right_turn_scan_wait_timeout_sec", 2.0, 0.5, 5.0
+            )
+            if now - self.right_turn_clearance_wait_started_at < timeout:
+                self.publish_status(
+                    "waiting", "right_turn_waiting_for_fresh_scan",
+                    reversed_cm=round(travelled_actual * 100.0, 1),
+                )
+                return
+            self.post_lift_reverse_target_m = None
+            self.right_turn_clearance_wait_started_at = None
+            self.state = "ready"
+            self.drive_ready_pub.publish(Empty())
+            self.publish_status(
+                "completed", "drive_ready_right_turn_scan_timeout",
+                reversed_cm=round(travelled_actual * 100.0, 1),
+            )
+            return
+        self.post_lift_reverse_target_m = None
+        self.right_turn_clearance_wait_started_at = None
         if clear and self.odom_yaw is not None:
             self.right_turn_target_yaw = normalize_angle(
                 self.odom_yaw - math.radians(90.0)
