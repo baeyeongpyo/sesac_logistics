@@ -156,10 +156,11 @@ Nav2 담당자는 기존 `arrived spade spade` 대신 위 JSON을 발행한다. 
 YOLO 목표 심볼이 필요할 때는
 `"target":{"type":"SYMBOLS","left":"spade","right":"spade"}`를,
 지정 슬롯이면 `"target":{"type":"SLOT","slot_id":"R3C3"}`를 사용한다.
-현재 개발 코드는 초록 3×3 격자를 탑뷰로 보정하고 각 셀을
-`FREE/OCCUPIED/UNKNOWN`으로 판정해 우선 슬롯을 선택한다. 다만 슬롯 좌표까지의
-이동과 최종 정렬·하차는 아직 구현되지 않았으므로 실차 슬롯 배치가 가능하다고
-간주하지 않는다.
+현재 개발 코드는 색상별 3×3 격자를 탑뷰로 보정하고 각 셀을
+`FREE/OCCUPIED/UNKNOWN`으로 판정해 우선 슬롯을 선택한다. 격자가 영상에서
+잘리면 후방 LiDAR를 확인하며 시야 확보 거리만큼 후진하고, 선택 셀 중심에서
+팔레트 반길이만큼 앞쪽 면을 가상 목표로 고정한다. 이후 기존
+`ALIGNING → INSERTING → DOWN → REVERSING` 흐름으로 슬롯 배치를 완료한다.
 
 ### auto_dock → Fork Controller(기존 토픽 유지)
 

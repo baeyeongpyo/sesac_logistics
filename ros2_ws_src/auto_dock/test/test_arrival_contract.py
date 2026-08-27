@@ -379,6 +379,48 @@ def test_clipped_slot_grid_does_not_reverse_into_rear_obstacle(monkeypatch):
     assert stopped == [True]
 
 
+def test_slot_target_locks_pallet_front_face_in_world_coordinates():
+    fake = type("FakeDock", (), {})()
+    fake.odom_position = (0.0, 0.0)
+    fake.odom_yaw = 0.0
+    fake.number = lambda key, default, *_args: default
+    fake.reset_alignment_recovery = lambda: None
+    fake.stop_drive = lambda *_args: None
+    fake.publish_status = lambda *_args, **_kwargs: None
+
+    locked = AutoDockNode.lock_slot_target(fake, {
+        "forward_m": 1.0,
+        "lateral_m": 0.20,
+        "yaw_error_rad": 0.10,
+    })
+
+    assert locked is True
+    assert fake.state == "docking"
+    assert fake.slot_docking_active is True
+    assert fake.target_world["x"] == pytest.approx(0.7925)
+    assert fake.target_world["y"] == pytest.approx(0.20)
+    assert fake.target_world["yaw"] == pytest.approx(0.10)
+
+
+def test_slot_docking_uses_locked_pose_without_symbol_measurement():
+    fake = type("FakeDock", (), {})()
+    fake.slot_docking_active = True
+    fake.valid_measurement = lambda: pytest.fail("slot docking must not use symbols")
+    fake.target_in_body = lambda: (0.50, 0.10, 0.0)
+    fake.config = {"translation_first_alignment_enabled": True}
+    fake.number = lambda key, default, *_args: default
+    fake.insertion_start_due_at = None
+    fake.odom_position = (0.0, 0.0)
+    fake.odom_yaw = 0.0
+    fake.publish_status = lambda *_args, **_kwargs: None
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+
+    AutoDockNode.tick_docking(fake)
+
+    assert commands == [(0.08, 0.08, 0.0)]
+
+
 class CapturePublisher:
     def __init__(self):
         self.messages = []

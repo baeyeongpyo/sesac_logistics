@@ -587,6 +587,7 @@ class AutoDockNode(Node):
         self.slot_grid_recovery_requested = False
         self.slot_grid_recovery_start_position = None
         self.slot_grid_recovery_start_yaw = None
+        self.slot_docking_active = False
         self.latest_detection = None
         self.latest_detection_at = 0.0
         self.latest_tape_guidance = None
@@ -800,6 +801,7 @@ class AutoDockNode(Node):
             self.slot_grid_recovery_requested = False
             self.slot_grid_recovery_start_position = None
             self.slot_grid_recovery_start_yaw = None
+            self.slot_docking_active = False
             if zone not in {"NORMAL", "FRESH"}:
                 self.publish_status("rejected", "slot_target_requires_storage_zone")
                 return
@@ -906,6 +908,7 @@ class AutoDockNode(Node):
             self.cancel("insertion_distance_missing_after_fork")
             return
         self.load_state = "LOADED" if fork_state == "UP_COMPLETE" else "UNLOADED"
+        self.slot_docking_active = False
         self.post_lift_reverse_start = self.odom_position
         self.post_lift_reverse_start_yaw = self.odom_yaw
         self.post_lift_reverse_target_m = reverse_target
@@ -932,6 +935,8 @@ class AutoDockNode(Node):
         self.tape_recovery_start_position = None
         self.tape_recovery_direction = None
         self.tape_recovery_done = False
+        self.slot_docking_active = False
+        self.slot_grid_recovery_requested = False
         self.reset_coarse_alignment()
         self.reset_alignment_recovery()
         self.post_lift_reverse_start = None
@@ -1016,6 +1021,10 @@ class AutoDockNode(Node):
         target = self.slot_grid_vision.target_measurement(
             self.latest_slot_geometry, self.selected_slot_id
         )
+        if target is not None:
+            if not self.lock_slot_target(target):
+                self.cancel("slot_target_odom_missing")
+            return
         reason = "slot_target_pose_ready" if target is not None else (
             "slot_selected_waiting_camera_info"
             if self.selected_slot_id else "slot_grid_confirming"
@@ -1035,6 +1044,45 @@ class AutoDockNode(Node):
         self.publish_status(
             "waiting", reason, occupancy=snapshot, ratios=ratios, **target_status,
         )
+
+    def lock_slot_target(self, target):
+        if self.odom_position is None or self.odom_yaw is None:
+            return False
+        camera_to_fork = self.number(
+            "depth_camera_to_fork_tip_offset_cm", 14.0, 0.0, 100.0
+        ) / 100.0
+        pallet_half_length = self.number(
+            "slot_pallet_length_m", 0.135, 0.05, 0.40
+        ) / 2.0
+        forward_actual = float(target["forward_m"]) - camera_to_fork - pallet_half_length
+        lateral_actual = float(target["lateral_m"])
+        forward = forward_actual / self.number(
+            "distance_coefficient", 1.0, 0.10, 2.0
+        )
+        lateral = lateral_actual / self.number(
+            "lateral_coefficient", 1.0, 0.10, 2.0
+        )
+        yaw_error = float(target["yaw_error_rad"])
+        c, s = math.cos(self.odom_yaw), math.sin(self.odom_yaw)
+        self.target_world = {
+            "x": self.odom_position[0] + c * forward - s * lateral,
+            "y": self.odom_position[1] + s * forward + c * lateral,
+            "yaw": normalize_angle(self.odom_yaw + yaw_error),
+        }
+        self.slot_docking_active = True
+        self.state = "docking"
+        self.reset_alignment_recovery()
+        self.alignment_best_pose = (*self.odom_position, self.odom_yaw)
+        self.insertion_start_due_at = None
+        self.fork_command_due_at = None
+        self.stop_drive(5)
+        self.publish_status(
+            "running", "slot_target_locked_docking",
+            slot_forward_cm=round(forward_actual * 100.0, 1),
+            slot_lateral_cm=round(lateral_actual * 100.0, 1),
+            slot_yaw_error_deg=round(math.degrees(yaw_error), 1),
+        )
+        return True
 
     @staticmethod
     def slot_row_column(slot_id):
@@ -2404,7 +2452,13 @@ class AutoDockNode(Node):
         if getattr(self, "alignment_recovery_pose", None) is not None:
             AutoDockNode.tick_alignment_recovery(self)
             return
-        candidate, pnp, measurement_reason = self.valid_measurement()
+        slot_docking = getattr(self, "slot_docking_active", False)
+        if slot_docking:
+            candidate = {"depth_yaw": {}}
+            pnp = {"depth_fallback": True}
+            measurement_reason = None
+        else:
+            candidate, pnp, measurement_reason = self.valid_measurement()
         if candidate is None:
             self.stop_drive()
             self.alignment_good_frames = 0
@@ -2444,17 +2498,22 @@ class AutoDockNode(Node):
                     self, "alignment_best_pose", None
                 )
             return
-        source_stamp = (getattr(self, "latest_detection", None) or {}).get(
-            "source_stamp_ns"
-        )
-        if source_stamp is None or source_stamp != getattr(
-            self, "alignment_last_good_stamp", None
-        ):
-            self.alignment_last_good_stamp = source_stamp
-            self.alignment_good_frames = getattr(self, "alignment_good_frames", 0) + 1
         required_good = int(self.number(
             "alignment_yaw_confirmation_frames", 3, 1, 30
         ))
+        if slot_docking:
+            self.alignment_good_frames = required_good
+        else:
+            source_stamp = (getattr(self, "latest_detection", None) or {}).get(
+                "source_stamp_ns"
+            )
+            if source_stamp is None or source_stamp != getattr(
+                self, "alignment_last_good_stamp", None
+            ):
+                self.alignment_last_good_stamp = source_stamp
+                self.alignment_good_frames = getattr(
+                    self, "alignment_good_frames", 0
+                ) + 1
         if self.alignment_good_frames < required_good:
             self.stop_drive()
             self.publish_status(
@@ -2463,7 +2522,8 @@ class AutoDockNode(Node):
                 required_frames=required_good,
             )
             return
-        self.update_world_target(candidate, pnp, blend_existing=True)
+        if not slot_docking:
+            self.update_world_target(candidate, pnp, blend_existing=True)
         target = self.target_in_body()
         if target is None:
             self.cancel("odom_missing")
@@ -2647,9 +2707,10 @@ class AutoDockNode(Node):
                 insertion_depth_cm=round(insertion_depth_m * 100.0, 1),
             )
             return
-        candidate, pnp, _reason = self.valid_measurement()
-        if candidate is not None:
-            self.update_world_target(candidate, pnp, blend_existing=True)
+        if not getattr(self, "slot_docking_active", False):
+            candidate, pnp, _reason = self.valid_measurement()
+            if candidate is not None:
+                self.update_world_target(candidate, pnp, blend_existing=True)
         target = self.target_in_body()
         if target is None:
             self.cancel("virtual_target_missing_during_insertion")
