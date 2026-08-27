@@ -584,6 +584,9 @@ class AutoDockNode(Node):
         self.slot_distortion = None
         self.last_slot_snapshot = None
         self.latest_slot_geometry = None
+        self.slot_grid_recovery_requested = False
+        self.slot_grid_recovery_start_position = None
+        self.slot_grid_recovery_start_yaw = None
         self.latest_detection = None
         self.latest_detection_at = 0.0
         self.latest_tape_guidance = None
@@ -794,6 +797,9 @@ class AutoDockNode(Node):
         self.selected_slot_id = None
         zone = self.location.split("_", 1)[0]
         if target["type"] in {"SLOT", "AUTO_SLOT"}:
+            self.slot_grid_recovery_requested = False
+            self.slot_grid_recovery_start_position = None
+            self.slot_grid_recovery_start_yaw = None
             if zone not in {"NORMAL", "FRESH"}:
                 self.publish_status("rejected", "slot_target_requires_storage_zone")
                 return
@@ -976,8 +982,22 @@ class AutoDockNode(Node):
             distortion=self.slot_distortion,
         )
         if observations is None:
+            if error == "slot_grid_clipped":
+                self.slot_grid_recovery_requested = True
+                if (
+                    self.slot_grid_recovery_start_position is None
+                    and self.odom_position is not None
+                    and self.odom_yaw is not None
+                ):
+                    self.slot_grid_recovery_start_position = self.odom_position
+                    self.slot_grid_recovery_start_yaw = self.odom_yaw
             self.publish_status("waiting", error)
             return
+        if self.slot_grid_recovery_requested:
+            self.stop_drive()
+        self.slot_grid_recovery_requested = False
+        self.slot_grid_recovery_start_position = None
+        self.slot_grid_recovery_start_yaw = None
         self.latest_slot_geometry = self.slot_grid_vision.last_geometry
         ratios = {}
         for slot_id, observation in observations.items():
@@ -1534,7 +1554,9 @@ class AutoDockNode(Node):
             return
         if self.state == "idle":
             return
-        if self.state == "scan_sweep":
+        if self.state in {"slot_scanning", "slot_target_ready"}:
+            self.tick_slot_grid_recovery()
+        elif self.state == "scan_sweep":
             self.tick_scan_sweep()
         elif self.state == "scan_forward_search":
             self.tick_scan_forward_search()
@@ -1558,6 +1580,69 @@ class AutoDockNode(Node):
             self.tick_turning_right_for_ready()
         elif self.state == "safety_backoff":
             self.tick_backoff()
+
+    def tick_slot_grid_recovery(self):
+        if not getattr(self, "slot_grid_recovery_requested", False):
+            self.stop_drive()
+            return
+        if self.odom_position is None or self.odom_yaw is None:
+            self.stop_drive()
+            self.publish_status("waiting", "slot_grid_recovery_odom_missing")
+            return
+        if self.slot_grid_recovery_start_position is None:
+            self.slot_grid_recovery_start_position = self.odom_position
+            self.slot_grid_recovery_start_yaw = self.odom_yaw
+        if time.monotonic() - getattr(self, "scan_updated_at", 0.0) > 0.5:
+            self.stop_drive()
+            self.publish_status("waiting", "slot_grid_recovery_lidar_stale")
+            return
+        rear_distance, rear_angle, rear_clearance = self.nearest_by_direction["rear"]
+        if rear_distance < rear_clearance:
+            self.stop_drive()
+            self.publish_status(
+                "waiting", "slot_grid_recovery_rear_blocked",
+                range_m=round(rear_distance, 3),
+                clearance_m=round(rear_clearance, 3),
+                angle_deg=(
+                    None if rear_angle is None
+                    else round(math.degrees(rear_angle), 1)
+                ),
+            )
+            return
+        start_yaw = self.slot_grid_recovery_start_yaw
+        dx = self.odom_position[0] - self.slot_grid_recovery_start_position[0]
+        dy = self.odom_position[1] - self.slot_grid_recovery_start_position[1]
+        reverse_odom = max(0.0, -(
+            math.cos(start_yaw) * dx + math.sin(start_yaw) * dy
+        ))
+        reverse_actual = reverse_odom * self.number(
+            "distance_coefficient", 1.0, 0.10, 2.0
+        )
+        maximum = self.number(
+            "slot_grid_recovery_max_reverse_m", 0.25, 0.05, 0.60
+        )
+        if reverse_actual >= maximum:
+            self.stop_drive()
+            self.slot_grid_recovery_requested = False
+            self.publish_status(
+                "waiting", "slot_grid_recovery_limit",
+                reversed_cm=round(reverse_actual * 100.0, 1),
+            )
+            return
+        speed = self.number(
+            "slot_grid_recovery_speed_m_s", 0.04, 0.01, 0.08
+        )
+        heading_error = normalize_angle(start_yaw - self.odom_yaw)
+        self.publish_drive(
+            -speed,
+            0.0,
+            clamp(0.8 * heading_error, -0.08, 0.08),
+        )
+        self.publish_status(
+            "recovering", "slot_grid_clipped_reversing_for_view",
+            reversed_cm=round(reverse_actual * 100.0, 1),
+            max_reverse_cm=round(maximum * 100.0, 1),
+        )
 
     def tick_scan_sweep(self):
         """Sweep a small yaw arc after Nav2 arrival and lock a visible target."""

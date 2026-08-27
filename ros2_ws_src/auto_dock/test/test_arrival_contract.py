@@ -337,6 +337,48 @@ def test_grid_pose_reports_perpendicular_alignment_error():
     assert abs(pose["perpendicular_error_rad"]) < math.radians(0.5)
 
 
+def test_clipped_slot_grid_reverses_slowly_for_camera_view(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.slot_grid_recovery_requested = True
+    fake.slot_grid_recovery_start_position = (1.0, 2.0)
+    fake.slot_grid_recovery_start_yaw = 0.0
+    fake.odom_position = (1.0, 2.0)
+    fake.odom_yaw = 0.0
+    fake.scan_updated_at = 9.9
+    fake.nearest_by_direction = {"rear": (math.inf, None, 0.20)}
+    fake.number = lambda key, default, *_args: default
+    fake.stop_drive = lambda *_args: pytest.fail("rear view recovery must move")
+    fake.publish_status = lambda *_args, **_kwargs: None
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
+
+    AutoDockNode.tick_slot_grid_recovery(fake)
+
+    assert commands == [(-0.04, 0.0, 0.0)]
+
+
+def test_clipped_slot_grid_does_not_reverse_into_rear_obstacle(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.slot_grid_recovery_requested = True
+    fake.slot_grid_recovery_start_position = (1.0, 2.0)
+    fake.slot_grid_recovery_start_yaw = 0.0
+    fake.odom_position = (1.0, 2.0)
+    fake.odom_yaw = 0.0
+    fake.scan_updated_at = 9.9
+    fake.nearest_by_direction = {"rear": (0.18, math.pi, 0.20)}
+    fake.number = lambda key, default, *_args: default
+    stopped = []
+    fake.stop_drive = lambda *_args: stopped.append(True)
+    fake.publish_drive = lambda *_args: pytest.fail("rear is blocked")
+    fake.publish_status = lambda *_args, **_kwargs: None
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
+
+    AutoDockNode.tick_slot_grid_recovery(fake)
+
+    assert stopped == [True]
+
+
 class CapturePublisher:
     def __init__(self):
         self.messages = []
