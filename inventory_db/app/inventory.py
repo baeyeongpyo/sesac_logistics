@@ -28,6 +28,16 @@ class OperationStatus(str, Enum):
     CANCELLED = "CANCELLED"
 
 
+ACTIVE_OPERATION_STATUSES = (
+    OperationStatus.QUEUED,
+    OperationStatus.TO_PICK,
+    OperationStatus.PICKING,
+    OperationStatus.TO_PLACE,
+    OperationStatus.PLACING,
+    OperationStatus.RECOVERY_REQUIRED,
+)
+
+
 @dataclass(frozen=True)
 class Zone:
     zone_id: str
@@ -482,6 +492,23 @@ class InventoryStore:
                 (operation_id,),
             ).fetchone()
         return self._operation_from_row(row)
+
+    def list_active_operations(self) -> list[Operation]:
+        connection = self._connect()
+        try:
+            statuses = tuple(status.value for status in ACTIVE_OPERATION_STATUSES)
+            placeholders = ", ".join("?" for _ in statuses)
+            rows = connection.execute(
+                f"""
+                SELECT * FROM transport_operations
+                WHERE status IN ({placeholders})
+                ORDER BY priority DESC, created_at, operation_id
+                """,
+                statuses,
+            ).fetchall()
+            return [self._operation_from_row(row) for row in rows]
+        finally:
+            connection.close()
 
     def assign_operation(self, operation_id: str, robot_id: str) -> Operation:
         if not robot_id:

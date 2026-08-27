@@ -178,6 +178,52 @@ class InventoryApiTest(unittest.TestCase):
                     for parameter in operation.get("parameters", []):
                         self.assertTrue(parameter["description"].strip())
 
+    def test_active_operations_lists_pending_work_by_priority(self) -> None:
+        queued = self.client.post(
+            "/api/v1/operations",
+            json={
+                "payload_type": "FRESH",
+                "source_zone_id": "source",
+                "destination_zone_id": "destination",
+                "priority": 10,
+            },
+        )
+        self.assertEqual(queued.status_code, 201)
+
+        response = self.client.get("/api/v1/operations/active")
+
+        self.assertEqual(response.status_code, 200)
+        operations = response.json()
+        self.assertEqual(
+            [operation["operation_id"] for operation in operations],
+            [queued.json()["operation_id"], self.operation_id],
+        )
+        self.assertEqual(
+            [operation["status"] for operation in operations],
+            ["QUEUED", "TO_PICK"],
+        )
+
+    def test_active_operations_excludes_completed_work(self) -> None:
+        self.assertEqual(
+            self.client.post(
+                f"/api/v1/operations/{self.operation_id}/pick-completions",
+                json={"robot_id": "robot_1", "idempotency_key": "pick-active-1"},
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/api/v1/operations/{self.operation_id}/place-completions",
+                json={"robot_id": "robot_1", "idempotency_key": "place-active-1"},
+            ).status_code,
+            200,
+        )
+
+        response = self.client.get("/api/v1/operations/active")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -270,6 +270,22 @@ def create_app(database_path: str) -> FastAPI:
         )
         return _response(operation)
 
+    @app.get(
+        "/api/v1/operations/active",
+        tags=["operations"],
+        summary="진행 중인 운송 작업 조회",
+        description=_endpoint_description(
+            "재고를 예약했거나 차량 PICK/PLACE가 아직 완료되지 않은 운송 작업을 조회합니다.",
+            "QUEUED, TO_PICK, PICKING, TO_PLACE, PLACING, RECOVERY_REQUIRED 상태의 작업을 우선순위 내림차순으로 반환합니다.",
+            "COMPLETED, FAILED, CANCELLED 상태의 종료 작업은 포함하지 않습니다.",
+        ),
+    )
+    def list_active_operations(request: Request) -> list[dict]:
+        return [
+            _response(operation)
+            for operation in _store(request).list_active_operations()
+        ]
+
     @app.post(
         "/api/v1/operations/{operation_id}/assignments",
         tags=["operations"],
