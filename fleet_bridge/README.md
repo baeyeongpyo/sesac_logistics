@@ -212,70 +212,9 @@ docker compose --env-file .env.server -f docker-compose.server.yaml \
 서버 자신의 Fleet Manager만 호출할 수 있게 한다. 다른 장비에서 Swagger를 열려면
 `COMMAND_API_HOST=0.0.0.0`으로 명시적으로 변경하고 방화벽을 먼저 설정한다.
 
-- `POST /api/v1/robots/{robot_id}/cmd_vel`
-
-  ```json
-  {
-    "linear_x": 0.1,
-    "angular_z": 0.0,
-    "hold_ms": 300
-  }
-  ```
-
-- `POST /api/v1/robots/{robot_id}/nav2/goal_pose`
-
-  요청 본문은 `geometry_msgs/msg/PoseStamped`와 같은 구조다.
-
-  ```json
-  {
-    "header": {
-      "stamp": {"sec": 0, "nanosec": 0},
-      "frame_id": "map"
-    },
-    "pose": {
-      "position": {"x": 1.0, "y": 2.0, "z": 0.0},
-      "orientation": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0}
-    }
-  }
-  ```
-
-- `POST /api/v1/robots/{robot_id}/nav2/cancel`
-
-  현재 활성 작업 전체를 취소하려면 본문 없이 호출한다. 특정 차량 작업만 취소하려면 차량이
-  goal 응답으로 발급한 `operation_id`를 전달한다.
-
-  ```json
-  {"operation_id":"f1c191f4-4f51-4b49-b748-5577fbf0b4e1"}
-  ```
-
-- `POST /api/v1/robots/{robot_id}/stop`
-
-`cmd_vel`은 `config/fleet.yaml`의 선속도·각속도·유지 시간 상한을 먼저 검증한 뒤 차량의
-`POST /v1/cmd-vel`로 전달한다. 차량 API가 유지 시간 경과 후 zero Twist를 발행한다.
-
-`nav2/goal_pose`는 기존 `PoseStamped` JSON 요청을 차량 API 형식
-`{frame_id, x, y, yaw}`로 변환하여 `POST /v1/navigation/goals`로 보낸다. 응답의
-`operation_id`, `state`는 차량이 생성·관리하는 작업 식별자와 상태다. `nav2/cancel`은
-`POST /v1/navigation/cancel`, `stop`은 `POST /v1/stop`으로 전달한다. `stop`의 Nav2
-취소·zero Twist·정지 래치는 차량 API가 책임진다.
-
 Fleet Manager는 차량 HTTP API로 자동 폴백하지 않는다. 차량 API 연결 실패는 HTTP 503,
 차량 API가 반환한 409/422/503 등의 상태는 그대로 Fleet Manager 응답으로 전달한다.
 따라서 중복 명령 전송 없이 실패 원인을 호출자에게 확인시킬 수 있다.
-
-```bash
-curl -X POST http://127.0.0.1:8080/api/v1/robots/robot_1/cmd_vel \
-  -H 'content-type: application/json' \
-  -d '{"linear_x":0.1,"angular_z":0.0,"hold_ms":300}'
-
-curl -X POST http://127.0.0.1:8080/api/v1/robots/robot_1/nav2/goal_pose \
-  -H 'content-type: application/json' \
-  -d '{"header":{"stamp":{"sec":0,"nanosec":0},"frame_id":"map"},"pose":{"position":{"x":1.0,"y":2.0,"z":0.0},"orientation":{"x":0.0,"y":0.0,"z":0.0,"w":1.0}}}'
-
-curl -X POST http://127.0.0.1:8080/api/v1/robots/robot_1/nav2/cancel
-
-curl -X POST http://127.0.0.1:8080/api/v1/robots/robot_1/stop
-```
 
 ### 차량 API 전체 중계
 
@@ -313,9 +252,6 @@ curl -X POST http://127.0.0.1:8080/api/v1/vehicle-command/robot_1/localization/i
 
 curl http://127.0.0.1:8080/api/v1/vehicle-command/robot_1/vehicle-status
 ```
-
-기존 `/api/v1/robots/{robot_id}/...` 명령 경로는 호환성을 위해 유지한다. 기존 경로는
-Fleet Manager가 속도 상한 검증 또는 `PoseStamped` 변환을 수행한 뒤 차량 API에 전달한다.
 
 ## 상태와 네트워크 확인
 

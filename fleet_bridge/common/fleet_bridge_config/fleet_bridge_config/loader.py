@@ -10,7 +10,6 @@ import yaml
 from .models import (
     CentralTopicConfig,
     CommandApiConfig,
-    CommandConfig,
     FleetConfig,
     QosConfig,
     RateConfig,
@@ -179,36 +178,14 @@ def load_fleet(path: Path | str, environ: Mapping[str, str]) -> FleetConfig:
     for index, raw_value in enumerate(_list(document['vehicles'], 'fleet.vehicles')):
         location = f'fleet.vehicles[{index}]'
         raw = _mapping(raw_value, location)
-        allowed = {'id', 'foxglove_uri', 'command_api_url', 'enabled', 'command'}
+        allowed = {'id', 'foxglove_uri', 'command_api_url', 'enabled'}
         _keys(raw, allowed, location)
         _required(
             raw,
-            {'id', 'foxglove_uri', 'command_api_url', 'enabled', 'command'},
+            {'id', 'foxglove_uri', 'command_api_url', 'enabled'},
             location,
         )
         robot_id = _identifier(raw['id'], f'{location}.id')
-        raw_command = _mapping(raw['command'], f'{location}.command')
-        _keys(
-            raw_command,
-            {
-                'topic', 'type', 'max_linear_x', 'max_angular_z',
-                'max_hold_ms', 'publish_rate_hz',
-            },
-            f'{location}.command',
-        )
-        _required(
-            raw_command,
-            {
-                'topic', 'type', 'max_linear_x', 'max_angular_z',
-                'max_hold_ms', 'publish_rate_hz',
-            },
-            f'{location}.command',
-        )
-        command_type = _string(raw_command['type'], f'{location}.command.type')
-        if command_type != 'geometry_msgs/msg/Twist':
-            raise ConfigError(
-                f'{location}.command.type must be geometry_msgs/msg/Twist',
-            )
         vehicle = VehicleConfig(
             id=robot_id,
             foxglove_uri=_string(raw['foxglove_uri'], f'{location}.foxglove_uri'),
@@ -217,37 +194,7 @@ def load_fleet(path: Path | str, environ: Mapping[str, str]) -> FleetConfig:
                 f'{location}.command_api_url',
             ),
             enabled=_boolean(raw['enabled'], f'{location}.enabled'),
-            command=CommandConfig(
-                topic=_topic_name(
-                    raw_command['topic'],
-                    f'{location}.command.topic',
-                    robot_id,
-                ),
-                message_type=command_type,
-                max_linear_x=_positive_number(
-                    raw_command['max_linear_x'],
-                    f'{location}.command.max_linear_x',
-                ),
-                max_angular_z=_positive_number(
-                    raw_command['max_angular_z'],
-                    f'{location}.command.max_angular_z',
-                ),
-                max_hold_ms=_integer(
-                    raw_command['max_hold_ms'],
-                    f'{location}.command.max_hold_ms',
-                    1,
-                    60000,
-                ),
-                publish_rate_hz=_positive_number(
-                    raw_command['publish_rate_hz'],
-                    f'{location}.command.publish_rate_hz',
-                ),
-            ),
         )
-        if vehicle.command.publish_rate_hz > 100:
-            raise ConfigError(
-                f'{location}.command.publish_rate_hz must be at most 100',
-            )
         if not vehicle.foxglove_uri.startswith(('ws://', 'wss://')):
             raise ConfigError(f'{location}.foxglove_uri must use ws:// or wss://')
         if vehicle.id in ids:

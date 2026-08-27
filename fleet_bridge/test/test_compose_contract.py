@@ -69,11 +69,16 @@ class ServerComposeContractTest(unittest.TestCase):
         )
         self.assertTrue(config_mount['read_only'])
 
-    def test_command_api_uses_vehicle_http_apis_and_configured_swagger_port(self):
+    def test_command_api_publishes_configured_port_without_host_network(self):
         api = compose_config('docker-compose.server.yaml')['services']['command-api']
         environment = environment_values()
 
-        self.assertEqual(api['network_mode'], 'host')
+        self.assertNotIn('network_mode', api)
+        self.assertEqual(len(api['ports']), 1)
+        published_port = api['ports'][0]
+        self.assertEqual(published_port['target'], int(environment['COMMAND_API_PORT']))
+        self.assertEqual(published_port['published'], environment['COMMAND_API_PORT'])
+        self.assertEqual(published_port['protocol'], 'tcp')
         self.assertEqual(
             api['environment']['COMMAND_API_HOST'],
             environment['COMMAND_API_HOST'],

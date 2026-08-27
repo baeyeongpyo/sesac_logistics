@@ -1,19 +1,14 @@
 """Deliver Fleet Manager commands through each vehicle's HTTP command API."""
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 import json
-import math
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from fleet_bridge_config.models import VehicleConfig
-
-
-class CommandValidationError(ValueError):
-    """Raised when a command violates a configured Fleet Manager bound."""
 
 
 class VehicleCommandApiError(RuntimeError):
@@ -43,33 +38,6 @@ class VehicleCommandResponse:
     body: dict[str, Any]
 
 
-def validate_command(
-    vehicle: VehicleConfig,
-    linear_x: float,
-    angular_z: float,
-    hold_ms: int,
-) -> None:
-    """Reject malformed or unsafe manual velocity before vehicle delivery."""
-
-    if (
-        isinstance(linear_x, bool)
-        or isinstance(angular_z, bool)
-        or not isinstance(linear_x, (int, float))
-        or not isinstance(angular_z, (int, float))
-    ):
-        raise CommandValidationError('linear_x and angular_z must be numbers')
-    if not math.isfinite(linear_x) or not math.isfinite(angular_z):
-        raise CommandValidationError('linear_x and angular_z must be finite')
-    if abs(linear_x) > vehicle.command.max_linear_x:
-        raise CommandValidationError('linear_x exceeds configured limit')
-    if abs(angular_z) > vehicle.command.max_angular_z:
-        raise CommandValidationError('angular_z exceeds configured limit')
-    if isinstance(hold_ms, bool) or not isinstance(hold_ms, int):
-        raise CommandValidationError('hold_ms must be an integer')
-    if hold_ms < 1 or hold_ms > vehicle.command.max_hold_ms:
-        raise CommandValidationError('hold_ms exceeds configured limit')
-
-
 class VehicleCommandClient:
     """Send commands only to the configured vehicle command API endpoint."""
 
@@ -86,46 +54,6 @@ class VehicleCommandClient:
             raise ValueError('timeout_sec must be greater than zero')
         self._request = request or self._default_request
         self._timeout_sec = timeout_sec
-
-    async def send_twist(
-        self,
-        vehicle: VehicleConfig,
-        linear_x: float,
-        angular_z: float,
-        hold_ms: int,
-    ) -> dict[str, Any]:
-        validate_command(vehicle, linear_x, angular_z, hold_ms)
-        return await self._post(
-            vehicle,
-            '/v1/cmd-vel',
-            {
-                'linear_x': float(linear_x),
-                'angular_z': float(angular_z),
-                'hold_ms': hold_ms,
-            },
-        )
-
-    async def send_goal_pose(
-        self,
-        vehicle: VehicleConfig,
-        goal_pose: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        return await self._post(
-            vehicle,
-            '/v1/navigation/goals',
-            self._vehicle_goal(goal_pose),
-        )
-
-    async def cancel_navigation(
-        self,
-        vehicle: VehicleConfig,
-        operation_id: str | None = None,
-    ) -> dict[str, Any]:
-        payload = {} if operation_id is None else {'operation_id': operation_id}
-        return await self._post(vehicle, '/v1/navigation/cancel', payload)
-
-    async def stop(self, vehicle: VehicleConfig) -> dict[str, Any]:
-        return await self._post(vehicle, '/v1/stop', None)
 
     async def relay(
         self,
@@ -144,14 +72,6 @@ class VehicleCommandClient:
         if isinstance(response, dict):
             return VehicleCommandResponse(status_code=200, body=response)
         raise VehicleCommandTransportError('vehicle command API returned a non-object response')
-
-    async def _post(
-        self,
-        vehicle: VehicleConfig,
-        path: str,
-        payload: Any | None,
-    ) -> dict[str, Any]:
-        return (await self.relay(vehicle, 'POST', path, payload)).body
 
     async def _default_request(
         self,
@@ -217,24 +137,3 @@ class VehicleCommandClient:
         if isinstance(body.get('error'), str):
             return body['error']
         return 'vehicle command API returned an error response'
-
-    @staticmethod
-    def _vehicle_goal(goal_pose: Mapping[str, Any]) -> dict[str, Any]:
-        header = goal_pose['header']
-        pose = goal_pose['pose']
-        position = pose['position']
-        orientation = pose['orientation']
-        x = float(orientation['x'])
-        y = float(orientation['y'])
-        z = float(orientation['z'])
-        w = float(orientation['w'])
-        yaw = math.atan2(
-            2.0 * (w * z + x * y),
-            1.0 - 2.0 * (y * y + z * z),
-        )
-        return {
-            'frame_id': header['frame_id'],
-            'x': float(position['x']),
-            'y': float(position['y']),
-            'yaw': yaw,
-        }

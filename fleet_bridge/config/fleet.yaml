@@ -9,21 +9,7 @@ vehicles:
     foxglove_uri: ${ROBOT_1_FOXGLOVE_URI}
     command_api_url: ${ROBOT_1_COMMAND_API_URL}
     enabled: true
-    command:
-      topic: /cmd_vel
-      type: geometry_msgs/msg/Twist
-      max_linear_x: 0.3
-      max_angular_z: 1.0
-      max_hold_ms: 1000
-      publish_rate_hz: 10
   - id: robot_2
     foxglove_uri: ${ROBOT_2_FOXGLOVE_URI}
     command_api_url: ${ROBOT_2_COMMAND_API_URL}
     enabled: true
-    command:
-      topic: /cmd_vel
-      type: geometry_msgs/msg/Twist
-      max_linear_x: 0.3
-      max_angular_z: 1.0
-      max_hold_ms: 1000
-      publish_rate_hz: 10

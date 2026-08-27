@@ -146,14 +146,6 @@ class ConfigLoaderTest(unittest.TestCase):
                     'foxglove_uri': '${ROBOT_1_FOXGLOVE_URI}',
                     'command_api_url': '${ROBOT_1_COMMAND_API_URL}',
                     'enabled': True,
-                    'command': {
-                        'topic': '/cmd_vel',
-                        'type': 'geometry_msgs/msg/Twist',
-                        'max_linear_x': 0.3,
-                        'max_angular_z': 1.0,
-                        'max_hold_ms': 1000,
-                        'publish_rate_hz': 10,
-                    },
                 },
             ],
         }
@@ -172,8 +164,7 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertEqual(loaded.vehicles[0].foxglove_uri, 'ws://10.0.0.11:8766')
         self.assertEqual(loaded.vehicles[0].command_api_url, 'http://10.0.0.11:8082')
         self.assertEqual(loaded.vehicles[0].namespace, '/robot_1')
-        self.assertEqual(loaded.vehicles[0].command.topic, '/cmd_vel')
-        self.assertEqual(loaded.vehicles[0].command.max_hold_ms, 1000)
+        self.assertFalse(hasattr(loaded.vehicles[0], 'command'))
 
     def test_load_fleet_expands_vehicle_command_api_url(self):
         fleet = {
@@ -187,14 +178,6 @@ class ConfigLoaderTest(unittest.TestCase):
                 'foxglove_uri': '${ROBOT_1_FOXGLOVE_URI}',
                 'command_api_url': '${ROBOT_1_COMMAND_API_URL}',
                 'enabled': True,
-                'command': {
-                    'topic': '/cmd_vel',
-                    'type': 'geometry_msgs/msg/Twist',
-                    'max_linear_x': 0.3,
-                    'max_angular_z': 1.0,
-                    'max_hold_ms': 1000,
-                    'publish_rate_hz': 10,
-                },
             }],
         }
 
@@ -211,6 +194,33 @@ class ConfigLoaderTest(unittest.TestCase):
             'http://10.0.0.11:8082',
         )
 
+    def test_load_fleet_uses_vehicle_api_without_legacy_command_configuration(self):
+        fleet = {
+            'server': {
+                'domain_id': 225,
+                'foxglove_port': 8765,
+                'command_api': {'host': '127.0.0.1', 'port': 8080},
+            },
+            'vehicles': [{
+                'id': 'robot_1',
+                'foxglove_uri': '${ROBOT_1_FOXGLOVE_URI}',
+                'command_api_url': '${ROBOT_1_COMMAND_API_URL}',
+                'enabled': True,
+            }],
+        }
+
+        loaded = load_fleet(
+            self.write_yaml('fleet-without-command.yaml', fleet),
+            {
+                'ROBOT_1_FOXGLOVE_URI': 'ws://10.0.0.11:8766',
+                'ROBOT_1_COMMAND_API_URL': 'http://10.0.0.11:8082',
+            },
+        )
+
+        self.assertEqual(loaded.vehicles[0].id, 'robot_1')
+        self.assertEqual(loaded.vehicles[0].command_api_url, 'http://10.0.0.11:8082')
+        self.assertFalse(hasattr(loaded.vehicles[0], 'command'))
+
     def test_load_fleet_rejects_missing_environment_value(self):
         fleet = {
             'server': {
@@ -224,14 +234,6 @@ class ConfigLoaderTest(unittest.TestCase):
                     'foxglove_uri': '${ROBOT_1_FOXGLOVE_URI}',
                     'command_api_url': '${ROBOT_1_COMMAND_API_URL}',
                     'enabled': True,
-                    'command': {
-                        'topic': '/cmd_vel',
-                        'type': 'geometry_msgs/msg/Twist',
-                        'max_linear_x': 0.3,
-                        'max_angular_z': 1.0,
-                        'max_hold_ms': 1000,
-                        'publish_rate_hz': 10,
-                    },
                 },
             ],
         }
@@ -239,7 +241,7 @@ class ConfigLoaderTest(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, 'ROBOT_1_FOXGLOVE_URI'):
             load_fleet(self.write_yaml('fleet.yaml', fleet), {})
 
-    def test_load_fleet_rejects_unsafe_command_values(self):
+    def test_load_fleet_rejects_removed_command_configuration(self):
         fleet = {
             'server': {
                 'domain_id': 225,
@@ -251,31 +253,15 @@ class ConfigLoaderTest(unittest.TestCase):
                 'foxglove_uri': 'ws://10.0.0.11:8766',
                 'command_api_url': 'http://10.0.0.11:8082',
                 'enabled': True,
-                'command': {
-                    'topic': '/cmd_vel',
-                    'type': 'geometry_msgs/msg/Twist',
-                    'max_linear_x': 0.3,
-                    'max_angular_z': 1.0,
-                    'max_hold_ms': 1000,
-                    'publish_rate_hz': 10,
-                },
             }],
         }
-        cases = [
-            ('topic', 'cmd_vel'),
-            ('type', 'std_msgs/msg/String'),
-            ('max_linear_x', 0),
-            ('max_angular_z', 0),
-            ('max_hold_ms', 0),
-            ('publish_rate_hz', 0),
-        ]
+        fleet['vehicles'][0]['command'] = {
+            'topic': '/cmd_vel',
+            'type': 'geometry_msgs/msg/Twist',
+        }
 
-        for field, value in cases:
-            with self.subTest(field=field):
-                invalid = yaml.safe_load(yaml.safe_dump(fleet))
-                invalid['vehicles'][0]['command'][field] = value
-                with self.assertRaisesRegex(ConfigError, field):
-                    load_fleet(self.write_yaml(f'{field}.yaml', invalid), {})
+        with self.assertRaisesRegex(ConfigError, 'unknown keys: command'):
+            load_fleet(self.write_yaml('legacy-command.yaml', fleet), {})
 
     def test_load_fleet_rejects_non_http_vehicle_command_api_url(self):
         fleet = {
@@ -289,14 +275,6 @@ class ConfigLoaderTest(unittest.TestCase):
                 'foxglove_uri': 'ws://10.0.0.11:8766',
                 'command_api_url': 'http://10.0.0.11:8082',
                 'enabled': True,
-                'command': {
-                    'topic': '/cmd_vel',
-                    'type': 'geometry_msgs/msg/Twist',
-                    'max_linear_x': 0.3,
-                    'max_angular_z': 1.0,
-                    'max_hold_ms': 1000,
-                    'publish_rate_hz': 10,
-                },
             }],
         }
         cases = (
@@ -540,7 +518,6 @@ class ConfigLoaderTest(unittest.TestCase):
         )
         self.assertEqual(fleet.server.domain_id, 225)
         self.assertEqual(fleet.server.command_api.port, 8080)
-        self.assertEqual(fleet.vehicles[0].command.topic, '/cmd_vel')
         self.assertEqual(fleet.vehicles[0].command_api_url, 'http://10.0.0.11:8082')
         self.assertTrue(all(topic.enabled for topic in topics))
         battery = next(

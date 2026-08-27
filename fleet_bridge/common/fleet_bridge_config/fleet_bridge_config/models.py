@@ -15,22 +15,11 @@ class ServerConfig:
 
 
 @dataclass(frozen=True)
-class CommandConfig:
-    topic: str
-    message_type: str
-    max_linear_x: float
-    max_angular_z: float
-    max_hold_ms: int
-    publish_rate_hz: float
-
-
-@dataclass(frozen=True)
 class VehicleConfig:
     id: str
     foxglove_uri: str
     command_api_url: str
     enabled: bool
-    command: CommandConfig
 
     @property
     def namespace(self) -> str:

@@ -2,110 +2,60 @@
 
 import argparse
 import os
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import Body, FastAPI, HTTPException, status
+from fastapi import Body, FastAPI, HTTPException, Path, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
 
 from fleet_bridge_config.loader import load_fleet
 from fleet_bridge_config.models import FleetConfig, VehicleConfig
 
 from .command import (
-    CommandValidationError,
     VehicleCommandApiError,
     VehicleCommandClient,
     VehicleCommandTransportError,
-    validate_command,
 )
 
 
-class CmdVelRequest(BaseModel):
-    """Planar velocity command accepted by the Fleet Manager endpoint."""
+RobotId = Annotated[
+    str,
+    Path(
+        title='차량 ID',
+        description='명령을 전달하거나 상태를 조회할 차량 ID입니다.',
+        examples=['robot_1'],
+    ),
+]
 
-    model_config = ConfigDict(extra='forbid')
-
-    linear_x: float = Field(
-        ...,
-        description='Forward/backward velocity in metres per second.',
-        examples=[0.1],
-    )
-    angular_z: float = Field(
-        ...,
-        description='Yaw angular velocity in radians per second.',
-        examples=[0.0],
-    )
-    hold_ms: int = Field(
-        ...,
-        ge=1,
-        le=60000,
-        description='Command hold duration; a zero Twist follows automatically.',
-        examples=[300],
-    )
+VEHICLE_COMMAND_TAG = {
+    'name': 'vehicle-command relay',
+    'description': (
+        'Fleet Manager는 등록된 차량의 vehicle_command_api로 요청과 응답을 '
+        '변경하지 않고 중계합니다.'
+    ),
+}
 
 
-class RosTimeRequest(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-
-    sec: int = Field(..., ge=0, le=2_147_483_647)
-    nanosec: int = Field(..., ge=0, le=999999999)
-
-
-class HeaderRequest(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-
-    stamp: RosTimeRequest
-    frame_id: str = Field(..., min_length=1)
-
-
-class PositionRequest(BaseModel):
-    model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
-
-    x: float
-    y: float
-    z: float
-
-
-class OrientationRequest(BaseModel):
-    model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
-
-    x: float
-    y: float
-    z: float
-    w: float
-
-
-class PoseRequest(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-
-    position: PositionRequest
-    orientation: OrientationRequest
-
-
-class GoalPoseRequest(BaseModel):
-    """ROS ``geometry_msgs/msg/PoseStamped`` JSON shape."""
-
-    model_config = ConfigDict(extra='forbid')
-
-    header: HeaderRequest
-    pose: PoseRequest
-
-
-class NavigationCancelRequest(BaseModel):
-    """Optional vehicle-generated operation ID to cancel a specific goal."""
-
-    model_config = ConfigDict(extra='forbid')
-
-    operation_id: str | None = Field(default=None, min_length=1)
-
-
-class CommandAccepted(BaseModel):
-    robot_id: str
-    command: str
-    hold_ms: int | None = None
-    operation_id: str | None = None
-    state: str | None = None
-    cancel_requested: bool | None = None
+def _relay_error_responses() -> dict[int, dict[str, Any]]:
+    return {
+        404: {
+            'description': '등록되지 않았거나 비활성화된 차량입니다.',
+            'content': {
+                'application/json': {
+                    'example': {'detail': 'unknown robot: robot_1'},
+                },
+            },
+        },
+        503: {
+            'description': '차량 command API에 연결할 수 없습니다.',
+            'content': {
+                'application/json': {
+                    'example': {
+                        'detail': 'command delivery failed: vehicle command API unavailable',
+                    },
+                },
+            },
+        },
+    }
 
 
 def _active_vehicle(fleet: FleetConfig, robot_id: str) -> VehicleConfig:
@@ -139,28 +89,6 @@ def _delivery_error(error: Exception) -> HTTPException:
     )
 
 
-def _command_accepted(
-    robot_id: str,
-    command: str,
-    result: dict[str, Any],
-    *,
-    hold_ms: int | None = None,
-) -> CommandAccepted:
-    operation_id = result.get('operation_id')
-    state = result.get('state')
-    cancel_requested = result.get('cancel_requested')
-    return CommandAccepted(
-        robot_id=robot_id,
-        command=command,
-        hold_ms=hold_ms,
-        operation_id=operation_id if isinstance(operation_id, str) else None,
-        state=state if isinstance(state, str) else None,
-        cancel_requested=(
-            cancel_requested if isinstance(cancel_requested, bool) else None
-        ),
-    )
-
-
 def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
     """Create the documented Fleet Manager API with injected vehicle transport."""
 
@@ -168,12 +96,32 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
         title='Fleet Manager Vehicle Command API',
         version='1.0.0',
         description=(
-            '차량별 vehicle_command_api에 cmd_vel, Nav2 goal/cancel, stop을 전달합니다. '
-            '운영 환경에서는 인증과 네트워크 접근 제어를 추가해야 합니다.'
+            'Fleet Manager가 등록된 차량의 vehicle_command_api를 중계하는 API입니다. '
+            '각 경로는 차량 API의 요청 본문, HTTP 상태 코드, JSON 응답 본문을 변경하지 않습니다. '
+            '아래 요청 예시는 차량-native 형식이며, 실제 허용 범위와 최신 응답 형식은 '
+            '차량별 `/api/v1/vehicle-command/{robot_id}/openapi.json`에서 확인합니다.'
         ),
+        openapi_tags=[
+            VEHICLE_COMMAND_TAG,
+            {
+                'name': 'health',
+                'description': 'Fleet Manager Command API 프로세스 상태를 확인합니다.',
+            },
+        ],
     )
 
-    @app.get('/healthz', tags=['health'])
+    @app.get(
+        '/healthz',
+        tags=['health'],
+        summary='Fleet Manager Command API 상태 조회',
+        description='Fleet Manager의 중계 API 프로세스가 요청을 받을 준비가 되었는지 확인합니다.',
+        responses={
+            200: {
+                'description': '중계 API 프로세스가 정상입니다.',
+                'content': {'application/json': {'example': {'status': 'ok'}}},
+            },
+        },
+    )
     async def healthz() -> dict[str, str]:
         return {'status': 'ok'}
 
@@ -209,54 +157,181 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
     @app.get(
         '/api/v1/vehicle-command/{robot_id}/healthz',
         tags=['vehicle-command relay'],
-        summary='Relay vehicle command API health status',
+        summary='차량 Command API 상태 조회',
+        description='선택한 차량의 Command API 생존 상태를 그대로 중계합니다.',
+        responses={
+            200: {
+                'description': '차량 Command API가 정상입니다.',
+                'content': {'application/json': {'example': {'status': 'ok'}}},
+            },
+            **_relay_error_responses(),
+        },
     )
-    async def vehicle_command_healthz(robot_id: str) -> JSONResponse:
+    async def vehicle_command_healthz(robot_id: RobotId) -> JSONResponse:
         return await relay_vehicle_command(robot_id, 'GET', '/healthz')
 
     @app.get(
         '/api/v1/vehicle-command/{robot_id}/openapi.json',
         tags=['vehicle-command relay'],
-        summary='Relay the vehicle command API OpenAPI document',
+        summary='차량 Command API OpenAPI 문서 조회',
+        description=(
+            '선택한 차량이 제공하는 원본 OpenAPI 문서를 중계합니다. 차량별 제한값과 '
+            '최신 요청·응답 형식은 이 문서를 기준으로 확인합니다.'
+        ),
+        responses={
+            200: {
+                'description': '차량이 제공하는 원본 OpenAPI 문서입니다.',
+            },
+            **_relay_error_responses(),
+        },
     )
-    async def vehicle_command_openapi(robot_id: str) -> JSONResponse:
+    async def vehicle_command_openapi(robot_id: RobotId) -> JSONResponse:
         return await relay_vehicle_command(robot_id, 'GET', '/openapi.json')
 
     @app.get(
         '/api/v1/vehicle-command/{robot_id}/operation-status',
         tags=['vehicle-command relay'],
-        summary='Relay current vehicle operation status',
+        summary='차량 작업 상태 조회',
+        description='선택한 차량의 현재 작업 상태를 그대로 중계합니다.',
+        responses={
+            200: {
+                'description': '차량의 현재 작업 상태입니다.',
+                'content': {
+                    'application/json': {
+                        'example': {
+                            'operation_id': '1c3e8b56-7c4d-4d9e-98ac-ced38f8c8a58',
+                            'state': 'NAVIGATING',
+                            'detail': 'NAVIGATION_GOAL_ACCEPTED',
+                        },
+                    },
+                },
+            },
+            **_relay_error_responses(),
+        },
     )
-    async def vehicle_operation_status(robot_id: str) -> JSONResponse:
+    async def vehicle_operation_status(robot_id: RobotId) -> JSONResponse:
         return await relay_vehicle_command(robot_id, 'GET', '/v1/operation-status')
 
     @app.get(
         '/api/v1/vehicle-command/{robot_id}/vehicle-status',
         tags=['vehicle-command relay'],
-        summary='Relay vehicle status including battery and operation state',
+        summary='차량 배터리·작업 상태 조회',
+        description='선택한 차량의 식별자, 최근 배터리 측정값, 현재 작업 상태를 그대로 중계합니다.',
+        responses={
+            200: {
+                'description': '차량 상태입니다.',
+                'content': {
+                    'application/json': {
+                        'example': {
+                            'robot_id': 'robot_1',
+                            'battery': {
+                                'raw_value': 8354,
+                                'received_at': '2026-08-27T02:30:00.000Z',
+                                'stale': False,
+                            },
+                            'operation': {
+                                'operation_id': None,
+                                'state': 'IDLE',
+                                'detail': 'READY',
+                            },
+                        },
+                    },
+                },
+            },
+            **_relay_error_responses(),
+        },
     )
-    async def vehicle_status(robot_id: str) -> JSONResponse:
+    async def vehicle_status(robot_id: RobotId) -> JSONResponse:
         return await relay_vehicle_command(robot_id, 'GET', '/v1/vehicle-status')
 
     @app.post(
         '/api/v1/vehicle-command/{robot_id}/cmd-vel',
         tags=['vehicle-command relay'],
-        summary='Relay a vehicle-native cmd_vel request',
+        summary='수동 속도 명령 전달',
+        description=(
+            '선택한 차량에 제한 시간 수동 속도 명령을 전달합니다. 차량은 Nav2 주행 중 '
+            '수동 명령을 받으면 기존 주행을 취소하며, 허용 속도 범위는 차량 OpenAPI를 따릅니다.'
+        ),
+        responses={
+            202: {
+                'description': '차량이 수동 속도 명령을 수락했습니다.',
+                'content': {
+                    'application/json': {
+                        'example': {
+                            'state': 'MANUAL',
+                            'linear_x': 0.2,
+                            'angular_z': 0.0,
+                            'hold_ms': 500,
+                        },
+                    },
+                },
+            },
+            422: {'description': '차량이 속도 명령 형식 또는 범위를 거부했습니다.'},
+            **_relay_error_responses(),
+        },
     )
     async def vehicle_cmd_vel(
-        robot_id: str,
-        payload: Any = Body(default=None),
+        robot_id: RobotId,
+        payload: Any = Body(
+            default=None,
+            description='차량-native 수동 속도 명령입니다.',
+            openapi_examples={
+                'sample': {
+                    'summary': '직진 수동 주행',
+                    'description': '0.2 m/s로 500 ms 동안 직진합니다.',
+                    'value': {
+                        'linear_x': 0.2,
+                        'angular_z': 0.0,
+                        'hold_ms': 500,
+                    },
+                },
+            },
+        ),
     ) -> JSONResponse:
         return await relay_vehicle_command(robot_id, 'POST', '/v1/cmd-vel', payload)
 
     @app.post(
         '/api/v1/vehicle-command/{robot_id}/navigation/goals',
         tags=['vehicle-command relay'],
-        summary='Relay a vehicle-native Nav2 goal request',
+        summary='Nav2 목표 주행 요청 전달',
+        description=(
+            '선택한 차량의 Nav2에 map 좌표계 목표를 전달합니다. 차량이 생성한 '
+            '`operation_id`로 이후 취소 또는 상태 조회 대상을 지정할 수 있습니다.'
+        ),
+        responses={
+            202: {
+                'description': '차량이 Nav2 목표를 수락했습니다.',
+                'content': {
+                    'application/json': {
+                        'example': {
+                            'operation_id': '1c3e8b56-7c4d-4d9e-98ac-ced38f8c8a58',
+                            'state': 'NAVIGATING',
+                        },
+                    },
+                },
+            },
+            422: {'description': '차량이 목표 좌표 형식을 거부했습니다.'},
+            503: {'description': '차량 Nav2 action server 또는 차량 API를 사용할 수 없습니다.'},
+            **_relay_error_responses(),
+        },
     )
     async def vehicle_navigation_goal(
-        robot_id: str,
-        payload: Any = Body(default=None),
+        robot_id: RobotId,
+        payload: Any = Body(
+            default=None,
+            description='차량-native Nav2 목표 좌표입니다.',
+            openapi_examples={
+                'sample': {
+                    'summary': 'map 좌표계 목표 주행',
+                    'value': {
+                        'frame_id': 'map',
+                        'x': 1.5,
+                        'y': 0.0,
+                        'yaw': 0.0,
+                    },
+                },
+            },
+        ),
     ) -> JSONResponse:
         return await relay_vehicle_command(
             robot_id,
@@ -268,11 +343,43 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
     @app.post(
         '/api/v1/vehicle-command/{robot_id}/navigation/cancel',
         tags=['vehicle-command relay'],
-        summary='Relay a vehicle-native Nav2 cancel request',
+        summary='Nav2 주행 취소 요청 전달',
+        description=(
+            '선택한 차량의 활성 Nav2 작업을 취소합니다. `operation_id`를 생략하면 '
+            '현재 활성 작업을 취소하고, 지정하면 해당 활성 작업만 취소합니다.'
+        ),
+        responses={
+            202: {
+                'description': '차량이 Nav2 취소 요청을 수락했습니다.',
+                'content': {
+                    'application/json': {
+                        'example': {
+                            'operation_id': '1c3e8b56-7c4d-4d9e-98ac-ced38f8c8a58',
+                            'state': 'CANCELLING',
+                        },
+                    },
+                },
+            },
+            409: {'description': '지정한 작업이 현재 활성 Nav2 작업이 아닙니다.'},
+            **_relay_error_responses(),
+        },
     )
     async def vehicle_navigation_cancel(
-        robot_id: str,
-        payload: Any = Body(default=None),
+        robot_id: RobotId,
+        payload: Any = Body(
+            default=None,
+            description='취소할 차량-native Nav2 작업 ID입니다. 생략하면 현재 활성 작업을 취소합니다.',
+            openapi_examples={
+                'sample': {
+                    'summary': '특정 Nav2 작업 취소',
+                    'value': {'operation_id': '1c3e8b56-7c4d-4d9e-98ac-ced38f8c8a58'},
+                },
+                'active-operation': {
+                    'summary': '현재 활성 Nav2 작업 취소',
+                    'value': {},
+                },
+            },
+        ),
     ) -> JSONResponse:
         return await relay_vehicle_command(
             robot_id,
@@ -284,11 +391,49 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
     @app.post(
         '/api/v1/vehicle-command/{robot_id}/localization/initial-pose',
         tags=['vehicle-command relay'],
-        summary='Relay a vehicle-native AMCL initial-pose request',
+        summary='AMCL 초기 위치 설정 전달',
+        description=(
+            '선택한 차량의 AMCL 초기 위치를 설정합니다. 차량이 Nav2 또는 수동 주행 중이면 '
+            '차량이 409로 거부하므로, 호출자가 먼저 별도 stop을 성공시켜야 합니다.'
+        ),
+        responses={
+            202: {
+                'description': '차량이 AMCL 초기 위치를 발행했습니다.',
+                'content': {
+                    'application/json': {
+                        'example': {
+                            'operation_id': '1c3e8b56-7c4d-4d9e-98ac-ced38f8c8a58',
+                            'state': 'INITIAL_POSE_PUBLISHED',
+                            'frame_id': 'map',
+                            'x': 0.0,
+                            'y': 0.0,
+                            'yaw': 0.0,
+                        },
+                    },
+                },
+            },
+            409: {'description': '차량이 주행 중이어서 초기 위치 설정을 거부했습니다.'},
+            422: {'description': '차량이 초기 위치 형식을 거부했습니다.'},
+            **_relay_error_responses(),
+        },
     )
     async def vehicle_initial_pose(
-        robot_id: str,
-        payload: Any = Body(default=None),
+        robot_id: RobotId,
+        payload: Any = Body(
+            default=None,
+            description='차량-native AMCL 초기 위치입니다.',
+            openapi_examples={
+                'sample': {
+                    'summary': 'map 원점으로 초기 위치 설정',
+                    'value': {
+                        'frame_id': 'map',
+                        'x': 0.0,
+                        'y': 0.0,
+                        'yaw': 0.0,
+                    },
+                },
+            },
+        ),
     ) -> JSONResponse:
         return await relay_vehicle_command(
             robot_id,
@@ -300,126 +445,29 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
     @app.post(
         '/api/v1/vehicle-command/{robot_id}/stop',
         tags=['vehicle-command relay'],
-        summary='Relay a vehicle-native stop request',
+        summary='즉시 정지 요청 전달',
+        description=(
+            '선택한 차량에 요청 본문 없이 즉시 정지를 전달합니다. 차량은 속도 0을 우선 적용하고 '
+            '활성 Nav2 작업이 있으면 취소를 함께 요청하며 자동 재개하지 않습니다.'
+        ),
+        responses={
+            200: {
+                'description': '차량이 즉시 정지 요청을 처리했습니다.',
+                'content': {
+                    'application/json': {
+                        'example': {
+                            'operation_id': '1c3e8b56-7c4d-4d9e-98ac-ced38f8c8a58',
+                            'state': 'STOPPED',
+                            'cancel_requested': True,
+                        },
+                    },
+                },
+            },
+            **_relay_error_responses(),
+        },
     )
-    async def vehicle_stop(
-        robot_id: str,
-        payload: Any = Body(default=None),
-    ) -> JSONResponse:
-        return await relay_vehicle_command(robot_id, 'POST', '/v1/stop', payload)
-
-    @app.post(
-        '/api/v1/robots/{robot_id}/cmd_vel',
-        status_code=status.HTTP_202_ACCEPTED,
-        response_model=CommandAccepted,
-        tags=['commands'],
-        summary='Send a bounded cmd_vel command to the vehicle API',
-    )
-    async def cmd_vel(robot_id: str, request: CmdVelRequest) -> CommandAccepted:
-        vehicle = _active_vehicle(fleet, robot_id)
-        try:
-            validate_command(
-                vehicle,
-                request.linear_x,
-                request.angular_z,
-                request.hold_ms,
-            )
-            result = await command_client.send_twist(
-                vehicle,
-                request.linear_x,
-                request.angular_z,
-                request.hold_ms,
-            )
-        except CommandValidationError as error:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=str(error),
-            ) from error
-        except (
-            ConnectionError,
-            OSError,
-            VehicleCommandApiError,
-            VehicleCommandTransportError,
-        ) as error:
-            raise _delivery_error(error) from error
-        return _command_accepted(
-            robot_id=robot_id,
-            command='cmd_vel',
-            hold_ms=request.hold_ms,
-            result=result,
-        )
-
-    @app.post(
-        '/api/v1/robots/{robot_id}/nav2/goal_pose',
-        status_code=status.HTTP_202_ACCEPTED,
-        response_model=CommandAccepted,
-        tags=['commands'],
-        summary='Send a Nav2 PoseStamped goal',
-    )
-    async def nav2_goal_pose(
-        robot_id: str,
-        request: GoalPoseRequest,
-    ) -> CommandAccepted:
-        vehicle = _active_vehicle(fleet, robot_id)
-        try:
-            result = await command_client.send_goal_pose(
-                vehicle,
-                request.model_dump(),
-            )
-        except (
-            ConnectionError,
-            OSError,
-            VehicleCommandApiError,
-            VehicleCommandTransportError,
-        ) as error:
-            raise _delivery_error(error) from error
-        return _command_accepted(robot_id, 'nav2_goal_pose', result)
-
-    @app.post(
-        '/api/v1/robots/{robot_id}/nav2/cancel',
-        status_code=status.HTTP_202_ACCEPTED,
-        response_model=CommandAccepted,
-        tags=['commands'],
-        summary='Cancel all active Nav2 NavigateToPose goals',
-    )
-    async def nav2_cancel(
-        robot_id: str,
-        request: NavigationCancelRequest | None = None,
-    ) -> CommandAccepted:
-        vehicle = _active_vehicle(fleet, robot_id)
-        try:
-            result = await command_client.cancel_navigation(
-                vehicle,
-                request.operation_id if request is not None else None,
-            )
-        except (
-            ConnectionError,
-            OSError,
-            VehicleCommandApiError,
-            VehicleCommandTransportError,
-        ) as error:
-            raise _delivery_error(error) from error
-        return _command_accepted(robot_id, 'nav2_cancel', result)
-
-    @app.post(
-        '/api/v1/robots/{robot_id}/stop',
-        status_code=status.HTTP_202_ACCEPTED,
-        response_model=CommandAccepted,
-        tags=['commands'],
-        summary='Cancel Nav2 and send an immediate zero cmd_vel command',
-    )
-    async def stop(robot_id: str) -> CommandAccepted:
-        vehicle = _active_vehicle(fleet, robot_id)
-        try:
-            result = await command_client.stop(vehicle)
-        except (
-            ConnectionError,
-            OSError,
-            VehicleCommandApiError,
-            VehicleCommandTransportError,
-        ) as error:
-            raise _delivery_error(error) from error
-        return _command_accepted(robot_id, 'stop', result)
+    async def vehicle_stop(robot_id: RobotId) -> JSONResponse:
+        return await relay_vehicle_command(robot_id, 'POST', '/v1/stop')
 
     return app
 

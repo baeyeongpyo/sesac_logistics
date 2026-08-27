@@ -214,8 +214,7 @@ class ConfigurationContractTest(unittest.TestCase):
         for vehicle in document['vehicles']:
             self.assertNotIn('namespace', vehicle)
             self.assertNotIn('domain_id', vehicle)
-            self.assertEqual(vehicle['command']['topic'], '/cmd_vel')
-            self.assertEqual(vehicle['command']['type'], 'geometry_msgs/msg/Twist')
+            self.assertNotIn('command', vehicle)
         self.assertEqual(document['server']['command_api'], {
             'host': '127.0.0.1',
             'port': 8080,
@@ -238,12 +237,10 @@ class ReadmeContractTest(unittest.TestCase):
             'Domain Bridge',
             'ws://<server-ip>:8765',
             'http://<server-ip>:8080/docs',
-            'POST /api/v1/robots/{robot_id}/cmd_vel',
-            'POST /api/v1/robots/{robot_id}/stop',
             'GET /api/v1/vehicle-command/{robot_id}/vehicle-status',
             'POST /api/v1/vehicle-command/{robot_id}/localization/initial-pose',
             'clientPublish',
-            'zero Twist',
+            'POST /api/v1/vehicle-command/{robot_id}/stop',
             '8766',
             'ascamera/camera_publisher/rgb0/image',
             '/goal_pose',
