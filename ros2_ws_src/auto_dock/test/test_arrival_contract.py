@@ -1,6 +1,5 @@
 import json
 import math
-import time
 
 import cv2
 import numpy as np
@@ -126,6 +125,24 @@ def test_selected_pallet_front_return_is_allowed_during_insertion():
     }
 
     assert AutoDockNode.interrupt_for_lidar(fake) is False
+
+
+def test_alignment_enforces_thirty_centimetre_rear_clearance():
+    fake = type("FakeDock", (), {})()
+    fake.state = "docking"
+    fake.config = {"lidar_backoff_enabled": False}
+    fake.number = lambda key, default, *_args: default
+    fake.nearest_by_direction = {
+        "front": (0.10, 0.0, 0.20),
+        "rear": (0.25, math.pi, 0.20),
+        "left": (math.inf, None, 0.20),
+        "right": (math.inf, None, 0.20),
+    }
+    cancelled = []
+    fake.cancel = lambda reason: cancelled.append(reason)
+
+    assert AutoDockNode.interrupt_for_lidar(fake) is True
+    assert cancelled == ["lidar_rear_blocked"]
 
 
 def test_disabled_lidar_does_not_force_reverse_during_lateral_search():
@@ -336,126 +353,6 @@ def test_grid_pose_reports_perpendicular_alignment_error():
     assert pose is not None
     assert pose["reprojection_error_px"] < 0.1
     assert abs(pose["perpendicular_error_rad"]) < math.radians(0.5)
-
-
-def test_clipped_slot_grid_reverses_slowly_for_camera_view(monkeypatch):
-    fake = type("FakeDock", (), {})()
-    fake.slot_grid_recovery_requested = True
-    fake.slot_grid_recovery_start_position = (1.0, 2.0)
-    fake.slot_grid_recovery_start_yaw = 0.0
-    fake.odom_position = (1.0, 2.0)
-    fake.odom_yaw = 0.0
-    fake.scan_updated_at = 9.9
-    fake.nearest_by_direction = {"rear": (math.inf, None, 0.20)}
-    fake.number = lambda key, default, *_args: default
-    fake.stop_drive = lambda *_args: pytest.fail("rear view recovery must move")
-    fake.publish_status = lambda *_args, **_kwargs: None
-    commands = []
-    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
-    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
-
-    AutoDockNode.tick_slot_grid_recovery(fake)
-
-    assert commands == [(-0.04, 0.0, 0.0)]
-
-
-@pytest.mark.parametrize("reason", [
-    "slot_grid_not_found",
-    "slot_grid_too_small",
-    "slot_grid_corners",
-    "slot_grid_clipped",
-    "slot_grid_pose_reprojection",
-])
-def test_all_slot_view_failures_request_same_recovery(reason):
-    assert AutoDockNode.slot_view_error_recoverable(reason) is True
-
-
-def test_non_view_slot_error_does_not_request_motion():
-    assert AutoDockNode.slot_view_error_recoverable("empty_image") is False
-
-
-def test_clipped_slot_grid_does_not_reverse_into_rear_obstacle(monkeypatch):
-    fake = type("FakeDock", (), {})()
-    fake.slot_grid_recovery_requested = True
-    fake.slot_grid_recovery_start_position = (1.0, 2.0)
-    fake.slot_grid_recovery_start_yaw = 0.0
-    fake.odom_position = (1.0, 2.0)
-    fake.odom_yaw = 0.0
-    fake.scan_updated_at = 9.9
-    fake.nearest_by_direction = {"rear": (0.12, math.pi, 0.20)}
-    fake.number = lambda key, default, *_args: default
-    stopped = []
-    fake.stop_drive = lambda *_args: stopped.append(True)
-    fake.publish_drive = lambda *_args: pytest.fail("rear is blocked")
-    fake.publish_status = lambda *_args, **_kwargs: None
-    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
-
-    AutoDockNode.tick_slot_grid_recovery(fake)
-
-    assert stopped == [True]
-
-
-def test_slot_target_locks_pallet_front_face_in_world_coordinates():
-    fake = type("FakeDock", (), {})()
-    fake.odom_position = (0.0, 0.0)
-    fake.odom_yaw = 0.0
-    fake.number = lambda key, default, *_args: default
-    fake.reset_alignment_recovery = lambda: None
-    fake.stop_drive = lambda *_args: None
-    fake.publish_status = lambda *_args, **_kwargs: None
-
-    locked = AutoDockNode.lock_slot_target(fake, {
-        "forward_m": 1.0,
-        "lateral_m": 0.20,
-        "yaw_error_rad": 0.10,
-    })
-
-    assert locked is True
-    assert fake.state == "docking"
-    assert fake.slot_docking_active is True
-    assert fake.target_world["x"] == pytest.approx(0.7925)
-    assert fake.target_world["y"] == pytest.approx(0.20)
-    assert fake.target_world["yaw"] == pytest.approx(0.10)
-
-
-def test_slot_docking_uses_locked_pose_without_symbol_measurement():
-    fake = type("FakeDock", (), {})()
-    fake.slot_docking_active = True
-    fake.valid_measurement = lambda: pytest.fail("slot docking must not use symbols")
-    fake.target_in_body = lambda: (0.50, 0.10, 0.0)
-    fake.config = {"translation_first_alignment_enabled": True}
-    fake.number = lambda key, default, *_args: default
-    fake.insertion_start_due_at = None
-    fake.odom_position = (0.0, 0.0)
-    fake.odom_yaw = 0.0
-    fake.scan_updated_at = time.monotonic()
-    fake.nearest_by_direction = {"rear": (0.20, math.pi, 0.20)}
-    fake.publish_status = lambda *_args, **_kwargs: None
-    commands = []
-    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
-
-    AutoDockNode.tick_docking(fake)
-
-    assert commands == [(0.08, 0.08, 0.0)]
-
-
-def test_slot_alignment_moves_only_forward_until_rear_has_13cm(monkeypatch):
-    fake = type("FakeDock", (), {})()
-    fake.slot_docking_active = True
-    fake.insertion_start_due_at = None
-    fake.alignment_recovery_pose = (1.0, 0.0, 0.0)
-    fake.scan_updated_at = 9.9
-    fake.nearest_by_direction = {"rear": (0.12, math.pi, 0.20)}
-    fake.number = lambda key, default, *_args: default
-    fake.publish_status = lambda *_args, **_kwargs: None
-    commands = []
-    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
-    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
-
-    AutoDockNode.tick_docking(fake)
-
-    assert commands == [(0.03, 0.0, 0.0)]
-    assert fake.alignment_recovery_pose is None
 
 
 class CapturePublisher:
@@ -967,6 +864,19 @@ def test_combined_search_checks_rear_then_uses_front_yolo(monkeypatch):
     assert fake.statuses[-1][1] == "front_tag_distance_correction"
 
 
+def test_combined_search_falls_back_to_rear_when_front_depth_missing(monkeypatch):
+    fake = rear_lidar_search_fake(0.30)
+    fake.config["tag_guided_lateral_search_enabled"] = True
+    fake.latest_detection = {"detections": []}
+    fake.latest_detection_at = 10.0
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_search(fake)
+
+    assert fake.commands == [(0.0, 0.12, 0.0)]
+    assert fake.statuses[-1][1] == "rear_lidar_clearance_held_lateral_search"
+
+
 def tape_search_fake(angle_deg):
     fake = type("FakeDock", (), {})()
     fake.candidate_stop_due_at = None
@@ -1101,18 +1011,74 @@ def test_invalid_candidate_resumes_search_after_confirmation_timeout(monkeypatch
     assert published[0][1] == "candidate_invalid_resume_search"
 
 
-def test_depth_fallback_enters_coarse_alignment_before_world_target_lock():
+def test_depth_fallback_locks_provisional_world_target_before_coarse_alignment():
     fake = type("FakeDock", (), {})()
     entered = []
+    locked = []
     fake.enter_coarse_alignment = lambda reason: entered.append(reason)
-    fake.update_world_target = lambda *_args: pytest.fail("must not lock edge pose")
+    fake.update_world_target = lambda *args, **kwargs: locked.append(
+        (args, kwargs)
+    ) or True
 
     result = AutoDockNode.enter_alignment(
         fake, {"center_error": 0.4}, {"depth_fallback": True}
     )
 
     assert result is True
+    assert locked
     assert entered == ["pnp_quality_fallback"]
+
+
+def test_coarse_target_loss_continues_with_provisional_world_target():
+    fake = type("FakeDock", (), {})()
+    fake.identity_measurement = lambda: (None, None, "no_selected_candidate")
+    fake.tracked_partial_measurement = lambda: (
+        None, None, "partial_entity_unavailable"
+    )
+    fake.target_world = {"x": 1.0, "y": 0.0, "yaw": 0.0}
+    fake.target_entity_id = 22
+    reset = []
+    fake.reset_coarse_alignment = lambda: reset.append(True)
+    statuses = []
+    fake.publish_status = lambda state, reason, **extra: statuses.append(
+        (state, reason, extra)
+    )
+
+    AutoDockNode.tick_coarse_align(fake)
+
+    assert fake.state == "docking"
+    assert reset == [True]
+    assert statuses[-1][1] == "coarse_target_lost_using_virtual_target"
+
+
+def test_coarse_alignment_timeout_keeps_locked_target(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.state = "coarse_align"
+    candidate = {"center_error": 0.5, "depth_yaw": {"yaw_deg": 0.0}}
+    fake.identity_measurement = lambda: (candidate, {}, None)
+    fake.tracked_partial_measurement = lambda: (None, None, None)
+    fake.valid_measurement = lambda: (None, None, "invalid_pnp")
+    fake.coarse_alignment_started_at = 10.0
+    fake.coarse_depth_fallback_frames = 0
+    fake.coarse_last_counted_stamp = None
+    fake.target_entity_id = 22
+    fake.number = lambda key, default, *_args: default
+    fake.publish_drive = lambda *_args: None
+    fake.stop_drive = lambda *_args: None
+    statuses = []
+    fake.publish_status = lambda state, reason, **extra: statuses.append(
+        (state, reason, extra)
+    )
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 16.0)
+
+    AutoDockNode.tick_coarse_align(fake)
+
+    assert fake.state != "search"
+    assert fake.coarse_alignment_started_at == pytest.approx(16.0)
+    assert any(
+        reason == "coarse_alignment_continuing_locked_target"
+        for _state, reason, _extra in statuses
+    )
 
 
 def test_coarse_alignment_moves_laterally_from_image_center_error(monkeypatch):
@@ -1372,34 +1338,36 @@ def test_translation_first_alignment_enforces_minimum_yaw_speed():
     assert commands == [(0.0, 0.0, 0.10)]
 
 
-def test_alignment_holds_when_yaw_sources_disagree():
+def test_alignment_keeps_locked_target_when_measurements_disagree():
     fake = type("FakeDock", (), {})()
     candidate = {"depth_yaw": {"yaw_deg": 15.0}}
     pnp = {"yaw_deg": 20.0, "depth_fallback": False}
     fake.valid_measurement = lambda: (candidate, pnp, None)
     fake.number = lambda key, default, *_args: default
     fake.insertion_start_due_at = None
-    fake.stop_drive = lambda *_args: stopped.append(True)
-    fake.publish_status = lambda *args, **kwargs: statuses.append((args, kwargs))
-    stopped = []
-    statuses = []
+    fake.config = {"translation_first_alignment_enabled": True}
+    updated = []
+    fake.update_world_target = lambda *args, **kwargs: updated.append(
+        (args, kwargs)
+    )
+    fake.target_in_body = lambda: (0.30, 0.0, 0.0)
+    fake.publish_status = lambda *_args, **_kwargs: None
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
 
     AutoDockNode.tick_docking(fake)
 
-    assert stopped == [True]
-    assert statuses[-1][0][1] == "alignment_yaw_disagreement_holding"
+    assert updated
+    assert commands == [(pytest.approx(0.08), 0.0, 0.0)]
 
 
-def test_lost_alignment_returns_toward_best_pose(monkeypatch):
+def test_lost_alignment_continues_toward_locked_target(monkeypatch):
     fake = type("FakeDock", (), {})()
     fake.valid_measurement = lambda: (None, None, "not_visible")
     fake.number = lambda key, default, *_args: default
     fake.insertion_start_due_at = None
-    fake.alignment_lost_since = 9.0
-    fake.alignment_best_pose = (0.0, 0.0, 0.0)
-    fake.odom_position = (0.05, 0.0)
-    fake.odom_yaw = 0.0
-    fake.stop_drive = lambda *_args: None
+    fake.config = {"translation_first_alignment_enabled": True}
+    fake.target_in_body = lambda: (0.30, 0.0, 0.0)
     fake.publish_status = lambda *_args, **_kwargs: None
     commands = []
     fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
@@ -1407,7 +1375,7 @@ def test_lost_alignment_returns_toward_best_pose(monkeypatch):
 
     AutoDockNode.tick_docking(fake)
 
-    assert commands == [(-0.04, 0.0, 0.0)]
+    assert commands == [(pytest.approx(0.08), 0.0, 0.0)]
 
 
 def test_camera_target_is_converted_from_physical_to_calibrated_odom_units():

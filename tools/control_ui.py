@@ -58,6 +58,62 @@ from vehicle_camera_teleop_gui import DevControlClientNode, TeleopWindow
 
 SYMBOLS = ("star", "diamond", "spade", "clover", "heart")
 
+AUTO_DOCK_STATE_TEXT = {
+    "IDLE": "대기",
+    "SEARCHING": "탐색",
+    "ALIGNING": "정렬",
+    "INSERTING": "삽입",
+    "WAIT_UP_COMPLETE": "포크 상승 대기",
+    "WAIT_DOWN_COMPLETE": "포크 하강 대기",
+    "REVERSING": "후진",
+    "TURNING": "회전",
+    "READY": "완료/READY",
+    "ERROR": "오류/정지",
+}
+
+AUTO_DOCK_REASON_TEXT = {
+    "ready": "시작 대기",
+    "emergency_stop": "긴급정지됨",
+    "tag_guided_search_depth_missing": "전면 태그 depth 없음",
+    "rear_lidar_search_scan_stale": "후방 LiDAR 수신 지연으로 정지",
+    "rear_lidar_search_distance_missing": "후방 LiDAR 거리 없음",
+    "rear_lidar_distance_correction": "후방이 가까워 전진 중",
+    "rear_lidar_yaw_correction_before_lateral": "횡이동 전 시작 yaw 복구 중",
+    "rear_lidar_clearance_held_lateral_search": "후방 30cm 유지하며 횡탐색 중",
+    "front_tag_distance_correction": "전면 태그 거리 맞추며 전진 중",
+    "front_tag_pose_held_lateral_search": "전면 태그 기준 횡탐색 중",
+    "candidate_paused_for_confirmation": "후보 확인을 위해 정지",
+    "candidate_confirmation": "후보 유효성 확인 중",
+    "candidate_lost_resume_search": "후보가 사라져 다시 탐색",
+    "candidate_invalid_resume_search": "후보가 무효라 다시 탐색",
+    "edge_target_coarse_alignment": "후보 잠금 후 1차 정렬 중",
+    "coarse_centering": "화면 중심으로 횡·yaw 정렬 중",
+    "coarse_locked_target_temporarily_lost": "잠근 후보 재검출 대기",
+    "coarse_target_lost_using_virtual_target": "가상 목표로 정렬 계속",
+    "coarse_alignment_continuing_locked_target": "잠근 목표 정렬 계속",
+    "virtual_target_locked_docking": "가상 목표 잠금 완료",
+    "translation_first_alignment": "전진·횡·yaw 동시 정렬 중",
+    "lidar_backoff": "LiDAR 장애물 반대 방향 회피 중",
+    "lidar_replanned_virtual_dock": "LiDAR 회피 후 정렬 재개",
+    "aligned_pause_before_insertion": "정렬 완료, 삽입 전 정지",
+    "aligned_inserting": "팔레트 삽입 시작",
+}
+
+
+def auto_dock_status_text(status):
+    state = str(status.get("state", "UNKNOWN")).upper()
+    reason = str(status.get("reason", "no_status"))
+    state_text = AUTO_DOCK_STATE_TEXT.get(state, state)
+    reason_text = AUTO_DOCK_REASON_TEXT.get(reason, reason)
+    stamp = status.get("stamp_monotonic")
+    try:
+        age_text = f" | {max(0.0, time.monotonic() - float(stamp)):.1f}초 전"
+    except (TypeError, ValueError):
+        age_text = ""
+    location = status.get("location")
+    location_text = f" | {location}" if location else ""
+    return f"현재 AUTO-DOCK: [{state_text}] {reason_text}{location_text}{age_text}"
+
 
 def runtime_args(cli):
     return SimpleNamespace(
@@ -94,7 +150,7 @@ def draw(stdscr, window, movement_name, fork_name):
     candidate = detection.get("candidate") or {}
     pnp = candidate.get("pnp") or {}
     if window.terminal_run_mode == "search":
-        mode_text = "원형 탐색 → 발견 시 무제한 자동"
+        mode_text = "Auto Dock Arrival → 자동 탐색/정렬"
     elif window.terminal_run_mode == "auto":
         mode_text = "무제한 자동 사이클 → 자동 삽입"
     elif window.arc_cycle_limit == 3:
@@ -103,7 +159,8 @@ def draw(stdscr, window, movement_name, fork_name):
         mode_text = "단일 (계산·주행 1회 후 삽입 전 정지)"
     lines = [
         f"control_ui 차량 {window.args.vehicle}  WASD: 전후/횡이동  Q/E: 회전  ↑/↓: 리프트  SPACE: 정지",
-        ".: 주행계산  ENTER: 탐색/주행실행  P: 1.2 arrival  K: 1.2 stop  M: 모드  O: 설정  Z: 취소",
+        auto_dock_status_text(window.node.auto_dock_status),
+        ".: 주행계산  ENTER/P: Auto Dock Arrival  K: Auto Dock Stop  M: 모드  O: 설정  Z: 취소",
         f"목표: {window.target_left.currentData()} / {window.target_right.currentData()}",
         f"중심선 보정: {window.centerline_offset_cm:+.1f} cm (+왼쪽/-오른쪽)",
         f"추가 주행보정: 횡이동 {window.lateral_overrun_cm:.1f} cm / "
@@ -118,7 +175,6 @@ def draw(stdscr, window, movement_name, fork_name):
         f"거리={pnp.get('forward_distance_cm', '-')} cm  "
         f"reproj={pnp.get('reprojection_error_px', '-')} px",
         f"상태: {window.arc_label.text()}",
-        f"1.2: {window.auto_dock_status_label.text()}",
         f"시스템: {window.status.text()}",
     ]
     stdscr.erase()
@@ -185,7 +241,7 @@ def terminal_loop(stdscr, window, app, key_timeout):
             window.node.stop(repeats=3)
             movement_name = ""
             if window.terminal_run_mode == "search":
-                window.start_target_search()
+                window.publish_arrival_trigger()
             else:
                 window.start_arc_approach()
         elif key in (ord("z"), ord("Z")):

@@ -584,10 +584,6 @@ class AutoDockNode(Node):
         self.slot_distortion = None
         self.last_slot_snapshot = None
         self.latest_slot_geometry = None
-        self.slot_grid_recovery_requested = False
-        self.slot_grid_recovery_start_position = None
-        self.slot_grid_recovery_start_yaw = None
-        self.slot_docking_active = False
         self.latest_detection = None
         self.latest_detection_at = 0.0
         self.latest_tape_guidance = None
@@ -798,10 +794,6 @@ class AutoDockNode(Node):
         self.selected_slot_id = None
         zone = self.location.split("_", 1)[0]
         if target["type"] in {"SLOT", "AUTO_SLOT"}:
-            self.slot_grid_recovery_requested = False
-            self.slot_grid_recovery_start_position = None
-            self.slot_grid_recovery_start_yaw = None
-            self.slot_docking_active = False
             if zone not in {"NORMAL", "FRESH"}:
                 self.publish_status("rejected", "slot_target_requires_storage_zone")
                 return
@@ -841,7 +833,6 @@ class AutoDockNode(Node):
         self.tape_recovery_direction = None
         self.tape_recovery_done = False
         self.reset_coarse_alignment()
-        self.reset_alignment_recovery()
         self.search_heading_yaw = self.odom_yaw
         self.send_yolo_target()
         if self.boolean("nav2_scan_approach_enabled", False):
@@ -908,7 +899,6 @@ class AutoDockNode(Node):
             self.cancel("insertion_distance_missing_after_fork")
             return
         self.load_state = "LOADED" if fork_state == "UP_COMPLETE" else "UNLOADED"
-        self.slot_docking_active = False
         self.post_lift_reverse_start = self.odom_position
         self.post_lift_reverse_start_yaw = self.odom_yaw
         self.post_lift_reverse_target_m = reverse_target
@@ -935,10 +925,7 @@ class AutoDockNode(Node):
         self.tape_recovery_start_position = None
         self.tape_recovery_direction = None
         self.tape_recovery_done = False
-        self.slot_docking_active = False
-        self.slot_grid_recovery_requested = False
         self.reset_coarse_alignment()
-        self.reset_alignment_recovery()
         self.post_lift_reverse_start = None
         self.post_lift_reverse_start_yaw = None
         self.post_lift_reverse_target_m = None
@@ -987,22 +974,8 @@ class AutoDockNode(Node):
             distortion=self.slot_distortion,
         )
         if observations is None:
-            if AutoDockNode.slot_view_error_recoverable(error):
-                self.slot_grid_recovery_requested = True
-                if (
-                    self.slot_grid_recovery_start_position is None
-                    and self.odom_position is not None
-                    and self.odom_yaw is not None
-                ):
-                    self.slot_grid_recovery_start_position = self.odom_position
-                    self.slot_grid_recovery_start_yaw = self.odom_yaw
             self.publish_status("waiting", error)
             return
-        if self.slot_grid_recovery_requested:
-            self.stop_drive()
-        self.slot_grid_recovery_requested = False
-        self.slot_grid_recovery_start_position = None
-        self.slot_grid_recovery_start_yaw = None
         self.latest_slot_geometry = self.slot_grid_vision.last_geometry
         ratios = {}
         for slot_id, observation in observations.items():
@@ -1021,10 +994,6 @@ class AutoDockNode(Node):
         target = self.slot_grid_vision.target_measurement(
             self.latest_slot_geometry, self.selected_slot_id
         )
-        if target is not None:
-            if not self.lock_slot_target(target):
-                self.cancel("slot_target_odom_missing")
-            return
         reason = "slot_target_pose_ready" if target is not None else (
             "slot_selected_waiting_camera_info"
             if self.selected_slot_id else "slot_grid_confirming"
@@ -1044,55 +1013,6 @@ class AutoDockNode(Node):
         self.publish_status(
             "waiting", reason, occupancy=snapshot, ratios=ratios, **target_status,
         )
-
-    def lock_slot_target(self, target):
-        if self.odom_position is None or self.odom_yaw is None:
-            return False
-        camera_to_fork = self.number(
-            "depth_camera_to_fork_tip_offset_cm", 14.0, 0.0, 100.0
-        ) / 100.0
-        pallet_half_length = self.number(
-            "slot_pallet_length_m", 0.135, 0.05, 0.40
-        ) / 2.0
-        forward_actual = float(target["forward_m"]) - camera_to_fork - pallet_half_length
-        lateral_actual = float(target["lateral_m"])
-        forward = forward_actual / self.number(
-            "distance_coefficient", 1.0, 0.10, 2.0
-        )
-        lateral = lateral_actual / self.number(
-            "lateral_coefficient", 1.0, 0.10, 2.0
-        )
-        yaw_error = float(target["yaw_error_rad"])
-        c, s = math.cos(self.odom_yaw), math.sin(self.odom_yaw)
-        self.target_world = {
-            "x": self.odom_position[0] + c * forward - s * lateral,
-            "y": self.odom_position[1] + s * forward + c * lateral,
-            "yaw": normalize_angle(self.odom_yaw + yaw_error),
-        }
-        self.slot_docking_active = True
-        self.state = "docking"
-        self.reset_alignment_recovery()
-        self.alignment_best_pose = (*self.odom_position, self.odom_yaw)
-        self.insertion_start_due_at = None
-        self.fork_command_due_at = None
-        self.stop_drive(5)
-        self.publish_status(
-            "running", "slot_target_locked_docking",
-            slot_forward_cm=round(forward_actual * 100.0, 1),
-            slot_lateral_cm=round(lateral_actual * 100.0, 1),
-            slot_yaw_error_deg=round(math.degrees(yaw_error), 1),
-        )
-        return True
-
-    @staticmethod
-    def slot_view_error_recoverable(error):
-        return error in {
-            "slot_grid_not_found",
-            "slot_grid_too_small",
-            "slot_grid_corners",
-            "slot_grid_clipped",
-            "slot_grid_pose_reprojection",
-        }
 
     @staticmethod
     def slot_row_column(slot_id):
@@ -1454,19 +1374,14 @@ class AutoDockNode(Node):
             elif entity_id != self.target_entity_id:
                 return False
         if pnp.get("depth_fallback"):
+            if not self.update_world_target(candidate, pnp):
+                return False
             self.enter_coarse_alignment("pnp_quality_fallback")
-            return True
-        if not AutoDockNode.yaw_sources_agree(self, candidate, pnp):
-            self.stop_drive()
-            self.enter_coarse_alignment("yaw_sources_disagree")
             return True
         if not self.update_world_target(candidate, pnp):
             return False
         self.state = "docking"
         self.reset_coarse_alignment()
-        self.reset_alignment_recovery()
-        if self.odom_position is not None and self.odom_yaw is not None:
-            self.alignment_best_pose = (*self.odom_position, self.odom_yaw)
         self.publish_status(
             "running", "virtual_target_locked_docking",
             measurement_source=pnp.get("distance_source", "depth"),
@@ -1565,6 +1480,13 @@ class AutoDockNode(Node):
         )
         for direction, (distance, angle, calculated_clearance) in directions:
             clearance = calculated_clearance or default_clearance
+            if direction == "rear" and self.state in {
+                "coarse_align", "docking", "inserting"
+            }:
+                alignment_rear_minimum = self.number(
+                    "alignment_rear_lidar_min_distance_cm", 30.0, 5.0, 100.0
+                ) / 100.0
+                clearance = max(clearance, alignment_rear_minimum)
             if distance < clearance:
                 violations.append(
                     (distance - clearance, direction, distance, angle, clearance)
@@ -1612,9 +1534,7 @@ class AutoDockNode(Node):
             return
         if self.state == "idle":
             return
-        if self.state in {"slot_scanning", "slot_target_ready"}:
-            self.tick_slot_grid_recovery()
-        elif self.state == "scan_sweep":
+        if self.state == "scan_sweep":
             self.tick_scan_sweep()
         elif self.state == "scan_forward_search":
             self.tick_scan_forward_search()
@@ -1638,98 +1558,6 @@ class AutoDockNode(Node):
             self.tick_turning_right_for_ready()
         elif self.state == "safety_backoff":
             self.tick_backoff()
-
-    def tick_slot_grid_recovery(self):
-        if not getattr(self, "slot_grid_recovery_requested", False):
-            self.stop_drive()
-            return
-        if self.odom_position is None or self.odom_yaw is None:
-            self.stop_drive()
-            self.publish_status("waiting", "slot_grid_recovery_odom_missing")
-            return
-        if self.slot_grid_recovery_start_position is None:
-            self.slot_grid_recovery_start_position = self.odom_position
-            self.slot_grid_recovery_start_yaw = self.odom_yaw
-        if time.monotonic() - getattr(self, "scan_updated_at", 0.0) > 0.5:
-            self.stop_drive()
-            self.publish_status("waiting", "slot_grid_recovery_lidar_stale")
-            return
-        rear_distance, rear_angle, _rear_clearance = self.nearest_by_direction["rear"]
-        minimum_rear = self.number(
-            "slot_alignment_min_rear_range_m", 0.13, 0.08, 0.50
-        )
-        if rear_distance < minimum_rear:
-            self.stop_drive()
-            self.publish_status(
-                "waiting", "slot_grid_recovery_rear_blocked",
-                range_m=round(rear_distance, 3),
-                minimum_range_m=round(minimum_rear, 3),
-                angle_deg=(
-                    None if rear_angle is None
-                    else round(math.degrees(rear_angle), 1)
-                ),
-            )
-            return
-        start_yaw = self.slot_grid_recovery_start_yaw
-        dx = self.odom_position[0] - self.slot_grid_recovery_start_position[0]
-        dy = self.odom_position[1] - self.slot_grid_recovery_start_position[1]
-        reverse_odom = max(0.0, -(
-            math.cos(start_yaw) * dx + math.sin(start_yaw) * dy
-        ))
-        reverse_actual = reverse_odom * self.number(
-            "distance_coefficient", 1.0, 0.10, 2.0
-        )
-        maximum = self.number(
-            "slot_grid_recovery_max_reverse_m", 0.25, 0.05, 0.60
-        )
-        if reverse_actual >= maximum:
-            self.stop_drive()
-            self.slot_grid_recovery_requested = False
-            self.publish_status(
-                "waiting", "slot_grid_recovery_limit",
-                reversed_cm=round(reverse_actual * 100.0, 1),
-            )
-            return
-        speed = self.number(
-            "slot_grid_recovery_speed_m_s", 0.04, 0.01, 0.08
-        )
-        heading_error = normalize_angle(start_yaw - self.odom_yaw)
-        self.publish_drive(
-            -speed,
-            0.0,
-            clamp(0.8 * heading_error, -0.08, 0.08),
-        )
-        self.publish_status(
-            "recovering", "slot_grid_clipped_reversing_for_view",
-            reversed_cm=round(reverse_actual * 100.0, 1),
-            max_reverse_cm=round(maximum * 100.0, 1),
-        )
-
-    def ensure_slot_alignment_rear_clearance(self):
-        if time.monotonic() - getattr(self, "scan_updated_at", 0.0) > 0.5:
-            self.stop_drive()
-            self.publish_status("waiting", "slot_alignment_rear_lidar_stale")
-            return False
-        rear_distance, rear_angle, _clearance = self.nearest_by_direction["rear"]
-        minimum_rear = self.number(
-            "slot_alignment_min_rear_range_m", 0.13, 0.08, 0.50
-        )
-        if rear_distance >= minimum_rear:
-            return True
-        speed = self.number(
-            "slot_alignment_rear_clearance_speed_m_s", 0.03, 0.01, 0.06
-        )
-        self.publish_drive(speed, 0.0, 0.0)
-        self.publish_status(
-            "recovering", "slot_alignment_forward_for_rear_clearance",
-            rear_range_m=round(rear_distance, 3),
-            minimum_range_m=round(minimum_rear, 3),
-            angle_deg=(
-                None if rear_angle is None
-                else round(math.degrees(rear_angle), 1)
-            ),
-        )
-        return False
 
     def tick_scan_sweep(self):
         """Sweep a small yaw arc after Nav2 arrival and lock a visible target."""
@@ -2060,7 +1888,11 @@ class AutoDockNode(Node):
                     ),
                 )
                 return
-            if front_guidance_enabled:
+            front_observation_available = (
+                front_guidance_enabled
+                and AutoDockNode.front_search_entity_observation(self) is not None
+            )
+            if front_observation_available:
                 # Rear clearance is satisfied.  Continue with option 1 so
                 # both checkboxes can be tested as a combined strategy.
                 pass
@@ -2355,6 +2187,15 @@ class AutoDockNode(Node):
         if candidate is None:
             candidate, partial_pnp, partial_reason = self.tracked_partial_measurement()
             if candidate is None:
+                if self.target_world is not None:
+                    self.state = "docking"
+                    self.reset_coarse_alignment()
+                    self.publish_status(
+                        "running", "coarse_target_lost_using_virtual_target",
+                        measurement_reason=partial_reason or identity_reason,
+                        entity_id=self.target_entity_id,
+                    )
+                    return
                 self.stop_drive()
                 self.publish_status(
                     "waiting", "coarse_locked_target_temporarily_lost",
@@ -2366,41 +2207,13 @@ class AutoDockNode(Node):
             self.coarse_alignment_started_at = now
         timeout = self.number("coarse_alignment_timeout_sec", 5.0, 0.5, 30.0)
         if now - self.coarse_alignment_started_at >= timeout:
-            cooldown = self.number("candidate_retry_cooldown_sec", 1.0, 0.0, 10.0)
-            self.state = "search"
-            self.candidate_retry_not_before = now + cooldown
-            self.reset_coarse_alignment()
-            self.publish_status("running", "coarse_alignment_timeout_resume_search")
-            return
+            # Once alignment has started, keep the locked candidate instead of
+            # dropping back to search merely because coarse alignment is slow.
+            self.coarse_alignment_started_at = now
+            self.publish_status("running", "coarse_alignment_continuing_locked_target")
 
         measured_candidate, measured_pnp, measurement_reason = self.valid_measurement()
         if measured_candidate is not None and not measured_pnp.get("depth_fallback"):
-            if not AutoDockNode.yaw_sources_agree(self, measured_candidate, measured_pnp):
-                self.coarse_depth_fallback_frames = 0
-                self.coarse_last_counted_stamp = None
-                self.stop_drive()
-                self.publish_status(
-                    "waiting", "yaw_sources_disagree_remeasuring",
-                    yaw_delta_deg=round(AutoDockNode.yaw_source_disagreement_deg(self,
-                        measured_candidate, measured_pnp
-                    ), 1),
-                )
-                return
-            source_stamp = (self.latest_detection or {}).get("source_stamp_ns")
-            if source_stamp != self.coarse_last_counted_stamp:
-                self.coarse_last_counted_stamp = source_stamp
-                self.coarse_depth_fallback_frames += 1
-            required = int(self.number(
-                "alignment_yaw_confirmation_frames", 3, 1, 30
-            ))
-            if self.coarse_depth_fallback_frames < required:
-                self.stop_drive()
-                self.publish_status(
-                    "waiting", "yaw_sources_stabilizing",
-                    confirmed_frames=self.coarse_depth_fallback_frames,
-                    required_frames=required,
-                )
-                return
             if not self.enter_alignment(measured_candidate, measured_pnp):
                 self.cancel("odom_missing")
             return
@@ -2477,7 +2290,6 @@ class AutoDockNode(Node):
 
     def tick_docking(self):
         now = time.monotonic()
-        slot_docking = getattr(self, "slot_docking_active", False)
         insertion_start_due_at = getattr(self, "insertion_start_due_at", None)
         if insertion_start_due_at is not None:
             self.stop_drive()
@@ -2489,86 +2301,8 @@ class AutoDockNode(Node):
             self.state = "inserting"
             self.publish_status("running", "aligned_inserting")
             return
-        if slot_docking:
-            # A slot target is fixed only after view recovery.  Never return
-            # toward an older pose here because that could reverse into the
-            # rear wall while lateral/yaw alignment is active.
-            self.alignment_recovery_pose = None
-            if not AutoDockNode.ensure_slot_alignment_rear_clearance(self):
-                return
-        elif getattr(self, "alignment_recovery_pose", None) is not None:
-            AutoDockNode.tick_alignment_recovery(self)
-            return
-        if slot_docking:
-            candidate = {"depth_yaw": {}}
-            pnp = {"depth_fallback": True}
-            measurement_reason = None
-        else:
-            candidate, pnp, measurement_reason = self.valid_measurement()
-        if candidate is None:
-            self.stop_drive()
-            self.alignment_good_frames = 0
-            self.alignment_last_good_stamp = None
-            if getattr(self, "alignment_lost_since", None) is None:
-                self.alignment_lost_since = now
-            lost_timeout = self.number(
-                "alignment_lost_recovery_sec", 0.5, 0.1, 3.0
-            )
-            if now - self.alignment_lost_since >= lost_timeout:
-                self.alignment_recovery_pose = getattr(
-                    self, "alignment_best_pose", None
-                )
-                AutoDockNode.tick_alignment_recovery(self)
-                return
-            self.publish_status(
-                "waiting", "alignment_target_lost_holding",
-                measurement_reason=measurement_reason,
-            )
-            return
-        self.alignment_lost_since = None
-        if not AutoDockNode.yaw_sources_agree(self, candidate, pnp):
-            self.stop_drive()
-            self.alignment_good_frames = 0
-            self.alignment_last_good_stamp = None
-            self.alignment_bad_frames = getattr(self, "alignment_bad_frames", 0) + 1
-            self.publish_status(
-                "waiting", "alignment_yaw_disagreement_holding",
-                yaw_delta_deg=round(
-                    AutoDockNode.yaw_source_disagreement_deg(self, candidate, pnp), 1
-                ),
-            )
-            if self.alignment_bad_frames >= int(self.number(
-                "alignment_worsening_frames", 3, 1, 20
-            )):
-                self.alignment_recovery_pose = getattr(
-                    self, "alignment_best_pose", None
-                )
-            return
-        required_good = int(self.number(
-            "alignment_yaw_confirmation_frames", 3, 1, 30
-        ))
-        if slot_docking:
-            self.alignment_good_frames = required_good
-        else:
-            source_stamp = (getattr(self, "latest_detection", None) or {}).get(
-                "source_stamp_ns"
-            )
-            if source_stamp is None or source_stamp != getattr(
-                self, "alignment_last_good_stamp", None
-            ):
-                self.alignment_last_good_stamp = source_stamp
-                self.alignment_good_frames = getattr(
-                    self, "alignment_good_frames", 0
-                ) + 1
-        if self.alignment_good_frames < required_good:
-            self.stop_drive()
-            self.publish_status(
-                "waiting", "alignment_yaw_stabilizing",
-                confirmed_frames=self.alignment_good_frames,
-                required_frames=required_good,
-            )
-            return
-        if not slot_docking:
+        candidate, pnp, _ = self.valid_measurement()
+        if candidate is not None:
             self.update_world_target(candidate, pnp, blend_existing=True)
         target = self.target_in_body()
         if target is None:
@@ -2590,41 +2324,6 @@ class AutoDockNode(Node):
             self.number("alignment_max_trusted_yaw_deg", 12.0, 3.0, 30.0)
         )
         yaw_trusted = abs(yaw) <= maximum_trusted_yaw
-        alignment_score = (
-            abs(forward_actual - standoff)
-            + abs(lateral_actual)
-            + 0.20 * abs(yaw)
-        )
-        improvement = self.number(
-            "alignment_best_pose_improvement_m", 0.005, 0.001, 0.05
-        )
-        worsening = self.number(
-            "alignment_worsening_margin_m", 0.03, 0.005, 0.20
-        )
-        best_score = getattr(self, "alignment_best_score", math.inf)
-        if alignment_score + improvement < best_score:
-            self.alignment_best_score = alignment_score
-            self.alignment_bad_frames = 0
-            if self.odom_position is not None and self.odom_yaw is not None:
-                self.alignment_best_pose = (*self.odom_position, self.odom_yaw)
-        elif alignment_score > best_score + worsening:
-            self.alignment_bad_frames = getattr(self, "alignment_bad_frames", 0) + 1
-            if self.alignment_bad_frames >= int(self.number(
-                "alignment_worsening_frames", 3, 1, 20
-            )):
-                self.stop_drive()
-                if slot_docking:
-                    self.publish_status(
-                        "waiting", "slot_alignment_error_worsening_holding"
-                    )
-                    return
-                self.alignment_recovery_pose = getattr(
-                    self, "alignment_best_pose", None
-                )
-                self.publish_status("recovering", "alignment_error_worsening_returning")
-                return
-        else:
-            self.alignment_bad_frames = 0
         distance_ready = 0.10 <= forward_actual <= standoff + 0.035
         yaw_ready = abs(yaw) < math.radians(3.0)
         if distance_ready and abs(lateral_actual) < 0.025 and yaw_ready:
@@ -2674,6 +2373,7 @@ class AutoDockNode(Node):
             clamp(0.80 * lateral, -0.08, 0.08),
             clamp(1.20 * yaw, -0.35, 0.35),
         )
+
 
     def tick_alignment_recovery(self):
         pose = self.alignment_recovery_pose
@@ -2758,10 +2458,9 @@ class AutoDockNode(Node):
                 insertion_depth_cm=round(insertion_depth_m * 100.0, 1),
             )
             return
-        if not getattr(self, "slot_docking_active", False):
-            candidate, pnp, _reason = self.valid_measurement()
-            if candidate is not None:
-                self.update_world_target(candidate, pnp, blend_existing=True)
+        candidate, pnp, _reason = self.valid_measurement()
+        if candidate is not None:
+            self.update_world_target(candidate, pnp, blend_existing=True)
         target = self.target_in_body()
         if target is None:
             self.cancel("virtual_target_missing_during_insertion")
