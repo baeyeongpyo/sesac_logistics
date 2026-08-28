@@ -331,6 +331,41 @@ class InventoryStore:
         finally:
             connection.close()
 
+    def delete_zone(self, zone_id: str) -> None:
+        with self._write_connection() as connection:
+            self._require_zone(connection, zone_id)
+            stock = connection.execute(
+                """
+                SELECT 1
+                FROM pallet_stocks
+                WHERE zone_id = ?
+                  AND (quantity > 0 OR reserved_quantity > 0)
+                """,
+                (zone_id,),
+            ).fetchone()
+            if stock is not None:
+                raise ConflictError("zone cannot be deleted while it contains stock")
+
+            operation = connection.execute(
+                """
+                SELECT 1
+                FROM transport_operations
+                WHERE source_zone_id = ? OR destination_zone_id = ?
+                """,
+                (zone_id, zone_id),
+            ).fetchone()
+            if operation is not None:
+                raise ConflictError("zone cannot be deleted while it has operations")
+
+            event = connection.execute(
+                "SELECT 1 FROM inventory_events WHERE zone_id = ?", (zone_id,)
+            ).fetchone()
+            if event is not None:
+                raise ConflictError("zone cannot be deleted while it has inventory events")
+
+            connection.execute("DELETE FROM pallet_stocks WHERE zone_id = ?", (zone_id,))
+            connection.execute("DELETE FROM zones WHERE zone_id = ?", (zone_id,))
+
     def set_stock(
         self, zone_id: str, payload_type: PayloadType, quantity: int
     ) -> Stock:

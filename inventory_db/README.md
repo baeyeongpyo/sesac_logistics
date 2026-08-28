@@ -27,7 +27,7 @@ SQLite 파일은 호스트의 `inventory_db/data/inventory.db`에 생성됩니�
 ## HTTP API
 
 - `GET /healthz`
-- `PUT`, `GET /api/v1/zones`
+- `PUT`, `GET /api/v1/zones`, `DELETE /api/v1/zones/{zone_id}` — 재고·예약·운송 작업·재고 이벤트가 없는 빈 zone만 삭제
 - `PUT /api/v1/stocks/{zone_id}/{payload_type}`, `GET /api/v1/stocks`
 - `POST /api/v1/operations`
 - `GET /api/v1/operations/active` — 재고 예약 또는 PICK/PLACE가 진행 중인 작업 목록

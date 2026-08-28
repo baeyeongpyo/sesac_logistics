@@ -7,6 +7,7 @@ from inventory_db.app.inventory import (
     ConflictError,
     InventoryStore,
     InsufficientStockError,
+    NotFoundError,
     OperationStatus,
     PayloadType,
     Zone,
@@ -42,6 +43,42 @@ class InventoryStoreTest(unittest.TestCase):
         self.assertEqual(stock.quantity, 3)
         self.assertEqual(stock.reserved_quantity, 0)
         self.assertEqual(stock.available_quantity, 3)
+
+    def test_deletes_an_empty_zone_and_its_zero_quantity_stock_records(self) -> None:
+        store = InventoryStore(self.database_path)
+        store.initialize()
+        store.upsert_zone(Zone("docker", "Docker", "map", 0.0, 0.0, 0.0, 8, True))
+        store.set_stock("docker", PayloadType.EMPTY, 0)
+
+        store.delete_zone("docker")
+
+        self.assertEqual(store.list_zones(), [])
+        self.assertEqual(store.list_stocks(), [])
+        with self.assertRaises(NotFoundError):
+            store.stock("docker", PayloadType.EMPTY)
+
+    def test_rejects_deleting_a_zone_that_contains_stock(self) -> None:
+        store = InventoryStore(self.database_path)
+        store.initialize()
+        store.upsert_zone(Zone("docker", "Docker", "map", 0.0, 0.0, 0.0, 8, True))
+        store.set_stock("docker", PayloadType.EMPTY, 1)
+
+        with self.assertRaises(ConflictError):
+            store.delete_zone("docker")
+
+        self.assertEqual([zone.zone_id for zone in store.list_zones()], ["docker"])
+        self.assertEqual(store.stock("docker", PayloadType.EMPTY).quantity, 1)
+
+    def test_rejects_deleting_a_zone_referenced_by_an_operation(self) -> None:
+        store, operation = self._assigned_fresh_operation()
+
+        with self.assertRaises(ConflictError):
+            store.delete_zone("destination")
+
+        self.assertEqual(
+            [zone.zone_id for zone in store.list_zones()], ["destination", "source"]
+        )
+        self.assertEqual(store.operation(operation.operation_id).status, OperationStatus.TO_PICK)
 
     def test_assigned_operation_reserves_one_stock_and_directs_empty_robot_to_pick(
         self,

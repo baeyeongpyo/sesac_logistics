@@ -156,6 +156,36 @@ class InventoryApiTest(unittest.TestCase):
         self.assertEqual(response.json()[0]["zone_id"], "destination")
         self.assertEqual(response.json()[0]["map_name"], "warehouse_map")
 
+    def test_empty_zone_can_be_deleted(self) -> None:
+        self.assertEqual(
+            self.client.put(
+                "/api/v1/zones/docker",
+                json={
+                    "name": "Docker",
+                    "map_name": "warehouse_map",
+                    "nav_x": 4.0,
+                    "nav_y": 0.0,
+                    "nav_yaw": 0.0,
+                    "capacity": 1,
+                    "enabled": True,
+                },
+            ).status_code,
+            200,
+        )
+
+        response = self.client.delete("/api/v1/zones/docker")
+
+        self.assertEqual(response.status_code, 204)
+        self.assertNotIn(
+            "docker", [zone["zone_id"] for zone in self.client.get("/api/v1/zones").json()]
+        )
+
+    def test_zone_referenced_by_an_operation_cannot_be_deleted(self) -> None:
+        response = self.client.delete("/api/v1/zones/destination")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("destination", [zone["zone_id"] for zone in self.client.get("/api/v1/zones").json()])
+
     def test_busy_robot_cannot_receive_a_second_operation(self) -> None:
         response = self.client.post(
             "/api/v1/operations",
@@ -185,7 +215,7 @@ class InventoryApiTest(unittest.TestCase):
 
         for path, path_item in schema["paths"].items():
             for method, operation in path_item.items():
-                if method not in {"get", "post", "put"}:
+                if method not in {"delete", "get", "post", "put"}:
                     continue
                 with self.subTest(path=path, method=method):
                     self.assertTrue(operation["summary"].strip())

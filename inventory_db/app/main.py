@@ -215,6 +215,24 @@ def create_app(database_path: str) -> FastAPI:
     def list_zones(request: Request) -> list[dict]:
         return [_response(zone) for zone in _store(request).list_zones()]
 
+    @app.delete(
+        "/api/v1/zones/{zone_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_model=None,
+        tags=["zones"],
+        summary="빈 Zone 삭제",
+        description=_endpoint_description(
+            "수량과 예약 재고가 없고 운송 작업·재고 이벤트에 참조되지 않은 zone을 삭제합니다.",
+            "성공하면 응답 본문 없이 204를 반환합니다.",
+            "재고, 운송 작업 또는 재고 이벤트가 남아 있으면 데이터 이력을 보존하기 위해 409 오류가 반환됩니다.",
+        ),
+    )
+    def delete_zone(
+        zone_id: Annotated[str, Path(description="삭제할 빈 주행 목적지 식별자")],
+        request: Request,
+    ) -> None:
+        _store(request).delete_zone(zone_id)
+
     @app.put(
         "/api/v1/stocks/{zone_id}/{payload_type}",
         tags=["stocks"],
