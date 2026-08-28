@@ -1,7 +1,0 @@
-map_version: v001
-corridor:
-  id: corridor_a
-  lease_seconds: 120.0
-tasks:
-  - {robot_id: robot_1, x: -0.8, y: -0.8, yaw: 0.0}
-  - {robot_id: robot_2, x: -0.8, y: 0.8, yaw: 0.0}

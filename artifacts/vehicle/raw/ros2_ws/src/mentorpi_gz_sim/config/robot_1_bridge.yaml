@@ -1,6 +1,0 @@
-- {ros_topic_name: /clock, gz_topic_name: /clock, ros_type_name: rosgraph_msgs/msg/Clock, gz_type_name: ignition.msgs.Clock, direction: GZ_TO_ROS}
-- {ros_topic_name: /robot_1/controller/cmd_vel, gz_topic_name: /robot_1/controller/cmd_vel, ros_type_name: geometry_msgs/msg/Twist, gz_type_name: ignition.msgs.Twist, direction: ROS_TO_GZ}
-- {ros_topic_name: /gz/dynamic_pose, gz_topic_name: /world/mentorpi_warehouse/dynamic_pose/info, ros_type_name: tf2_msgs/msg/TFMessage, gz_type_name: ignition.msgs.Pose_V, direction: GZ_TO_ROS}
-- {ros_topic_name: /robot_1/scan_raw, gz_topic_name: /robot_1/scan_raw, ros_type_name: sensor_msgs/msg/LaserScan, gz_type_name: ignition.msgs.LaserScan, direction: GZ_TO_ROS}
-- {ros_topic_name: /robot_1/imu/data_raw, gz_topic_name: /robot_1/imu/data_raw, ros_type_name: sensor_msgs/msg/Imu, gz_type_name: ignition.msgs.IMU, direction: GZ_TO_ROS}
-- {ros_topic_name: /robot_1/depth/camera_info, gz_topic_name: /robot_1/depth/camera_info, ros_type_name: sensor_msgs/msg/CameraInfo, gz_type_name: ignition.msgs.CameraInfo, direction: GZ_TO_ROS}
