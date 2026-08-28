@@ -14,7 +14,7 @@ import uuid
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
-SCRIPT = PACKAGE / 'scripts' / 'vehicle_command_api.py'
+SCRIPT = PACKAGE / 'vehicle_command_api.py'
 
 
 def load_server_module():

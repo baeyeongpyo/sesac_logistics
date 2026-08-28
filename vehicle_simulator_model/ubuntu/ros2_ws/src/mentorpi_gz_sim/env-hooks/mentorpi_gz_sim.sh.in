@@ -1,6 +1,0 @@
-_mentorpi_gz_sim_prefix="${COLCON_CURRENT_PREFIX:-${AMENT_CURRENT_PREFIX:-}}"
-ament_prepend_unique_value GZ_SIM_SYSTEM_PLUGIN_PATH \
-  "$_mentorpi_gz_sim_prefix/lib"
-ament_prepend_unique_value GZ_SIM_RESOURCE_PATH \
-  "$_mentorpi_gz_sim_prefix/share/mentorpi_gz_sim/models"
-unset _mentorpi_gz_sim_prefix

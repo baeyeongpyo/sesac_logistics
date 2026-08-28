@@ -1,10 +1,10 @@
-# MentorPi 지도·위치추정·기록 용어
+# MentorPi 지도·위치추정·기록 용어 (레거시 참고)
 
 ## 목적
 
-이 문서는 MentorPi 물류 차량의 지도 생성, 저장 지도 주행, 주행 데이터 기록에서
-사용하는 명칭을 구분한다. 현재 구현된 단일 차량(`robot_1`) 기준과, 향후 장기
-적재물 배치 변경에 대응하기 위한 지도 갱신 방향을 함께 기록한다.
+이 문서는 퇴역한 MentorPi 시뮬레이터의 지도 생성, 저장 지도 주행, 주행 데이터
+기록에서 사용한 명칭을 구분한 참고 기록이다. 현재 운영 경로의 구현 또는 배포
+지침으로 사용하지 않는다.
 
 ## 전체 관계
 
@@ -47,7 +47,7 @@ LiDAR + odom + TF 등의 원본 토픽
 | manifest | 지도 세션의 ID, 생성 시간, 이미지·world·모델·TF 보정 버전 등 출처 메타데이터다. | 현재 세션 검증은 기본 필드와 checksum을 확인한다. 지도 호환성 정책은 향후 강화 대상이다. |
 | checksum | 지도와 세션 산출물이 저장 후 훼손·변조되지 않았는지 확인하는 SHA-256 무결성 정보다. | 파일 무결성만 확인하며, 실제 창고 환경과의 일치 또는 지도 품질을 보증하지는 않는다. |
 
-## 현재 지도 세션 산출물
+## 당시 지도 세션 산출물
 
 `mapping-up <session-id>`로 시작한 지도 생성은 안전하게 종료될 때 다음 형태로
 저장된다.
@@ -95,18 +95,14 @@ LiDAR + odom + TF 등의 원본 토픽
   않는다. 반면 지도 재생성용 `slam_toolbox`는 운영 `/map`·TF와 분리된 환경에서
   실행해야 한다.
 
-## 구현 범위와 후속 작업
+## 당시 구현 범위와 후속 작업
 
-현재 구현에는 명시적 지도 생성 세션의 rosbag2 기록, 지도·posegraph 저장,
-checksum 검증, 검증된 저장 지도 선택이 포함된다. 일반 주행 중 상시 또는 이벤트
+당시 구현에는 명시적 지도 생성 세션의 rosbag2 기록, 지도·posegraph 저장,
+checksum 검증, 검증된 저장 지도 선택이 포함됐다. 일반 주행 중 상시 또는 이벤트
 기반으로 원본 토픽을 서버에 기록하는 운영용 recorder, rosbag2의 격리 재처리,
 지도 후보 승인·활성 버전 전환은 후속 구현 항목이다.
 
 ## 근거
 
-- `vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/config/slam.yaml`
-- `vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_slam/scripts/run_mapping_session.sh`
-- `vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_nav/launch/navigation.launch.py`
-- `vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_nav/config/nav2.yaml`
-- `vehicle_simulator_model/ubuntu/ros2_ws/src/mentorpi_nav/scripts/map_session.py`
-- `vehicle_simulator_model/ubuntu/README.md`
+퇴역한 MentorPi 시뮬레이터의 SLAM, Nav2, 지도 세션 구현을 분석해 작성했다.
+해당 소스 번들은 제거되었으므로, 현재 운영 동작의 근거로 사용하지 않는다.

@@ -20,13 +20,13 @@ API를 검증하기 위해 실행하지 않는다.
 
 ## 실행
 
-차량의 `~/ros2_ws`에서 ROS 환경을 로드한 뒤 source script를 직접 실행한다.
+차량에서 ROS 2 환경을 로드한 뒤 이 디렉터리의 스크립트를 직접 실행한다.
 
 ```bash
-cd ~/ros2_ws
+cd /opt/vehicle_command_api
 source /opt/ros/humble/setup.zsh
 
-python3 src/mentorpi_nav/scripts/vehicle_command_api.py \
+python3 vehicle_command_api.py \
   --host 0.0.0.0 \
   --port 8082 \
   --robot-id robot_2 \
@@ -54,18 +54,6 @@ python3 src/mentorpi_nav/scripts/vehicle_command_api.py \
 | `--action-server-timeout-sec` | `1.0` | Nav2 action server 탐색 대기 시간 |
 | `--goal-response-timeout-sec` | `3.0` | goal 수락 응답 대기 시간 |
 | `--cancel-response-timeout-sec` | `3.0` | cancel 수락 응답 대기 시간 |
-
-빌드된 패키지에서 실행하려면 먼저 설치한다.
-
-```bash
-cd ~/ros2_ws
-colcon build --packages-select mentorpi_nav --symlink-install
-source install/setup.zsh
-ros2 run mentorpi_nav vehicle_command_api.py \
-  --host 0.0.0.0 \
-  --port 8082 \
-  --robot-id robot_2
-```
 
 ## API 확인과 테스트
 
@@ -212,7 +200,7 @@ cancel을 요청한다. 기존 Nav2 또는 다른 publisher가 이후 새 속도
 ROS를 설치하지 않은 개발 환경에서도 HTTP 계약을 검증할 수 있다.
 
 ```bash
-cd ~/ros2_ws/src/mentorpi_nav/test
-python3 -m unittest test_vehicle_command_api test_cmd_vel_http_test
-python3 -m py_compile ../scripts/vehicle_command_api.py
+cd /opt/vehicle_command_api
+python3 -m unittest test/test_vehicle_command_api.py -v
+python3 -m py_compile vehicle_command_api.py
 ```
