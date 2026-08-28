@@ -3,9 +3,8 @@ topics:
   - id: controller_map
     enabled: true
     source: /controller_server/map
-    target: /fleet/map
+    target: /map
     type: nav_msgs/msg/OccupancyGrid
-    replay_rate_hz: 1.0
     qos:
       reliability: reliable
       durability: transient_local

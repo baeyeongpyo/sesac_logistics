@@ -73,5 +73,5 @@ class CentralTopicConfig:
     source: str
     target: str
     message_type: str
-    replay_rate_hz: float
+    replay_rate_hz: float | None
     qos: QosConfig

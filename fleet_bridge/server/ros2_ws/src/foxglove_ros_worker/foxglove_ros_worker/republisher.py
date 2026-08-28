@@ -33,6 +33,62 @@ def initialize_rclpy(rclpy_module, no_signal_handlers) -> bool:
     return owns_rclpy
 
 
+def namespace_frame_ids(message: Any, robot_id: str) -> None:
+    """Prefix vehicle frame IDs while retaining the fleet-wide map frame."""
+
+    prefix = f'{robot_id}/'
+    visited: set[int] = set()
+
+    def namespaced(frame_id: str) -> str:
+        normalized = frame_id.lstrip('/')
+        if not normalized or normalized == 'map' or normalized.startswith(prefix):
+            return normalized
+        return f'{prefix}{normalized}'
+
+    def visit(value: Any) -> None:
+        if value is None or isinstance(value, (bool, bytes, float, int, str)):
+            return
+        identity = id(value)
+        if identity in visited:
+            return
+        visited.add(identity)
+
+        if isinstance(value, dict):
+            for field, nested in value.items():
+                if field in ('frame_id', 'child_frame_id') and isinstance(nested, str):
+                    value[field] = namespaced(nested)
+                else:
+                    visit(nested)
+            return
+
+        if isinstance(value, (list, tuple)):
+            for nested in value:
+                visit(nested)
+            return
+
+        fields = set()
+        for slot in getattr(type(value), '__slots__', ()):
+            if not isinstance(slot, str) or not hasattr(value, slot):
+                continue
+            fields.add(slot)
+            field = slot.lstrip('_')
+            nested = getattr(value, slot)
+            if field in ('frame_id', 'child_frame_id') and isinstance(nested, str):
+                setattr(value, slot, namespaced(nested))
+            else:
+                visit(nested)
+
+        for field, nested in vars(value).items() if hasattr(value, '__dict__') else ():
+            if field in fields:
+                continue
+            if field in ('frame_id', 'child_frame_id') and isinstance(nested, str):
+                setattr(value, field, namespaced(nested))
+            else:
+                visit(nested)
+
+    visit(message)
+
+
 class LatestMessageReplay:
     """Retain the latest message and publish it again on a timer."""
 
@@ -127,6 +183,7 @@ class RosRepublisher:
         self._rclpy = rclpy
         self._deserialize_message = deserialize_message
         self._string_type = String
+        self._robot_id = robot_id
         self._state = state
         self._owns_rclpy = initialize_rclpy(
             rclpy,
@@ -181,6 +238,7 @@ class RosRepublisher:
     def publish(self, topic: TopicConfig, payload: bytes) -> None:
         message_type = self._message_types[topic.id]
         message = self._deserialize_message(payload, message_type)
+        namespace_frame_ids(message, self._robot_id)
         self._publishers[topic.id].publish(message)
         replay = self._replays.get(topic.id)
         if replay is not None:

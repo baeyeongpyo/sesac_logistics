@@ -1,0 +1,19 @@
+name: foxglove-asset-server
+
+services:
+  asset-server:
+    build:
+      context: .
+    image: "${FOXGLOVE_ASSET_SERVER_IMAGE:-mentorpi-foxglove-asset-server:latest}"
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - type: bind
+        source: ${ASSET_DIRECTORY:?ASSET_DIRECTORY is required}
+        target: /assets
+        read_only: true
+        bind:
+          create_host_path: false
+    command:
+      [python3, /app/serve_assets.py, --port, "${ASSET_PORT:-8081}", --bind,
+       "${ASSET_BIND_ADDRESS:-0.0.0.0}", --directory, /assets]

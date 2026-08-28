@@ -41,29 +41,23 @@ class FakeNode:
 
 
 class CentralTopicRelayTest(unittest.TestCase):
-    def test_republishes_latest_map_immediately_and_each_second(self):
+    def test_publishes_cached_map_once_without_periodic_replay(self):
+        """A durable map needs one publish; late readers receive its retained sample."""
         topic = CentralTopicConfig(
             id='controller_map',
             enabled=True,
             source='/controller_server/map',
-            target='/fleet/map',
+            target='/map',
             message_type='nav_msgs/msg/OccupancyGrid',
-            replay_rate_hz=1.0,
+            replay_rate_hz=None,
             qos=QosConfig('reliable', 'transient_local', 'keep_last', 1),
         )
         node = FakeNode()
         CentralTopicRelay((topic,), node, lambda _name: object, lambda qos: qos)
 
         node.subscriptions['/controller_server/map']('map-v1')
-        self.assertEqual(node.publishers['/fleet/map'].messages, ['map-v1'])
-
-        interval, callback = node.timers[0]
-        self.assertEqual(interval, 1.0)
-        callback()
-        self.assertEqual(
-            node.publishers['/fleet/map'].messages,
-            ['map-v1', 'map-v1'],
-        )
+        self.assertEqual(node.publishers['/map'].messages, ['map-v1'])
+        self.assertEqual(node.timers, [])
 
 
 if __name__ == '__main__':

@@ -337,7 +337,7 @@ def load_central_topics(path: Path | str) -> tuple[CentralTopicConfig, ...]:
             'id', 'enabled', 'source', 'target', 'type', 'replay_rate_hz', 'qos',
         }
         _keys(raw, allowed, location)
-        _required(raw, allowed, location)
+        _required(raw, allowed - {'replay_rate_hz'}, location)
         message_type = _string(raw['type'], f'{location}.type')
         if not MESSAGE_TYPE_PATTERN.fullmatch(message_type):
             raise ConfigError(f'{location}.type is not a valid message type')
@@ -347,9 +347,12 @@ def load_central_topics(path: Path | str) -> tuple[CentralTopicConfig, ...]:
             source=_topic_name(raw['source'], f'{location}.source', 'central'),
             target=_topic_name(raw['target'], f'{location}.target', 'central'),
             message_type=message_type,
-            replay_rate_hz=_positive_number(
-                raw['replay_rate_hz'],
-                f'{location}.replay_rate_hz',
+            replay_rate_hz=(
+                _positive_number(
+                    raw['replay_rate_hz'],
+                    f'{location}.replay_rate_hz',
+                )
+                if 'replay_rate_hz' in raw else None
             ),
             qos=_load_qos(raw['qos'], f'{location}.qos'),
         )

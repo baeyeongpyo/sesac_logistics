@@ -4,7 +4,7 @@ foxglove_bridge:
     port: 8765
     topic_whitelist:
       - ^/robot_(1|2)/.+$
-      - ^/fleet/map$
+      - ^/map$
     best_effort_qos_topic_whitelist:
       - ^/robot_(1|2)/(tf|odom|odom_raw|odom_rf2o|scan_filtered|imu|imu_corrected|joint_states|joy|cost_cloud)$
       - ^/robot_(1|2)/(imu/.*|ascamera/.*|local_costmap/clearing_endpoints|particle_cloud|ros_robot_controller/(imu_raw|joy))$

@@ -121,6 +121,12 @@ class ConfigurationContractTest(unittest.TestCase):
         self.assertEqual(parameters['service_whitelist'], ['(?!)'])
         self.assertEqual(parameters['param_whitelist'], ['(?!)'])
         whitelist = parameters['topic_whitelist']
+        central_topics = yaml.safe_load(
+            (BUNDLE / 'config/central_topics.yaml').read_text(encoding='utf-8'),
+        )['topics']
+        central_map = next(
+            topic for topic in central_topics if topic['id'] == 'controller_map'
+        )
 
         def allowed(topic):
             return any(re.fullmatch(pattern, topic) for pattern in whitelist)
@@ -128,7 +134,10 @@ class ConfigurationContractTest(unittest.TestCase):
         self.assertTrue(allowed('/robot_1/ascamera/camera_publisher/rgb0/image'))
         self.assertTrue(allowed('/robot_1/ascamera/camera_publisher/depth0/image_raw'))
         self.assertTrue(allowed('/robot_2/goal_pose'))
-        self.assertTrue(allowed('/fleet/map'))
+        self.assertEqual(central_map['source'], '/controller_server/map')
+        self.assertEqual(central_map['target'], '/map')
+        self.assertTrue(allowed(central_map['target']))
+        self.assertFalse(allowed('/fleet/map'))
         self.assertFalse(allowed('/robot_3/odom'))
         self.assertFalse(allowed('/controller_server/map'))
 
@@ -242,7 +251,7 @@ class ReadmeContractTest(unittest.TestCase):
             '8766',
             'ascamera/camera_publisher/rgb0/image',
             '/goal_pose',
-            '/fleet/map',
+            '/map',
             'replay_rate_hz',
         ):
             with self.subTest(required=required):

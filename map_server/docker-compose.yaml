@@ -1,0 +1,23 @@
+name: mentorpi-map-server
+
+services:
+  map-server:
+    build:
+      context: .
+    image: "${MAP_SERVER_IMAGE:-mentorpi-map-server:humble}"
+    network_mode: host
+    # Fast DDS shared-memory transport is shared with Foxglove Bridge on Domain 225.
+    ipc: host
+    restart: unless-stopped
+    environment:
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-225}"
+      MAP_YAML: "${MAP_YAML:-/maps/map_0825.yaml}"
+      MAP_USE_SIM_TIME: "${MAP_USE_SIM_TIME:-false}"
+    volumes:
+      - type: bind
+        source: ${MAP_DIRECTORY:?MAP_DIRECTORY must point to the directory containing map_0825.yaml}
+        target: /maps
+        read_only: true
+        bind:
+          create_host_path: false
+    command: [/usr/local/bin/mentorpi-map-server]

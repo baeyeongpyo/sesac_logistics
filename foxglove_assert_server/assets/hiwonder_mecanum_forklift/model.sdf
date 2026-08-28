@@ -1,0 +1,210 @@
+<?xml version="1.0"?>
+<!-- Copyright (c) 2026 Hyunwoo Oh and PRJ ARANEUM contributors. All rights reserved. -->
+<!-- SPDX-License-Identifier: LicenseRef-PRJ-ARANEUM-Team-Evaluation-1.0 -->
+<sdf version="1.10" xmlns:gz="http://gazebosim.org/schema">
+  <model name="hiwonder_mecanum_forklift">
+    <link name="chassis">
+      <pose>-0.005 0 0.075 0 0 0</pose>
+      <inertial><pose>-0.035 0 0 0 0 0</pose><mass>3.5</mass><inertia><ixx>0.016</ixx><iyy>0.018</iyy><izz>0.025</izz></inertia></inertial>
+      <!-- The collision envelope follows the measured 22 cm body, excluding mast and forks. -->
+      <collision name="body_collision"><geometry><box><size>0.22 0.13 0.075</size></box></geometry></collision>
+
+      <!-- Official Hiwonder MentorPi Mecanum chassis mesh; collision stays lightweight. -->
+      <visual name="official_mentorpi_chassis">
+        <pose>0 0 -0.014 0 0 0</pose>
+        <geometry><mesh><uri>model://hiwonder_mecanum_forklift/meshes/mentorpi/base_link.STL</uri></mesh></geometry>
+        <material><ambient>0.055 0.060 0.064 1</ambient><diffuse>0.075 0.080 0.085 1</diffuse><specular>0.18 0.18 0.18 1</specular></material>
+      </visual>
+
+      <!-- Flush rear receiver mates with either automatic charging bay. -->
+      <visual name="charging_receiver_backing">
+        <pose>-0.109 0 0.010 0 0 0</pose>
+        <geometry><box><size>0.002 0.110 0.060</size></box></geometry>
+        <material><ambient>0.025 0.030 0.033 1</ambient><diffuse>0.04 0.047 0.052 1</diffuse><specular>0.12 0.12 0.12 1</specular></material>
+      </visual>
+      <visual name="charging_receiver_left">
+        <pose>-0.1097 0.031 0.010 0 0 0</pose>
+        <geometry><box><size>0.001 0.027 0.038</size></box></geometry>
+        <material><ambient>0.46 0.30 0.08 1</ambient><diffuse>0.68 0.46 0.14 1</diffuse><specular>0.48 0.38 0.20 1</specular></material>
+      </visual>
+      <visual name="charging_receiver_right">
+        <pose>-0.1097 -0.031 0.010 0 0 0</pose>
+        <geometry><box><size>0.001 0.027 0.038</size></box></geometry>
+        <material><ambient>0.46 0.30 0.08 1</ambient><diffuse>0.68 0.46 0.14 1</diffuse><specular>0.48 0.38 0.20 1</specular></material>
+      </visual>
+
+      <visual name="raspberry_pi"><pose>-0.026 -0.006 0.018 0 0 0</pose><geometry><box><size>0.085 0.056 0.006</size></box></geometry><material><ambient>0.015 0.26 0.10 1</ambient><diffuse>0.020 0.34 0.13 1</diffuse></material></visual>
+      <visual name="pi_usb_ports"><pose>-0.018 -0.039 0.019 0 0 0</pose><geometry><box><size>0.032 0.011 0.014</size></box></geometry><material><ambient>0.55 0.57 0.58 1</ambient><diffuse>0.68 0.70 0.71 1</diffuse><specular>0.35 0.35 0.35 1</specular></material></visual>
+      <visual name="pi_ethernet_port"><pose>-0.052 -0.039 0.019 0 0 0</pose><geometry><box><size>0.020 0.012 0.016</size></box></geometry><material><ambient>0.50 0.52 0.54 1</ambient><diffuse>0.62 0.64 0.66 1</diffuse></material></visual>
+      <visual name="pi_heatsink"><pose>-0.030 0.004 0.024 0 0 0</pose><geometry><box><size>0.036 0.032 0.010</size></box></geometry><material><ambient>0.055 0.060 0.065 1</ambient><diffuse>0.075 0.080 0.085 1</diffuse><specular>0.30 0.30 0.30 1</specular></material></visual>
+      <visual name="motor_controller"><pose>0.050 0 0.017 0 0 0</pose><geometry><box><size>0.052 0.056 0.008</size></box></geometry><material><ambient>0.04 0.10 0.18 1</ambient><diffuse>0.05 0.14 0.24 1</diffuse></material></visual>
+      <visual name="official_oradar_lidar">
+        <pose>-0.012242 0 0.078501 0 0 0</pose>
+        <geometry><mesh><uri>model://hiwonder_mecanum_forklift/meshes/mentorpi/lidar_Link.STL</uri></mesh></geometry>
+        <material><ambient>0.025 0.028 0.032 1</ambient><diffuse>0.038 0.042 0.046 1</diffuse><specular>0.16 0.16 0.16 1</specular></material>
+      </visual>
+
+      <sensor name="lidar" type="gpu_lidar">
+        <pose>-0.012242 0 0.080501 0 0 0</pose><topic>/forklift/scan</topic><update_rate>12</update_rate><always_on>true</always_on><visualize>true</visualize>
+        <lidar><scan><horizontal><samples>360</samples><resolution>1</resolution><min_angle>-3.14159</min_angle><max_angle>3.14159</max_angle></horizontal></scan><range><min>0.03</min><max>8.0</max><resolution>0.005</resolution></range><noise><type>gaussian</type><mean>0</mean><stddev>0.002</stddev></noise></lidar>
+      </sensor>
+      <sensor name="imu" type="imu"><topic>/forklift/imu</topic><update_rate>50</update_rate><always_on>true</always_on></sensor>
+    </link>
+
+    <!-- Simple collision cylinders keep contact stable; capsules reproduce the angled mecanum rollers. -->
+    <link name="front_left_wheel">
+      <pose>0.06225 0.071 0.0425 -1.570796 0 0</pose>
+      <inertial><mass>0.15</mass><inertia><ixx>0.00008</ixx><iyy>0.00008</iyy><izz>0.00008</izz></inertia></inertial>
+      <collision name="collision">
+        <geometry><cylinder><radius>0.0325</radius><length>0.028</length></cylinder></geometry>
+        <surface><friction><ode><mu>1</mu><mu2>0</mu2><fdir1 gz:expressed_in="chassis">1 -1 0</fdir1></ode></friction></surface>
+      </collision>
+      <visual name="tire_core"><geometry><cylinder><radius>0.0305</radius><length>0.025</length></cylinder></geometry><material><ambient>0.018 0.020 0.022 1</ambient><diffuse>0.025 0.027 0.030 1</diffuse></material></visual>
+      <visual name="hub"><geometry><cylinder><radius>0.0185</radius><length>0.030</length></cylinder></geometry><material><ambient>0.68 0.70 0.71 1</ambient><diffuse>0.88 0.89 0.90 1</diffuse><specular>0.30 0.30 0.30 1</specular></material></visual>
+      <visual name="motor_hub"><geometry><cylinder><radius>0.0105</radius><length>0.032</length></cylinder></geometry><material><ambient>0.075 0.080 0.085 1</ambient><diffuse>0.095 0.100 0.105 1</diffuse></material></visual>
+      <visual name="roller_01"><pose>0.026 0 0 0 0.78 1.570796</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_02"><pose>0.018385 0.018385 0 0 0.78 2.356194</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_03"><pose>0 0.026 0 0 0.78 3.141593</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_04"><pose>-0.018385 0.018385 0 0 0.78 3.926991</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_05"><pose>-0.026 0 0 0 0.78 4.712389</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_06"><pose>-0.018385 -0.018385 0 0 0.78 5.497787</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_07"><pose>0 -0.026 0 0 0.78 6.283185</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_08"><pose>0.018385 -0.018385 0 0 0.78 7.068583</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+    </link>
+    <link name="rear_left_wheel">
+      <pose>-0.07225 0.071 0.0425 -1.570796 0 0</pose>
+      <inertial><mass>0.15</mass><inertia><ixx>0.00008</ixx><iyy>0.00008</iyy><izz>0.00008</izz></inertia></inertial>
+      <collision name="collision">
+        <geometry><cylinder><radius>0.0325</radius><length>0.028</length></cylinder></geometry>
+        <surface><friction><ode><mu>1</mu><mu2>0</mu2><fdir1 gz:expressed_in="chassis">1 1 0</fdir1></ode></friction></surface>
+      </collision>
+      <visual name="tire_core"><geometry><cylinder><radius>0.0305</radius><length>0.025</length></cylinder></geometry><material><ambient>0.018 0.020 0.022 1</ambient><diffuse>0.025 0.027 0.030 1</diffuse></material></visual>
+      <visual name="hub"><geometry><cylinder><radius>0.0185</radius><length>0.030</length></cylinder></geometry><material><ambient>0.68 0.70 0.71 1</ambient><diffuse>0.88 0.89 0.90 1</diffuse><specular>0.30 0.30 0.30 1</specular></material></visual>
+      <visual name="motor_hub"><geometry><cylinder><radius>0.0105</radius><length>0.032</length></cylinder></geometry><material><ambient>0.075 0.080 0.085 1</ambient><diffuse>0.095 0.100 0.105 1</diffuse></material></visual>
+      <visual name="roller_01"><pose>0.026 0 0 0 0.78 -1.570796</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_02"><pose>0.018385 0.018385 0 0 0.78 -0.785398</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_03"><pose>0 0.026 0 0 0.78 0</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_04"><pose>-0.018385 0.018385 0 0 0.78 0.785398</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_05"><pose>-0.026 0 0 0 0.78 1.570796</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_06"><pose>-0.018385 -0.018385 0 0 0.78 2.356194</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_07"><pose>0 -0.026 0 0 0.78 3.141593</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_08"><pose>0.018385 -0.018385 0 0 0.78 3.926991</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+    </link>
+    <link name="front_right_wheel">
+      <pose>0.06225 -0.071 0.0425 -1.570796 0 0</pose>
+      <inertial><mass>0.15</mass><inertia><ixx>0.00008</ixx><iyy>0.00008</iyy><izz>0.00008</izz></inertia></inertial>
+      <collision name="collision">
+        <geometry><cylinder><radius>0.0325</radius><length>0.028</length></cylinder></geometry>
+        <surface><friction><ode><mu>1</mu><mu2>0</mu2><fdir1 gz:expressed_in="chassis">1 1 0</fdir1></ode></friction></surface>
+      </collision>
+      <visual name="tire_core"><geometry><cylinder><radius>0.0305</radius><length>0.025</length></cylinder></geometry><material><ambient>0.018 0.020 0.022 1</ambient><diffuse>0.025 0.027 0.030 1</diffuse></material></visual>
+      <visual name="hub"><geometry><cylinder><radius>0.0185</radius><length>0.030</length></cylinder></geometry><material><ambient>0.68 0.70 0.71 1</ambient><diffuse>0.88 0.89 0.90 1</diffuse><specular>0.30 0.30 0.30 1</specular></material></visual>
+      <visual name="motor_hub"><geometry><cylinder><radius>0.0105</radius><length>0.032</length></cylinder></geometry><material><ambient>0.075 0.080 0.085 1</ambient><diffuse>0.095 0.100 0.105 1</diffuse></material></visual>
+      <visual name="roller_01"><pose>0.026 0 0 0 0.78 -1.570796</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_02"><pose>0.018385 0.018385 0 0 0.78 -0.785398</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_03"><pose>0 0.026 0 0 0.78 0</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_04"><pose>-0.018385 0.018385 0 0 0.78 0.785398</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_05"><pose>-0.026 0 0 0 0.78 1.570796</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_06"><pose>-0.018385 -0.018385 0 0 0.78 2.356194</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_07"><pose>0 -0.026 0 0 0.78 3.141593</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_08"><pose>0.018385 -0.018385 0 0 0.78 3.926991</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+    </link>
+    <link name="rear_right_wheel">
+      <pose>-0.07225 -0.071 0.0425 -1.570796 0 0</pose>
+      <inertial><mass>0.15</mass><inertia><ixx>0.00008</ixx><iyy>0.00008</iyy><izz>0.00008</izz></inertia></inertial>
+      <collision name="collision">
+        <geometry><cylinder><radius>0.0325</radius><length>0.028</length></cylinder></geometry>
+        <surface><friction><ode><mu>1</mu><mu2>0</mu2><fdir1 gz:expressed_in="chassis">1 -1 0</fdir1></ode></friction></surface>
+      </collision>
+      <visual name="tire_core"><geometry><cylinder><radius>0.0305</radius><length>0.025</length></cylinder></geometry><material><ambient>0.018 0.020 0.022 1</ambient><diffuse>0.025 0.027 0.030 1</diffuse></material></visual>
+      <visual name="hub"><geometry><cylinder><radius>0.0185</radius><length>0.030</length></cylinder></geometry><material><ambient>0.68 0.70 0.71 1</ambient><diffuse>0.88 0.89 0.90 1</diffuse><specular>0.30 0.30 0.30 1</specular></material></visual>
+      <visual name="motor_hub"><geometry><cylinder><radius>0.0105</radius><length>0.032</length></cylinder></geometry><material><ambient>0.075 0.080 0.085 1</ambient><diffuse>0.095 0.100 0.105 1</diffuse></material></visual>
+      <visual name="roller_01"><pose>0.026 0 0 0 0.78 1.570796</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_02"><pose>0.018385 0.018385 0 0 0.78 2.356194</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_03"><pose>0 0.026 0 0 0.78 3.141593</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_04"><pose>-0.018385 0.018385 0 0 0.78 3.926991</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_05"><pose>-0.026 0 0 0 0.78 4.712389</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_06"><pose>-0.018385 -0.018385 0 0 0.78 5.497787</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_07"><pose>0 -0.026 0 0 0.78 6.283185</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="roller_08"><pose>0.018385 -0.018385 0 0 0.78 7.068583</pose><geometry><capsule><radius>0.0045</radius><length>0.014</length></capsule></geometry><material><ambient>0.44 0.47 0.49 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+    </link>
+
+
+    <link name="lift_mast">
+      <!-- The mast base overlaps the measured chassis nose so the forklift is one connected assembly. -->
+      <pose>0.115 0 0.20 0 0 0</pose>
+      <inertial><mass>0.35</mass><inertia><ixx>0.003</ixx><iyy>0.003</iyy><izz>0.001</izz></inertia></inertial>
+      <collision name="mast_mount_collision"><pose>-0.020 0 -0.125 0 0 0</pose><geometry><box><size>0.04 0.11 0.020</size></box></geometry></collision>
+      <collision name="left_rail_collision"><pose>0 0.052 0 0 0 0</pose><geometry><box><size>0.018 0.014 0.28</size></box></geometry></collision>
+      <collision name="right_rail_collision"><pose>0 -0.052 0 0 0 0</pose><geometry><box><size>0.018 0.014 0.28</size></box></geometry></collision>
+      <collision name="top_crossbar_collision"><pose>0 0 0.132 0 0 0</pose><geometry><box><size>0.020 0.120 0.016</size></box></geometry></collision>
+
+      <visual name="mast_mount"><pose>-0.020 0 -0.125 0 0 0</pose><geometry><box><size>0.04 0.11 0.020</size></box></geometry><material><ambient>0.055 0.060 0.065 1</ambient><diffuse>0.075 0.080 0.085 1</diffuse></material></visual>
+      <visual name="lift_motor_left"><pose>-0.012 0.041 -0.105 0 0 0</pose><geometry><box><size>0.038 0.026 0.038</size></box></geometry><material><ambient>0.78 0.47 0.015 1</ambient><diffuse>0.96 0.59 0.020 1</diffuse></material></visual>
+      <visual name="lift_motor_right"><pose>-0.012 -0.041 -0.105 0 0 0</pose><geometry><box><size>0.038 0.026 0.038</size></box></geometry><material><ambient>0.78 0.47 0.015 1</ambient><diffuse>0.96 0.59 0.020 1</diffuse></material></visual>
+      <visual name="left_rail"><pose>0 0.052 0 0 0 0</pose><geometry><box><size>0.018 0.014 0.28</size></box></geometry><material><ambient>0.075 0.080 0.085 1</ambient><diffuse>0.095 0.100 0.105 1</diffuse><specular>0.24 0.24 0.24 1</specular></material></visual>
+      <visual name="right_rail"><pose>0 -0.052 0 0 0 0</pose><geometry><box><size>0.018 0.014 0.28</size></box></geometry><material><ambient>0.075 0.080 0.085 1</ambient><diffuse>0.095 0.100 0.105 1</diffuse><specular>0.24 0.24 0.24 1</specular></material></visual>
+      <visual name="top_crossbar"><pose>0 0 0.132 0 0 0</pose><geometry><box><size>0.020 0.120 0.016</size></box></geometry><material><ambient>0.045 0.050 0.055 1</ambient><diffuse>0.065 0.070 0.075 1</diffuse><specular>0.24 0.24 0.24 1</specular></material></visual>
+      <visual name="inner_left_rail"><pose>0.012 0.034 -0.010 0 0 0</pose><geometry><box><size>0.010 0.010 0.235</size></box></geometry><material><ambient>0.48 0.51 0.54 1</ambient><diffuse>0.58 0.61 0.64 1</diffuse><specular>0.28 0.28 0.28 1</specular></material></visual>
+      <visual name="inner_right_rail"><pose>0.012 -0.034 -0.010 0 0 0</pose><geometry><box><size>0.010 0.010 0.235</size></box></geometry><material><ambient>0.48 0.51 0.54 1</ambient><diffuse>0.58 0.61 0.64 1</diffuse><specular>0.28 0.28 0.28 1</specular></material></visual>
+      <visual name="hydraulic_body"><pose>-0.010 0 -0.012 0 0 0</pose><geometry><cylinder><radius>0.008</radius><length>0.205</length></cylinder></geometry><material><ambient>0.045 0.050 0.055 1</ambient><diffuse>0.060 0.065 0.070 1</diffuse></material></visual>
+      <visual name="hydraulic_rod"><pose>-0.010 0 0.095 0 0 0</pose><geometry><cylinder><radius>0.0045</radius><length>0.075</length></cylinder></geometry><material><ambient>0.62 0.65 0.67 1</ambient><diffuse>0.76 0.78 0.80 1</diffuse><specular>0.45 0.45 0.45 1</specular></material></visual>
+      <!-- The former exposed rod tip is enclosed below the crossbar; a compact red safety beacon occupies the visible top position. -->
+      <visual name="warning_beacon_base"><pose>-0.004 0 0.143 0 0 0</pose><geometry><cylinder><radius>0.009</radius><length>0.006</length></cylinder></geometry><material><ambient>0.035 0.038 0.041 1</ambient><diffuse>0.055 0.058 0.061 1</diffuse><specular>0.28 0.28 0.28 1</specular></material></visual>
+      <visual name="warning_beacon_lens"><pose>-0.004 0 0.152 0 0 0</pose><geometry><cylinder><radius>0.0075</radius><length>0.012</length></cylinder></geometry><transparency>0.08</transparency><material><ambient>0.72 0.01 0.01 0.92</ambient><diffuse>1.00 0.025 0.018 0.92</diffuse><emissive>0.58 0.006 0.004 1</emissive><specular>0.36 0.16 0.16 1</specular></material></visual>
+      <visual name="warning_beacon_cap"><pose>-0.004 0 0.158 0 0 0</pose><geometry><sphere><radius>0.0075</radius></sphere></geometry><transparency>0.08</transparency><material><ambient>0.72 0.01 0.01 0.92</ambient><diffuse>1.00 0.025 0.018 0.92</diffuse><emissive>0.58 0.006 0.004 1</emissive><specular>0.36 0.16 0.16 1</specular></material></visual>
+      <visual name="pulley_left"><pose>0.012 0.025 0.119 1.570796 0 0</pose><geometry><cylinder><radius>0.008</radius><length>0.010</length></cylinder></geometry><material><ambient>0.12 0.13 0.14 1</ambient><diffuse>0.16 0.17 0.18 1</diffuse></material></visual>
+      <visual name="pulley_right"><pose>0.012 -0.025 0.119 1.570796 0 0</pose><geometry><cylinder><radius>0.008</radius><length>0.010</length></cylinder></geometry><material><ambient>0.12 0.13 0.14 1</ambient><diffuse>0.16 0.17 0.18 1</diffuse></material></visual>
+      <visual name="chain_left"><pose>0.021 0.025 -0.005 0 0 0</pose><geometry><box><size>0.003 0.003 0.238</size></box></geometry><material><ambient>0.025 0.025 0.025 1</ambient><diffuse>0.035 0.035 0.035 1</diffuse></material></visual>
+      <visual name="chain_right"><pose>0.021 -0.025 -0.005 0 0 0</pose><geometry><box><size>0.003 0.003 0.238</size></box></geometry><material><ambient>0.025 0.025 0.025 1</ambient><diffuse>0.035 0.035 0.035 1</diffuse></material></visual>
+
+      <!-- The RGB-D camera is fixed on top of the fork mount, aligned with the carriage in X. -->
+      <visual name="camera_yellow_bracket"><pose>0.024 0 0.117 0 0.610865 0</pose><geometry><box><size>0.022 0.104 0.007</size></box></geometry><material><ambient>0.72 0.43 0.01 1</ambient><diffuse>0.90 0.54 0.02 1</diffuse></material></visual>
+      <visual name="camera_mount_left"><pose>0.028 0.045 0.110 0 0.610865 0</pose><geometry><box><size>0.020 0.006 0.025</size></box></geometry><material><ambient>0.07 0.08 0.09 1</ambient><diffuse>0.10 0.11 0.12 1</diffuse></material></visual>
+      <visual name="camera_mount_right"><pose>0.028 -0.045 0.110 0 0.610865 0</pose><geometry><box><size>0.020 0.006 0.025</size></box></geometry><material><ambient>0.07 0.08 0.09 1</ambient><diffuse>0.10 0.11 0.12 1</diffuse></material></visual>
+      <collision name="depth_camera_collision"><pose>0.035 0 0.100 0 0.610865 0</pose><geometry><box><size>0.035 0.09 0.025</size></box></geometry></collision>
+      <visual name="official_depth_camera"><pose>0.035 0 0.100 0 0.610865 0</pose><geometry><mesh><uri>model://hiwonder_mecanum_forklift/meshes/mentorpi/cam_Link.STL</uri></mesh></geometry><material><ambient>0.42 0.45 0.47 1</ambient><diffuse>0.58 0.61 0.63 1</diffuse><specular>0.28 0.28 0.28 1</specular></material></visual>
+      <!-- Three flush pieces form one rounded dark-glass face instead of a floating rectangular plate. -->
+      <visual name="depth_camera_bezel_center"><pose>0.04125 0 0.08446 0 0.610865 0</pose><geometry><box><size>0.0012 0.067 0.019</size></box></geometry><material><ambient>0.022 0.028 0.034 1</ambient><diffuse>0.032 0.041 0.049 1</diffuse><specular>0.22 0.25 0.28 1</specular></material></visual>
+      <visual name="depth_camera_bezel_left_end"><pose>0.04125 0.0335 0.08446 0 2.181661 0</pose><geometry><cylinder><radius>0.0095</radius><length>0.0012</length></cylinder></geometry><material><ambient>0.022 0.028 0.034 1</ambient><diffuse>0.032 0.041 0.049 1</diffuse><specular>0.22 0.25 0.28 1</specular></material></visual>
+      <visual name="depth_camera_bezel_right_end"><pose>0.04125 -0.0335 0.08446 0 2.181661 0</pose><geometry><cylinder><radius>0.0095</radius><length>0.0012</length></cylinder></geometry><material><ambient>0.022 0.028 0.034 1</ambient><diffuse>0.032 0.041 0.049 1</diffuse><specular>0.22 0.25 0.28 1</specular></material></visual>
+      <visual name="depth_camera_lens_left"><pose>0.04207 0.027 0.08389 0 2.181661 0</pose><geometry><cylinder><radius>0.0052</radius><length>0.002</length></cylinder></geometry><material><ambient>0.004 0.020 0.040 1</ambient><diffuse>0.010 0.055 0.100 1</diffuse><specular>0.35 0.45 0.55 1</specular></material></visual>
+      <visual name="depth_camera_lens_center"><pose>0.04207 0 0.08389 0 2.181661 0</pose><geometry><cylinder><radius>0.0042</radius><length>0.002</length></cylinder></geometry><material><ambient>0.012 0.030 0.045 1</ambient><diffuse>0.018 0.070 0.105 1</diffuse></material></visual>
+      <visual name="depth_camera_lens_right"><pose>0.04207 -0.027 0.08389 0 2.181661 0</pose><geometry><cylinder><radius>0.0052</radius><length>0.002</length></cylinder></geometry><material><ambient>0.004 0.020 0.040 1</ambient><diffuse>0.010 0.055 0.100 1</diffuse><specular>0.35 0.45 0.55 1</specular></material></visual>
+      <visual name="depth_camera_status_led"><pose>0.03776 0 0.07774 0 2.181661 0</pose><geometry><cylinder><radius>0.0016</radius><length>0.002</length></cylinder></geometry><material><ambient>0.01 0.42 0.12 1</ambient><diffuse>0.02 0.70 0.20 1</diffuse><emissive>0.01 0.30 0.08 1</emissive></material></visual>
+      <sensor name="depth_camera" type="rgbd_camera">
+        <!-- Gazebo cameras look along +X; positive pitch points the optical axis 35 degrees down. -->
+        <pose>0.04207 0 0.08389 0 0.610865 0</pose>
+        <topic>/forklift/depth_camera</topic>
+        <update_rate>20</update_rate><always_on>true</always_on><visualize>false</visualize>
+        <camera><horizontal_fov>1.28805</horizontal_fov><image><width>640</width><height>480</height><format>R8G8B8</format></image><clip><near>0.20</near><far>4.0</far></clip></camera>
+      </sensor>
+    </link>
+
+
+    <link name="fork_carriage">
+      <!-- Corrected source fork length is 14 cm; the complete footprint remains about 17x40 cm. -->
+      <pose>0.145 0 0.045 0 0 0</pose><inertial><mass>0.35</mass><inertia><ixx>0.001</ixx><iyy>0.004</iyy><izz>0.004</izz></inertia></inertial>
+      <collision name="carriage_collision"><pose>-0.006 0 0 0 0 0</pose><geometry><box><size>0.006 0.112 0.050</size></box></geometry></collision>
+      <collision name="left_fork_collision"><pose>0.070 0.0282 -0.022 0 0 0</pose><geometry><box><size>0.14 0.012 0.010</size></box></geometry><surface><friction><ode><mu>1.5</mu><mu2>1.5</mu2></ode></friction></surface></collision>
+      <collision name="right_fork_collision"><pose>0.070 -0.0282 -0.022 0 0 0</pose><geometry><box><size>0.14 0.012 0.010</size></box></geometry><surface><friction><ode><mu>1.5</mu><mu2>1.5</mu2></ode></friction></surface></collision>
+      <visual name="carriage"><geometry><box><size>0.018 0.112 0.050</size></box></geometry><material><ambient>0.055 0.060 0.065 1</ambient><diffuse>0.080 0.085 0.090 1</diffuse><specular>0.20 0.20 0.20 1</specular></material></visual>
+      <visual name="backrest_left"><pose>-0.001 0.052 0.052 0 0 0</pose><geometry><box><size>0.012 0.010 0.105</size></box></geometry><material><ambient>0.075 0.080 0.085 1</ambient><diffuse>0.095 0.100 0.105 1</diffuse></material></visual>
+      <visual name="backrest_right"><pose>-0.001 -0.052 0.052 0 0 0</pose><geometry><box><size>0.012 0.010 0.105</size></box></geometry><material><ambient>0.075 0.080 0.085 1</ambient><diffuse>0.095 0.100 0.105 1</diffuse></material></visual>
+      <visual name="backrest_top"><pose>-0.001 0 0.102 0 0 0</pose><geometry><box><size>0.012 0.114 0.010</size></box></geometry><material><ambient>0.075 0.080 0.085 1</ambient><diffuse>0.095 0.100 0.105 1</diffuse></material></visual>
+      <visual name="backrest_middle"><pose>-0.001 0 0.060 0 0 0</pose><geometry><box><size>0.010 0.105 0.008</size></box></geometry><material><ambient>0.075 0.080 0.085 1</ambient><diffuse>0.095 0.100 0.105 1</diffuse></material></visual>
+      <visual name="left_fork"><pose>0.070 0.0282 -0.022 0 0 0</pose><geometry><box><size>0.14 0.012 0.010</size></box></geometry><material><ambient>0.12 0.13 0.14 1</ambient><diffuse>0.17 0.18 0.19 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+      <visual name="right_fork"><pose>0.070 -0.0282 -0.022 0 0 0</pose><geometry><box><size>0.14 0.012 0.010</size></box></geometry><material><ambient>0.12 0.13 0.14 1</ambient><diffuse>0.17 0.18 0.19 1</diffuse><specular>0.22 0.22 0.22 1</specular></material></visual>
+    </link>
+
+    <joint name="front_left_wheel_joint" type="revolute"><parent>chassis</parent><child>front_left_wheel</child><axis><xyz>0 0 1</xyz></axis></joint>
+    <joint name="rear_left_wheel_joint" type="revolute"><parent>chassis</parent><child>rear_left_wheel</child><axis><xyz>0 0 1</xyz></axis></joint>
+    <joint name="front_right_wheel_joint" type="revolute"><parent>chassis</parent><child>front_right_wheel</child><axis><xyz>0 0 1</xyz></axis></joint>
+    <joint name="rear_right_wheel_joint" type="revolute"><parent>chassis</parent><child>rear_right_wheel</child><axis><xyz>0 0 1</xyz></axis></joint>
+    <joint name="mast_fixed" type="fixed"><parent>chassis</parent><child>lift_mast</child></joint>
+    <joint name="lift_joint" type="prismatic"><parent>lift_mast</parent><child>fork_carriage</child><axis><xyz>0 0 1</xyz><limit><lower>0</lower><upper>0.12</upper><effort>120</effort><velocity>0.12</velocity></limit><dynamics><damping>6</damping></dynamics></axis></joint>
+
+    <plugin filename="gz-sim-mecanum-drive-system" name="gz::sim::systems::MecanumDrive"><front_left_joint>front_left_wheel_joint</front_left_joint><front_right_joint>front_right_wheel_joint</front_right_joint><back_left_joint>rear_left_wheel_joint</back_left_joint><back_right_joint>rear_right_wheel_joint</back_right_joint><wheel_separation>0.142</wheel_separation><wheelbase>0.1345</wheelbase><wheel_radius>0.0325</wheel_radius><min_acceleration>-0.4</min_acceleration><max_acceleration>0.4</max_acceleration><topic>/forklift/cmd_vel</topic></plugin>
+    <plugin filename="gz-sim-joint-position-controller-system" name="gz::sim::systems::JointPositionController"><joint_name>lift_joint</joint_name><topic>/forklift/lift_position</topic><p_gain>600</p_gain><i_gain>5</i_gain><d_gain>60</d_gain><cmd_max>120</cmd_max><cmd_min>-120</cmd_min></plugin>
+  </model>
+</sdf>

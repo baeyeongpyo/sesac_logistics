@@ -412,6 +412,30 @@ class ConfigLoaderTest(unittest.TestCase):
             ],
         )
 
+    def test_load_central_topics_allows_a_durable_cached_topic_without_replay(self):
+        """Removing replay must retain the configured transient-local map QoS."""
+        document = {
+            'version': 1,
+            'topics': [{
+                'id': 'controller_map',
+                'enabled': True,
+                'source': '/controller_server/map',
+                'target': '/map',
+                'type': 'nav_msgs/msg/OccupancyGrid',
+                'qos': {
+                    'reliability': 'reliable',
+                    'durability': 'transient_local',
+                    'history': 'keep_last',
+                    'depth': 1,
+                },
+            }],
+        }
+
+        (topic,) = load_central_topics(self.write_yaml('cached-map.yaml', document))
+
+        self.assertIsNone(topic.replay_rate_hz)
+        self.assertEqual(topic.qos.durability, 'transient_local')
+
     def test_load_central_topics_rejects_duplicate_active_path(self):
         document = {
             'version': 1,
@@ -562,9 +586,9 @@ class ConfigLoaderTest(unittest.TestCase):
             [
                 (
                     '/controller_server/map',
-                    '/fleet/map',
+                    '/map',
                     'nav_msgs/msg/OccupancyGrid',
-                    1.0,
+                    None,
                 ),
             ],
         )

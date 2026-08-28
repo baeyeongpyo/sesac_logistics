@@ -1,4 +1,4 @@
-"""Cache and periodically republish central server ROS topics."""
+"""Republish central server ROS topics, with optional cached replay."""
 
 import argparse
 import logging
@@ -48,10 +48,11 @@ class CentralTopicRelay:
                 lambda message, topic_id=topic.id: self._receive(topic_id, message),
                 qos_profile(topic.qos),
             ))
-            self._timers.append(node.create_timer(
-                1.0 / topic.replay_rate_hz,
-                lambda topic_id=topic.id: self._replays[topic_id].replay(),
-            ))
+            if topic.replay_rate_hz is not None:
+                self._timers.append(node.create_timer(
+                    1.0 / topic.replay_rate_hz,
+                    lambda topic_id=topic.id: self._replays[topic_id].replay(),
+                ))
 
     def _receive(self, topic_id: str, message) -> None:
         self._publishers[topic_id].publish(message)
@@ -103,7 +104,7 @@ class CentralTopicRepublisher:
 
 def _arguments(argv=None):
     parser = argparse.ArgumentParser(
-        description='Cache and periodically republish central ROS topics.',
+        description='Republish central ROS topics with optional cached replay.',
     )
     parser.add_argument(
         '--central-topics-config',

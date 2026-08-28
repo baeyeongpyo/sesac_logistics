@@ -99,7 +99,7 @@ docker run -d --name fleet-command-api --restart unless-stopped \
 ```
 
 서버 관제에는 Foxglove 앱에서 `ws://<server-ip>:8765` 하나만 연결한다. 이 endpoint는
-`/robot_1/*`, `/robot_2/*`, `/fleet/map`만 제공하며 observation-only이다. 서버에서
+`/robot_1/*`, `/robot_2/*`, `/map`만 제공하며 observation-only이다. 서버에서
 topic publish, service 호출, parameter 변경은 허용하지 않는다.
 
 ## telemetry mapping
@@ -111,6 +111,9 @@ topic과 서버 재발행 topic의 단일 설정이다.
 - `source`: 차량 Foxglove Bridge가 advertise하는 원본 topic이다.
 - `target`: 서버 Domain 225에 재발행할 topic이다. `/{robot}` template은 차량 ID로
   확장된다.
+- TF와 telemetry 메시지의 `frame_id` 및 `child_frame_id`는 중계 시 차량 ID를 접두사로
+  붙인다. 예를 들어 차량의 `base_footprint`는 `robot_1/base_footprint`가 된다. 공용
+  지도 좌표계인 `map`은 접두사를 붙이지 않아 두 차량이 같은 지도에서 표현된다.
 - `type`: 양쪽에서 확인할 ROS message type이다. type이 다르면 구독하지 않는다.
 - `worker_rate.max_rate_hz`: WebSocket 수신 뒤 서버 ROS topic으로 재발행하는 최대
   빈도다. 차량에서 worker로 전송되는 원본 대역폭 자체는 줄이지 않으므로, 차량 측
@@ -146,12 +149,14 @@ RGB와 depth image의 중앙 ROS 재발행은 각각 최대 5 Hz, `scan_filtered
 
 반면 [`config/central_topics.yaml`](config/central_topics.yaml)의
 `/controller_server/map`은 차량에서 오지 않는다. 중앙 map-server가 자체 발행하는 원본이며,
-`central-topic-republisher`가 마지막 map을 캐시해 1 Hz로 `/fleet/map`에 재발행한다. source와
-target을 분리해 자기 자신을 다시 구독하는 loop를 막고, Foxglove와 rosbag은 `/fleet/map`만
-사용한다. 차량 Nav2의 `/map`은 별도 소유권을 가지며 각각 `/robot_1/map`, `/robot_2/map`으로
-중계되므로 중앙 `/fleet/map`과 충돌하지 않는다.
+`central-topic-republisher`가 수신할 때만 `/map`에 재발행한다. `/map` publisher는
+`reliable`, `transient_local`, `keep_last(1)` QoS로 마지막 지도 하나를 보존하므로, 반복
+발행 없이 늦게 연결한 구독자도 마지막 지도를 받을 수 있다. source와 target을 분리해 자기
+자신을 다시 구독하는 loop를 막고, Foxglove는 `/map`을 사용한다.
+차량 Nav2의 `/map`은 별도 소유권을 가지며 각각 `/robot_1/map`, `/robot_2/map`으로
+중계되므로 중앙 `/map`과 충돌하지 않는다.
 
-중앙 Foxglove(`ws://<server-ip>:8765`)는 `/robot_1/*`, `/robot_2/*`, `/fleet/map`을
+중앙 Foxglove(`ws://<server-ip>:8765`)는 `/robot_1/*`, `/robot_2/*`, `/map`을
 관측용으로 노출한다. 예를 들어 RGB 영상은
 `/robot_1/ascamera/camera_publisher/rgb0/image`, depth 영상은
 `/robot_1/ascamera/camera_publisher/depth0/image_raw`이다. 중앙 Bridge의
