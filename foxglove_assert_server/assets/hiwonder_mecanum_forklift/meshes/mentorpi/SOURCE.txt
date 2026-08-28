@@ -1,0 +1,12 @@
+PRJ ARANEUM THIRD-PARTY ASSET RECORD
+The three unmodified meshes listed below are third-party assets and are not
+claimed as original PRJ ARANEUM contributions. See the scheduled rights
+documents described in docs/legal/README.md.
+
+Source: Hiwonder MentorPi official repository
+Repository: https://github.com/Hiwonder/MentorPi
+Original paths: simulations/mentorpi_description/meshes/mecanum/
+Files: base_link.STL, cam_Link.STL, lidar_Link.STL
+
+The upstream package currently declares its license as "TODO: License
+declaration". These files are retained unmodified for local digital-twin use.

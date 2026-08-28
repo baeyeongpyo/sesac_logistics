@@ -49,6 +49,7 @@ Git 추적/ignore 기준은 `llm-wiki-core/docs/gitignore.md`를 따른다.
 ## 경계
 
 * `llm-wiki/`는 현재 프로젝트의 local mutable wiki다.
+* `promotion-shelf/`는 promotion package에서 파생된 local-only lite artifact이며 pending runtime source로 읽힌다.
 * `llm-wiki-core/`는 runtime, hooks, templates, skills, docs를 소유한다.
 * `wiki_stack.yaml`은 프로젝트 루트의 dependency 선언 파일이며 프로젝트 성격에 맞게 관리한다.
 * artifact는 core에 포함하지 않고 외부 folder artifact 또는 선택적 archive artifact로 연결한다.

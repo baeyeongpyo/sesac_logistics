@@ -46,4 +46,5 @@ docs/superpowers/
 .env
 .env.*
 !.env.*.example
+!.env.example
 .venv

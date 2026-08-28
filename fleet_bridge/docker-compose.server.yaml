@@ -1,0 +1,131 @@
+x-worker-environment: &worker-environment
+  ROS_DOMAIN_ID: ${SERVER_ROS_DOMAIN_ID:-225}
+  ROS_LOCALHOST_ONLY: "1"
+  RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+  FASTDDS_BUILTIN_TRANSPORTS: ${FASTDDS_BUILTIN_TRANSPORTS:-DEFAULT}
+  FLEET_CONFIG: /config/fleet.yaml
+  TELEMETRY_CONFIG: /config/telemetry.yaml
+  ROBOT_1_FOXGLOVE_URI: ${ROBOT_1_FOXGLOVE_URI:?ROBOT_1_FOXGLOVE_URI is required}
+  ROBOT_2_FOXGLOVE_URI: ${ROBOT_2_FOXGLOVE_URI:?ROBOT_2_FOXGLOVE_URI is required}
+  ROBOT_1_COMMAND_API_URL: ${ROBOT_1_COMMAND_API_URL:?ROBOT_1_COMMAND_API_URL is required}
+  ROBOT_2_COMMAND_API_URL: ${ROBOT_2_COMMAND_API_URL:?ROBOT_2_COMMAND_API_URL is required}
+  FRESHNESS_TIMEOUT_SEC: ${FRESHNESS_TIMEOUT_SEC:-10}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+x-worker-service: &worker-service
+  image: ${SERVER_IMAGE:-mentorpi-fleet-bridge-server:humble}
+  build:
+    context: .
+    dockerfile: server/Dockerfile
+  network_mode: host
+  ipc: host
+  restart: unless-stopped
+  stop_signal: SIGINT
+  stop_grace_period: 10s
+  volumes:
+    - type: bind
+      source: ./config/fleet.yaml
+      target: /config/fleet.yaml
+      read_only: true
+    - type: bind
+      source: ./config/telemetry.yaml
+      target: /config/telemetry.yaml
+      read_only: true
+  command: [ros2, run, foxglove_ros_worker, foxglove_ros_worker]
+
+services:
+  worker-robot-1:
+    <<: *worker-service
+    environment:
+      <<: *worker-environment
+      ROBOT_ID: robot_1
+      FOXGLOVE_URI: ${ROBOT_1_FOXGLOVE_URI:?ROBOT_1_FOXGLOVE_URI is required}
+
+  worker-robot-2:
+    <<: *worker-service
+    environment:
+      <<: *worker-environment
+      ROBOT_ID: robot_2
+      FOXGLOVE_URI: ${ROBOT_2_FOXGLOVE_URI:?ROBOT_2_FOXGLOVE_URI is required}
+
+  command-api:
+    image: ${SERVER_IMAGE:-mentorpi-fleet-bridge-server:humble}
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    ports:
+      - "${COMMAND_API_PORT:-8080}:${COMMAND_API_PORT:-8080}"
+    restart: unless-stopped
+    stop_signal: SIGINT
+    stop_grace_period: 10s
+    environment:
+      FLEET_CONFIG: /config/fleet.yaml
+      ROBOT_1_FOXGLOVE_URI: ${ROBOT_1_FOXGLOVE_URI:?ROBOT_1_FOXGLOVE_URI is required}
+      ROBOT_2_FOXGLOVE_URI: ${ROBOT_2_FOXGLOVE_URI:?ROBOT_2_FOXGLOVE_URI is required}
+      ROBOT_1_COMMAND_API_URL: ${ROBOT_1_COMMAND_API_URL:?ROBOT_1_COMMAND_API_URL is required}
+      ROBOT_2_COMMAND_API_URL: ${ROBOT_2_COMMAND_API_URL:?ROBOT_2_COMMAND_API_URL is required}
+      COMMAND_API_HOST: ${COMMAND_API_HOST:-127.0.0.1}
+      COMMAND_API_PORT: ${COMMAND_API_PORT:-8080}
+    volumes:
+      - type: bind
+        source: ./config/fleet.yaml
+        target: /config/fleet.yaml
+        read_only: true
+    command: [ros2, run, foxglove_ros_worker, fleet_command_api]
+
+  server-foxglove:
+    image: ${SERVER_IMAGE:-mentorpi-fleet-bridge-server:humble}
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    network_mode: host
+    ipc: host
+    restart: unless-stopped
+    stop_signal: SIGINT
+    stop_grace_period: 10s
+    environment:
+      ROS_DOMAIN_ID: ${SERVER_ROS_DOMAIN_ID:-225}
+      ROS_LOCALHOST_ONLY: "1"
+      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+      FASTDDS_BUILTIN_TRANSPORTS: ${FASTDDS_BUILTIN_TRANSPORTS:-DEFAULT}
+    volumes:
+      - type: bind
+        source: ./config/server_foxglove.yaml
+        target: /config/server_foxglove.yaml
+        read_only: true
+    command:
+      - ros2
+      - run
+      - foxglove_bridge
+      - foxglove_bridge
+      - --ros-args
+      - --params-file
+      - /config/server_foxglove.yaml
+
+  central-topic-republisher:
+    image: ${SERVER_IMAGE:-mentorpi-fleet-bridge-server:humble}
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    network_mode: host
+    ipc: host
+    restart: unless-stopped
+    stop_signal: SIGINT
+    stop_grace_period: 10s
+    environment:
+      ROS_DOMAIN_ID: ${SERVER_ROS_DOMAIN_ID:-225}
+      ROS_LOCALHOST_ONLY: "1"
+      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+      FASTDDS_BUILTIN_TRANSPORTS: ${FASTDDS_BUILTIN_TRANSPORTS:-DEFAULT}
+      CENTRAL_TOPICS_CONFIG: /config/central_topics.yaml
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - type: bind
+        source: ./config/central_topics.yaml
+        target: /config/central_topics.yaml
+        read_only: true
+    command:
+      - ros2
+      - run
+      - foxglove_ros_worker
+      - fleet_central_topic_republisher

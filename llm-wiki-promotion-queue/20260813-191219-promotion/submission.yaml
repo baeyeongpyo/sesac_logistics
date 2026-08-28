@@ -1,0 +1,9 @@
+schema_version: promotion-submission/v1
+submitted_at: '2026-08-13T10:12:19Z'
+promotion_package: promotion.yaml
+included_files:
+- kind: refined
+  pack_path: files/concepts/fast-dds-domain-bridge.md
+  target_path: concepts/fast-dds-domain-bridge.md
+  sha256: db220717ce53ed012bf078eedfecb3e11652c5d8fa7ac1f5d40265129542a183
+  staged_path: files/concepts/fast-dds-domain-bridge.md

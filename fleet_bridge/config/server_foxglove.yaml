@@ -1,0 +1,27 @@
+foxglove_bridge:
+  ros__parameters:
+    address: 0.0.0.0
+    port: 8765
+    topic_whitelist:
+      - ^/robot_(1|2)/.+$
+      - ^/map$
+    best_effort_qos_topic_whitelist:
+      - ^/robot_(1|2)/(tf|odom|odom_raw|odom_rf2o|scan_filtered|imu|imu_corrected|joint_states|joy|cost_cloud)$
+      - ^/robot_(1|2)/(imu/.*|ascamera/.*|local_costmap/clearing_endpoints|particle_cloud|ros_robot_controller/(imu_raw|joy))$
+    service_whitelist:
+      - '(?!)'
+    param_whitelist:
+      - '(?!)'
+    client_topic_whitelist:
+      - '(?!)'
+    asset_uri_allowlist:
+      - '(?!)'
+    # Humble parameter files cannot encode an empty string array. "none" does
+    # not match any capability name supported by the pinned 0.8.5 bridge.
+    capabilities:
+      - none
+    include_hidden: false
+    min_qos_depth: 1
+    max_qos_depth: 20
+    send_buffer_limit: 8388608
+    use_compression: false

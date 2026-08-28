@@ -41,6 +41,8 @@ DEFAULT_EXCLUDE_GLOBS = [
     "**/log.md",
     "raw/**",
     "**/raw/**",
+    "archive/**",
+    "**/archive/**",
     "raw-derived/**",
     "**/raw-derived/**",
     ".agent-harness/**",
@@ -71,6 +73,11 @@ ZIP_ARCHIVE_EXTENSIONS = [".wikipkg"]
 ARCHIVE_EXTENSIONS = TAR_ARCHIVE_EXTENSIONS + ZIP_ARCHIVE_EXTENSIONS
 LOCAL_MUTABLE_WIKI_ID = "local-mutable-wiki"
 LOCAL_WIKI_TYPE = "local_wiki"
+PROMOTION_SHELF_ID = "local-promotion-shelf"
+PROMOTION_SHELF_TYPE = "promotion_shelf"
+DEFAULT_PROMOTION_SHELF_ROOT = "promotion-shelf"
+PROMOTION_SHELF_SCHEMA_VERSION = "promotion-shelf/v1"
+PROMOTION_PACKAGE_REVIEW_ROOTS = ("llm-wiki-promotion-queue", "promotion-packages")
 
 DEFAULT_PACK_EXCLUDE_DIRS = {"build", "install", "log", "__pycache__", ".git"}
 DEFAULT_PACK_EXCLUDE_FILE_NAMES = {".DS_Store"}
@@ -283,6 +290,9 @@ def dependency_ids(stack: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     for item in stack.get("wiki_artifacts", []) or []:
         if isinstance(item, dict) and item.get("dependency_id"):
             deps[str(item["dependency_id"])] = {**item, "dependency_type": "artifact"}
+    for item in stack.get("promotion_shelves", []) or []:
+        if isinstance(item, dict) and item.get("dependency_id"):
+            deps[str(item["dependency_id"])] = {**item, "dependency_type": PROMOTION_SHELF_TYPE}
     for item in stack.get("personal_wikis", []) or []:
         if isinstance(item, dict) and item.get("dependency_id"):
             deps[str(item["dependency_id"])] = {**item, "dependency_type": "personal_wiki"}
@@ -298,11 +308,22 @@ def build_source_binding(entry: Dict[str, Any], tier: int, group_index: Optional
         or raw_dependency_id == LOCAL_MUTABLE_WIKI_ID
         or raw_source_binding_id == LOCAL_MUTABLE_WIKI_ID
     )
-    source_binding_id = raw_source_binding_id or raw_dependency_id or (LOCAL_MUTABLE_WIKI_ID if is_local_wiki else "unnamed")
-    dependency_id = raw_dependency_id or (LOCAL_MUTABLE_WIKI_ID if is_local_wiki else "")
-    dependency_type = raw_dependency_type or (LOCAL_WIKI_TYPE if is_local_wiki else "artifact")
-    effective_scope = str(entry.get("effective_scope") or ("local" if is_local_wiki else "scope-neutral"))
-    authority_level = str(entry.get("authority_level") or ("working" if is_local_wiki else "reference"))
+    is_promotion_shelf = (
+        raw_dependency_type == PROMOTION_SHELF_TYPE
+        or raw_dependency_id == PROMOTION_SHELF_ID
+        or raw_source_binding_id == PROMOTION_SHELF_ID
+    )
+    source_binding_id = raw_source_binding_id or raw_dependency_id or (
+        LOCAL_MUTABLE_WIKI_ID if is_local_wiki else PROMOTION_SHELF_ID if is_promotion_shelf else "unnamed"
+    )
+    dependency_id = raw_dependency_id or (
+        LOCAL_MUTABLE_WIKI_ID if is_local_wiki else PROMOTION_SHELF_ID if is_promotion_shelf else ""
+    )
+    dependency_type = raw_dependency_type or (
+        LOCAL_WIKI_TYPE if is_local_wiki else PROMOTION_SHELF_TYPE if is_promotion_shelf else "artifact"
+    )
+    effective_scope = str(entry.get("effective_scope") or ("local" if is_local_wiki or is_promotion_shelf else "scope-neutral"))
+    authority_level = str(entry.get("authority_level") or ("working" if is_local_wiki else "pending" if is_promotion_shelf else "reference"))
     return SourceBinding(
         source_binding_id=source_binding_id,
         dependency_id=dependency_id,
@@ -331,6 +352,45 @@ def flatten_source_bindings(stack: Dict[str, Any]) -> List[SourceBinding]:
         else:
             bindings.append(build_source_binding(entry, tier))
             tier += 1
+    return bindings
+
+
+def promotion_shelf_root_from_harness(root: Path) -> Path:
+    harness = load_harness_config(root)
+    configured = (((harness.get("llm_wiki_core") or {}).get("promotion_shelf_root")) or DEFAULT_PROMOTION_SHELF_ROOT)
+    p = Path(os.path.expanduser(str(configured)))
+    if not p.is_absolute():
+        p = root / p
+    return p
+
+
+def effective_source_bindings(root: Path, stack: Dict[str, Any]) -> List[SourceBinding]:
+    bindings = list(flatten_source_bindings(stack))
+    shelf_path = promotion_shelf_root_from_harness(root)
+    has_shelf_binding = any(
+        b.dependency_type == PROMOTION_SHELF_TYPE or b.source_binding_id == PROMOTION_SHELF_ID
+        for b in bindings
+    )
+    if shelf_path.exists() and not has_shelf_binding:
+        insert_at = next(
+            (idx for idx, b in enumerate(bindings) if b.dependency_type == LOCAL_WIKI_TYPE or b.source_binding_id == LOCAL_MUTABLE_WIKI_ID),
+            len(bindings),
+        )
+        if insert_at < len(bindings):
+            insert_tier = bindings[insert_at].tier
+        else:
+            insert_tier = (max((b.tier for b in bindings), default=-1) + 1)
+        for binding in bindings:
+            if binding.tier >= insert_tier:
+                binding.tier += 1
+        bindings.insert(insert_at, SourceBinding(
+            source_binding_id=PROMOTION_SHELF_ID,
+            dependency_id=PROMOTION_SHELF_ID,
+            dependency_type=PROMOTION_SHELF_TYPE,
+            effective_scope="local",
+            authority_level="pending",
+            tier=insert_tier,
+        ))
     return bindings
 
 
@@ -387,17 +447,18 @@ def validate_stack(root: Path, stack_path: Optional[Path] = None) -> Dict[str, A
         errors.append("forbidden keys found: " + ", ".join(forbidden))
 
     deps = dependency_ids(stack)
-    bindings = flatten_source_bindings(stack)
+    bindings = effective_source_bindings(root, stack)
     seen_binding_ids = set()
     for b in bindings:
-        if b.dependency_type != LOCAL_WIKI_TYPE and not b.dependency_id:
+        is_implicit_shelf = b.dependency_type == PROMOTION_SHELF_TYPE and b.dependency_id == PROMOTION_SHELF_ID
+        if b.dependency_type not in {LOCAL_WIKI_TYPE, PROMOTION_SHELF_TYPE} and not b.dependency_id:
             errors.append(f"source binding {b.source_binding_id!r} has no dependency_id")
         if b.source_binding_id in seen_binding_ids:
             errors.append(f"duplicate source_binding_id: {b.source_binding_id}")
         seen_binding_ids.add(b.source_binding_id)
-        if b.dependency_type != LOCAL_WIKI_TYPE and b.dependency_id and b.dependency_id not in deps:
+        if b.dependency_type != LOCAL_WIKI_TYPE and b.dependency_id and b.dependency_id not in deps and not is_implicit_shelf:
             errors.append(f"source binding {b.source_binding_id!r} references unknown dependency_id {b.dependency_id!r}")
-        if b.dependency_type not in {"artifact", "personal_wiki", LOCAL_WIKI_TYPE}:
+        if b.dependency_type not in {"artifact", "personal_wiki", LOCAL_WIKI_TYPE, PROMOTION_SHELF_TYPE}:
             errors.append(f"source binding {b.source_binding_id!r} has invalid dependency_type {b.dependency_type!r}")
 
     for idx, entry in enumerate(((stack.get("mutable_source_wiki_policy") or {}).get("source_binding_order")) or []):
@@ -428,7 +489,7 @@ def discover_sources(root: Path, stack: Dict[str, Any], warnings: List[str]) -> 
     """Return (binding, filesystem root, source kind label)."""
     result: List[Tuple[SourceBinding, Path, str]] = []
     deps = dependency_ids(stack)
-    bindings = flatten_source_bindings(stack)
+    bindings = effective_source_bindings(root, stack)
     seen_source_roots: set = set()
 
     def add_source(binding: SourceBinding, source_root: Path, source_kind: str) -> None:
@@ -477,6 +538,20 @@ def discover_sources(root: Path, stack: Dict[str, Any], warnings: List[str]) -> 
                 add_source(b, local_path, LOCAL_WIKI_TYPE)
             else:
                 warnings.append(f"local wiki path missing for {b.source_binding_id}: {local_path}")
+            continue
+        if b.dependency_type == PROMOTION_SHELF_TYPE:
+            dep = deps.get(b.dependency_id)
+            if dep:
+                ref = dep.get("shelf_ref") or dep.get("path") or DEFAULT_PROMOTION_SHELF_ROOT
+                p = Path(os.path.expanduser(str(ref)))
+                if not p.is_absolute():
+                    p = root / p
+            else:
+                p = promotion_shelf_root_from_harness(root)
+            if p.exists() and p.is_dir():
+                add_source(b, p, PROMOTION_SHELF_TYPE)
+            elif dep:
+                warnings.append(f"promotion shelf path missing for {b.dependency_id}: {p}")
             continue
         dep = deps.get(b.dependency_id)
         if not dep:
@@ -578,6 +653,223 @@ def read_archive_member(archive_path: Path, member_name: str) -> bytes:
         return res.stdout
     except Exception as e:
         raise FileNotFoundError(f"Failed to read archive member {member_name} from {archive_path}: {e}")
+
+
+def archive_virtual_root(root: Path, archive_path: Path) -> Path:
+    stem = archive_path.name
+    for ext in ARCHIVE_EXTENSIONS:
+        if stem.endswith(ext):
+            stem = stem[:-len(ext)]
+            break
+    return archive_path.parent / stem
+
+
+def source_root_rel(root: Path, source_root: Path, source_kind: str) -> str:
+    if source_kind == "artifact_file":
+        return rel_to(archive_virtual_root(root, source_root), root)
+    return rel_to(source_root, root)
+
+
+def candidate_source_hash(source: str, source_hashes: Dict[str, str]) -> Optional[str]:
+    if source in source_hashes:
+        return source_hashes[source]
+    normalized = normalize_wiki_source_path(source)
+    if normalized in source_hashes:
+        return source_hashes[normalized]
+    for key, value in source_hashes.items():
+        if normalize_wiki_source_path(str(key)) == normalized:
+            return str(value)
+    return None
+
+
+def page_unit_root_rel(root: Path, page_path: str, binding: SourceBinding, source_root: Path, source_kind: str) -> str:
+    base_rel = source_root_rel(root, source_root, source_kind)
+    if binding.dependency_type == PROMOTION_SHELF_TYPE:
+        try:
+            remainder = Path(page_path).relative_to(base_rel)
+        except ValueError:
+            return base_rel
+        if remainder.parts:
+            return str(Path(base_rel) / remainder.parts[0])
+    return base_rel
+
+
+def resolve_source_locator(root: Path, page: PageRecord, source: str, source_hashes: Dict[str, str], binding: SourceBinding, source_root: Path, source_kind: str) -> Dict[str, Any]:
+    normalized = normalize_wiki_source_path(source)
+    if Path(source).is_absolute():
+        resolved_rel = rel_to(Path(source), root)
+    elif normalized.startswith(("raw/", "raw-derived/")):
+        resolved_rel = str(Path(page_unit_root_rel(root, page.path, binding, source_root, source_kind)) / normalized)
+    else:
+        resolved_rel = normalized
+
+    expected_sha = candidate_source_hash(source, source_hashes)
+    result: Dict[str, Any] = {
+        "source": source,
+        "resolved_path": resolved_rel,
+        "primary_resolved_path": resolved_rel,
+        "source_binding_id": binding.source_binding_id,
+        "exists": False,
+        "sha256": None,
+        "expected_sha256": expected_sha,
+        "sha256_ok": None,
+        "recovered": False,
+        "recovery_source_binding_id": None,
+        "recovery_reason": None,
+    }
+
+    if source_kind == "artifact_file":
+        virtual_root = archive_virtual_root(root, source_root)
+        try:
+            archive_rel = str(Path(resolved_rel).relative_to(rel_to(virtual_root, root)))
+        except ValueError:
+            archive_rel = ""
+        if archive_rel:
+            for member in list_archive_members(source_root):
+                if not member.is_file:
+                    continue
+                clean_name = member.name.lstrip("/")
+                if clean_name == archive_rel:
+                    content = read_archive_member(source_root, member.name)
+                    actual_sha = hashlib.sha256(content).hexdigest()
+                    result["exists"] = True
+                    result["sha256"] = actual_sha
+                    result["sha256_ok"] = (actual_sha == expected_sha) if expected_sha else None
+                    break
+        return result
+
+    fs_path = root / resolved_rel
+    if fs_path.exists() and fs_path.is_file():
+        actual_sha = sha256_file(fs_path)
+        result["exists"] = True
+        result["sha256"] = actual_sha
+        result["sha256_ok"] = (actual_sha == expected_sha) if expected_sha else None
+    elif expected_sha:
+        result["sha256_ok"] = False
+    return result
+
+
+def apply_recovered_source(result: Dict[str, Any], candidate: Dict[str, Any], reason: str) -> Dict[str, Any]:
+    recovered = dict(result)
+    recovered.update({
+        "resolved_path": candidate["resolved_path"],
+        "source_binding_id": candidate["source_binding_id"],
+        "exists": True,
+        "sha256": candidate["sha256"],
+        "sha256_ok": True,
+        "recovered": True,
+        "recovery_source_binding_id": candidate["source_binding_id"],
+        "recovery_reason": reason,
+    })
+    return recovered
+
+
+def iter_raw_recovery_candidates(
+    root: Path,
+    normalized_source: str,
+    source_bindings: List[Tuple[SourceBinding, Path, str]],
+) -> Iterable[Dict[str, Any]]:
+    for candidate_binding, candidate_root, candidate_kind in source_bindings:
+        if candidate_kind == "artifact_file":
+            for member in list_archive_members(candidate_root):
+                if not member.is_file or member.name.lstrip("/") != normalized_source:
+                    continue
+                content = read_archive_member(candidate_root, member.name)
+                virtual_path = archive_virtual_root(root, candidate_root) / normalized_source
+                yield {
+                    "resolved_path": rel_to(virtual_path, root),
+                    "source_binding_id": candidate_binding.source_binding_id,
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+            continue
+
+        if candidate_binding.dependency_type == PROMOTION_SHELF_TYPE:
+            try:
+                children = sorted(p for p in candidate_root.iterdir() if p.is_dir() and p.name != "archive")
+            except Exception:
+                children = []
+            for child in children:
+                candidate = child / normalized_source
+                if candidate.exists() and candidate.is_file():
+                    yield {
+                        "resolved_path": rel_to(candidate, root),
+                        "source_binding_id": candidate_binding.source_binding_id,
+                        "sha256": sha256_file(candidate),
+                    }
+            continue
+
+        candidate = candidate_root / normalized_source
+        if candidate.exists() and candidate.is_file():
+            yield {
+                "resolved_path": rel_to(candidate, root),
+                "source_binding_id": candidate_binding.source_binding_id,
+                "sha256": sha256_file(candidate),
+            }
+
+
+def iter_promotion_package_raw_candidates(root: Path, normalized_source: str) -> Iterable[Dict[str, Any]]:
+    pattern = str(Path("files") / normalized_source)
+    for review_root in PROMOTION_PACKAGE_REVIEW_ROOTS:
+        package_root = root / review_root
+        if not package_root.exists() or not package_root.is_dir():
+            continue
+        for candidate in sorted(package_root.rglob(pattern)):
+            if candidate.exists() and candidate.is_file():
+                yield {
+                    "resolved_path": rel_to(candidate, root),
+                    "source_binding_id": review_root,
+                    "sha256": sha256_file(candidate),
+                }
+
+
+def recover_source_by_sha256(
+    root: Path,
+    result: Dict[str, Any],
+    source: str,
+    source_bindings: List[Tuple[SourceBinding, Path, str]],
+) -> Dict[str, Any]:
+    expected_sha = result.get("expected_sha256")
+    if not expected_sha:
+        return result
+    normalized = normalize_wiki_source_path(source)
+    if not normalized.startswith(("raw/", "raw-derived/")):
+        return result
+    if result.get("exists") and result.get("sha256_ok") is not False:
+        return result
+
+    primary_path = result.get("primary_resolved_path")
+    reason = "primary_hash_mismatch" if result.get("exists") else "primary_missing"
+    for candidate in list(iter_raw_recovery_candidates(root, normalized, source_bindings)) + list(iter_promotion_package_raw_candidates(root, normalized)):
+        if candidate["resolved_path"] == primary_path:
+            continue
+        if candidate["sha256"] == expected_sha:
+            return apply_recovered_source(result, candidate, reason)
+    return result
+
+
+def resolve_page_sources(root: Path, page: PageRecord, stack: Dict[str, Any]) -> List[Dict[str, Any]]:
+    warnings: List[str] = []
+    source_bindings = discover_sources(root, stack, warnings)
+    for binding, source_root, source_kind in source_bindings:
+        if binding.source_binding_id != page.source_binding_id:
+            continue
+        resolved = []
+        for source in page.sources:
+            primary = resolve_source_locator(root, page, source, page.source_hashes, binding, source_root, source_kind)
+            resolved.append(recover_source_by_sha256(root, primary, source, source_bindings))
+        return resolved
+    return [
+        {
+            "source": source,
+            "resolved_path": None,
+            "source_binding_id": page.source_binding_id,
+            "exists": False,
+            "sha256": None,
+            "expected_sha256": candidate_source_hash(source, page.source_hashes),
+            "sha256_ok": None,
+        }
+        for source in page.sources
+    ]
 
 
 def read_page_content(root: Path, p: PageRecord, stack: Dict[str, Any]) -> str:
@@ -806,11 +1098,16 @@ def normalize_duplicate_source(source: str) -> str:
 def page_dependency_type(page: PageRecord, binding_by_id: Dict[str, Dict[str, Any]]) -> str:
     if page.source_binding_id == LOCAL_MUTABLE_WIKI_ID:
         return LOCAL_WIKI_TYPE
+    if page.source_binding_id == PROMOTION_SHELF_ID:
+        return PROMOTION_SHELF_TYPE
     return str(binding_by_id.get(page.source_binding_id, {}).get("dependency_type") or page.dependency_id)
 
 
 def is_local_working_page(page: PageRecord, binding_by_id: Dict[str, Dict[str, Any]]) -> bool:
-    return page.source_binding_id == LOCAL_MUTABLE_WIKI_ID or page_dependency_type(page, binding_by_id) == LOCAL_WIKI_TYPE
+    return (
+        page.source_binding_id == LOCAL_MUTABLE_WIKI_ID
+        or page_dependency_type(page, binding_by_id) in {LOCAL_WIKI_TYPE, PROMOTION_SHELF_TYPE}
+    )
 
 
 def is_artifact_reference_page(page: PageRecord, binding_by_id: Dict[str, Dict[str, Any]]) -> bool:
@@ -1562,7 +1859,14 @@ def get_bundle(root: Path, output_dir: Optional[Path] = None) -> Dict[str, Any]:
         "selected_pages.yaml": dump_yaml(selected_pages),
         "selected_sources.yaml": dump_yaml({"sources": validation["dependency_ids"], "local_mutable_wiki_included": True}),
         "page_hashes.yaml": dump_yaml({p.path: p.sha256 for p in pages}),
-        "source_lineage.yaml": dump_yaml({p.path: {"sources": p.sources, "source_hashes": p.source_hashes} for p in pages}),
+        "source_lineage.yaml": dump_yaml({
+            p.path: {
+                "sources": p.sources,
+                "source_hashes": p.source_hashes,
+                "resolved_sources": resolve_page_sources(root, p, stack),
+            }
+            for p in pages
+        }),
         "access_decisions.yaml": dump_yaml({"raw_excerpt": "denied_by_default", "direct_filesystem_access_to_raw": "denied_for_team_project"}),
         "conflict_warnings.yaml": dump_yaml(conflicts),
         "duplicate_candidates.yaml": dump_yaml(duplicate_candidates),
@@ -1789,6 +2093,7 @@ def get_lineage(root: Path, page_path: str) -> Dict[str, Any]:
             "sha256": matched_page.sha256,
             "sources": matched_page.sources,
             "source_hashes": matched_page.source_hashes,
+            "resolved_sources": resolve_page_sources(root, matched_page, stack),
             "review_needed": matched_page.review_needed,
             "stale": matched_page.stale,
             "confidence": matched_page.confidence,
@@ -1804,6 +2109,7 @@ def get_lineage(root: Path, page_path: str) -> Dict[str, Any]:
         "sha256": sha256_file(p),
         "sources": normalize_list(fm.get("sources")),
         "source_hashes": fm.get("source_hashes") if isinstance(fm.get("source_hashes"), dict) else {},
+        "resolved_sources": [],
         "review_needed": bool(fm.get("review_needed", False)),
         "stale": bool(fm.get("stale", False)),
         "confidence": str(fm.get("confidence", "medium")),
@@ -1960,12 +2266,19 @@ def submit_promotion_package(
     errors.extend(entry_errors)
 
     if output_dir is None:
-        queue_name = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{package_path.stem}"
-        output_dir = root / "llm-wiki-promotion-queue" / queue_name
+        output_dir = root / "llm-wiki-promotion-queue" / datetime.now().strftime("%Y%m%d-%H%M%S-promotion")
     elif not output_dir.is_absolute():
         output_dir = root / output_dir
 
-    if output_dir.exists() and not force:
+    output_dir = output_dir.resolve()
+    output_is_package_root = output_dir == package_root
+    in_place_submit = output_is_package_root
+    submission_path = output_dir / "submission.yaml"
+
+    if output_is_package_root:
+        if submission_path.exists() and not force:
+            errors.append(f"submission.yaml already exists: {submission_path}")
+    elif output_dir.exists() and not force:
         errors.append(f"output_dir already exists: {output_dir}")
 
     if errors:
@@ -1979,17 +2292,22 @@ def submit_promotion_package(
     output_dir.mkdir(parents=True, exist_ok=True)
     files_dir = output_dir / "files"
     submitted_at = now_iso()
-    queued_data = dict(data)
-    queued_pkg = dict(pkg)
-    queued_pkg["submitted_at"] = submitted_at
-    queued_data["promotion_package"] = queued_pkg
-    (output_dir / package_path.name).write_text(dump_yaml(queued_data))
+    submitted_package_path = package_path if output_is_package_root else output_dir / package_path.name
+    if output_is_package_root:
+        submitted_package_data = data
+    else:
+        submitted_package_data = dict(data)
+        submitted_pkg = dict(pkg)
+        submitted_pkg["submitted_at"] = submitted_at
+        submitted_package_data["promotion_package"] = submitted_pkg
+        submitted_package_path.write_text(dump_yaml(submitted_package_data), encoding="utf-8")
     copied_files: List[Dict[str, Any]] = []
     for item in included_files:
         src = package_root / item["pack_path"]
         dest = files_dir / item["target_path"]
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)
+        if src.resolve() != dest.resolve():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
         copied_files.append({**item, "staged_path": rel_to(dest, output_dir)})
 
     submission = {
@@ -1998,14 +2316,374 @@ def submit_promotion_package(
         "promotion_package": package_path.name,
         "included_files": copied_files,
     }
-    (output_dir / "submission.yaml").write_text(dump_yaml(submission))
+    submission_path.write_text(dump_yaml(submission))
+    shelf_result = create_promotion_shelf(
+        root=root,
+        package_path=submitted_package_path,
+        shelf_id=output_dir.name,
+        force=force,
+    )
+    if not shelf_result["ok"]:
+        return {
+            "ok": False,
+            "errors": [f"promotion shelf creation failed: {error}" for error in shelf_result.get("errors", [])],
+            "warnings": shelf_result.get("warnings", []),
+            "package": str(package_path),
+            "output_dir": str(output_dir),
+            "submission_path": str(submission_path),
+            "shelf": shelf_result,
+        }
     return {
         "ok": True,
         "errors": [],
         "package": str(package_path),
         "output_dir": str(output_dir),
+        "submission_path": str(submission_path),
+        "in_place": in_place_submit,
         "included_file_count": len(copied_files),
         "included_files": copied_files,
+        "shelf": shelf_result,
+    }
+
+
+def normalize_wiki_source_path(value: str) -> str:
+    normalized = value.strip().replace("\\", "/")
+    normalized = re.sub(r"^\./+", "", normalized)
+    if normalized.startswith("llm-wiki/"):
+        normalized = normalized[len("llm-wiki/"):]
+    return normalized
+
+
+def rewrite_refined_sources_to_relative_raw(text: str, raw_target_paths: Iterable[str]) -> str:
+    raw_paths = {normalize_wiki_source_path(p) for p in raw_target_paths}
+    if not raw_paths:
+        return text
+    fm, body = read_frontmatter(text)
+    if not fm:
+        return text
+    changed = False
+    sources = fm.get("sources")
+    if isinstance(sources, list):
+        rewritten_sources: List[Any] = []
+        for item in sources:
+            if isinstance(item, str):
+                normalized = normalize_wiki_source_path(item)
+                if normalized in raw_paths:
+                    rewritten_sources.append(normalized)
+                    changed = changed or item != normalized
+                else:
+                    rewritten_sources.append(item)
+            else:
+                rewritten_sources.append(item)
+        fm["sources"] = rewritten_sources
+    source_hashes = fm.get("source_hashes")
+    if isinstance(source_hashes, dict):
+        rewritten_hashes: Dict[str, Any] = {}
+        for key, value in source_hashes.items():
+            normalized = normalize_wiki_source_path(str(key))
+            if normalized in raw_paths:
+                rewritten_hashes[normalized] = value
+                changed = changed or str(key) != normalized
+            else:
+                rewritten_hashes[str(key)] = value
+        fm["source_hashes"] = rewritten_hashes
+    if not changed:
+        return text
+    return "---\n" + dump_yaml(fm) + "---\n" + body
+
+
+def local_page_references_raw(page: Path, raw_target_path: str) -> bool:
+    try:
+        fm, _ = read_frontmatter(page.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return False
+    normalized_target = normalize_wiki_source_path(raw_target_path)
+    for source in normalize_list(fm.get("sources")):
+        if normalize_wiki_source_path(source) == normalized_target:
+            return True
+    hashes = fm.get("source_hashes")
+    if isinstance(hashes, dict):
+        return any(normalize_wiki_source_path(str(key)) == normalized_target for key in hashes)
+    return False
+
+
+def remaining_local_raw_references(root: Path, raw_target_path: str, excluded_paths: set[Path]) -> List[str]:
+    local_root = root / "llm-wiki"
+    if not local_root.exists():
+        return []
+    references: List[str] = []
+    for page in sorted(local_root.rglob("*.md")):
+        if not page.is_file():
+            continue
+        if "archive" in page.relative_to(local_root).parts:
+            continue
+        try:
+            resolved = page.resolve()
+        except Exception:
+            resolved = page.absolute()
+        if resolved in excluded_paths:
+            continue
+        if local_page_references_raw(page, raw_target_path):
+            references.append(rel_to(page, root))
+    return references
+
+
+def move_local_file_to_shelf_archive(root: Path, local_rel: str, shelf_id: str, expected_sha: str) -> Tuple[Optional[str], Optional[str]]:
+    try:
+        archive_rel = Path(local_rel).relative_to("llm-wiki")
+    except ValueError:
+        return None, f"local_retained:{local_rel} unsupported_local_path"
+    src = root / local_rel
+    if not src.exists() or not src.is_file():
+        return None, None
+    actual_sha = sha256_file(src)
+    if actual_sha != expected_sha:
+        return None, f"local_retained:{local_rel} sha256_mismatch"
+    dest = root / "llm-wiki" / "archive" / "shelved" / shelf_id / archive_rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        return None, f"local_retained:{local_rel} archive_exists={rel_to(dest, root)}"
+    shutil.move(str(src), str(dest))
+    return rel_to(dest, root), None
+
+
+def append_log_entry(path: Path, title: str, lines: List[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = path.read_text(encoding="utf-8") if path.exists() else "# Wiki Log\n"
+    block = [f"## [{datetime.now().strftime('%Y-%m-%d')}] {title}"] + [f"- {line}" for line in lines]
+    path.write_text(existing.rstrip() + "\n\n" + "\n".join(block) + "\n", encoding="utf-8")
+
+
+def write_shelf_index(path: Path, shelf_id: str, refined_pages: List[Dict[str, Any]]) -> None:
+    lines = [
+        f"# Promotion Shelf {shelf_id}",
+        "",
+        "> Local lite artifact for a promotion candidate. Runtime may read these pages while review is pending.",
+        "",
+        "## Refined Pages",
+        "",
+    ]
+    if refined_pages:
+        for page in refined_pages:
+            lines.append(f"- [{page['path']}]({page['path']})")
+    else:
+        lines.append("- none")
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def create_promotion_shelf(
+    root: Path,
+    package_path: Path,
+    shelf_id: Optional[str] = None,
+    shelf_root: Optional[Path] = None,
+    force: bool = False,
+    keep_local: bool = False,
+) -> Dict[str, Any]:
+    package_path = package_path.resolve()
+    package_root = package_path.parent
+    validation = validate_promotion_package(package_path)
+    data = load_yaml(package_path)
+    pkg = data.get("promotion_package") if isinstance(data.get("promotion_package"), dict) else {}
+    errors = list(validation["errors"])
+    entry_errors, included_files = validate_promotion_file_entries(package_root, pkg)
+    errors.extend(entry_errors)
+    if errors:
+        return {"ok": False, "errors": errors, "warnings": [], "package": str(package_path)}
+
+    if shelf_root is None:
+        shelf_root = promotion_shelf_root_from_harness(root)
+    elif not shelf_root.is_absolute():
+        shelf_root = root / shelf_root
+    shelf_id = shelf_id or datetime.now().strftime("%Y%m%d-%H%M%S-promotion")
+    if not re.match(r"^[A-Za-z0-9._-]+$", shelf_id):
+        return {"ok": False, "errors": [f"invalid shelf_id: {shelf_id}"], "warnings": [], "package": str(package_path)}
+    shelf_dir = shelf_root / shelf_id
+    if shelf_dir.exists() and not force:
+        return {"ok": False, "errors": [f"promotion shelf already exists: {shelf_dir}"], "warnings": [], "package": str(package_path)}
+    shelf_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_targets = [item["target_path"] for item in included_files if item["kind"] == "raw"]
+    raw_items: List[Dict[str, Any]] = []
+    refined_pages: List[Dict[str, Any]] = []
+    archived_local: List[Dict[str, str]] = []
+    warnings: List[str] = []
+    excluded_for_raw_checks: set[Path] = set()
+    lineage_by_sha: Dict[str, str] = {}
+    for item in pkg.get("lineage") or []:
+        if isinstance(item, dict) and item.get("sha256") and item.get("page_path"):
+            lineage_by_sha[str(item["sha256"])] = str(item["page_path"])
+
+    for item in included_files:
+        src = package_root / item["pack_path"]
+        dest = shelf_dir / item["target_path"]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if item["kind"] == "refined":
+            text = src.read_text(encoding="utf-8", errors="replace")
+            text = rewrite_refined_sources_to_relative_raw(text, raw_targets)
+            dest.write_text(text, encoding="utf-8")
+        else:
+            shutil.copy2(src, dest)
+
+        shelf_sha = sha256_file(dest)
+        original_local_path = lineage_by_sha.get(item["sha256"]) if item["kind"] == "refined" else f"llm-wiki/{item['target_path']}"
+        record = {
+            "path": item["target_path"],
+            "pack_path": item["pack_path"],
+            "sha256": shelf_sha,
+            "package_sha256": item["sha256"],
+            "original_local_path": original_local_path,
+        }
+        if item["kind"] == "raw":
+            raw_items.append(record)
+        else:
+            refined_pages.append(record)
+            if original_local_path:
+                try:
+                    excluded_for_raw_checks.add((root / original_local_path).resolve())
+                except Exception:
+                    excluded_for_raw_checks.add((root / original_local_path).absolute())
+
+    if not keep_local:
+        for page in refined_pages:
+            local_path = page.get("original_local_path")
+            if not local_path:
+                continue
+            archived, warning = move_local_file_to_shelf_archive(root, local_path, shelf_id, page["package_sha256"])
+            if archived:
+                archived_local.append({"from": local_path, "to": archived})
+            if warning:
+                warnings.append(warning)
+
+        for item in raw_items:
+            local_path = item.get("original_local_path") or f"llm-wiki/{item['path']}"
+            references = remaining_local_raw_references(root, item["path"], excluded_for_raw_checks)
+            if references:
+                warnings.append(f"raw_retained:{local_path} referenced_by={','.join(references)}")
+                continue
+            archived, warning = move_local_file_to_shelf_archive(root, local_path, shelf_id, item["package_sha256"])
+            if archived:
+                archived_local.append({"from": local_path, "to": archived})
+            if warning:
+                warnings.append(warning)
+
+    manifest = {
+        "schema_version": PROMOTION_SHELF_SCHEMA_VERSION,
+        "id": shelf_id,
+        "status": "pending",
+        "created_at": now_iso(),
+        "source_owner": pkg.get("source_owner"),
+        "promotion_package": str(package_path),
+        "raw_transfer_policy": pkg.get("raw_transfer_policy"),
+        "raw_items": raw_items,
+        "refined_pages": refined_pages,
+        "archived_local": archived_local,
+        "warnings": warnings,
+        "restore_policy": "restorable",
+    }
+    (shelf_dir / "manifest.yaml").write_text(dump_yaml(manifest), encoding="utf-8")
+    write_shelf_index(shelf_dir / "index.md", shelf_id, refined_pages)
+    append_log_entry(
+        shelf_dir / "log.md",
+        f"promotion-shelf-created | {shelf_id}",
+        [f"package: {package_path}", f"refined_pages: {len(refined_pages)}", f"raw_items: {len(raw_items)}"],
+    )
+    append_log_entry(
+        root / "llm-wiki" / "log.md",
+        f"promotion-shelved | {shelf_id}",
+        [f"shelf: {rel_to(shelf_dir, root)}"] + [f"archived: {item['from']} -> {item['to']}" for item in archived_local],
+    )
+    return {
+        "ok": True,
+        "errors": [],
+        "warnings": warnings,
+        "shelf_id": shelf_id,
+        "shelf_dir": str(shelf_dir),
+        "manifest_path": str(shelf_dir / "manifest.yaml"),
+        "raw_count": len(raw_items),
+        "refined_count": len(refined_pages),
+        "archived_local_count": len(archived_local),
+    }
+
+
+def restore_shelf_file(root: Path, shelf_dir: Path, item: Dict[str, Any], force: bool) -> Tuple[Optional[Dict[str, str]], Optional[str]]:
+    source_rel = item.get("path")
+    target_rel = item.get("original_local_path")
+    if not isinstance(source_rel, str) or not isinstance(target_rel, str):
+        return None, "restore_skipped:missing_path"
+    src = shelf_dir / source_rel
+    dest = root / target_rel
+    if not src.exists() or not src.is_file():
+        return None, f"restore_missing_source:{source_rel}"
+    src_sha = sha256_file(src)
+    if dest.exists():
+        dest_sha = sha256_file(dest)
+        if dest_sha == src_sha:
+            return {"from": rel_to(src, root), "to": rel_to(dest, root), "action": "already_present"}, None
+        if not force:
+            return None, f"restore_conflict:{target_rel}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    return {"from": rel_to(src, root), "to": rel_to(dest, root), "action": "restored"}, None
+
+
+def restore_promotion_shelf(
+    root: Path,
+    shelf_id: str,
+    shelf_root: Optional[Path] = None,
+    force: bool = False,
+) -> Dict[str, Any]:
+    if shelf_root is None:
+        shelf_root = promotion_shelf_root_from_harness(root)
+    elif not shelf_root.is_absolute():
+        shelf_root = root / shelf_root
+    shelf_dir = shelf_root / shelf_id
+    manifest_path = shelf_dir / "manifest.yaml"
+    if not manifest_path.exists():
+        return {"ok": False, "errors": [f"promotion shelf manifest not found: {manifest_path}"], "warnings": []}
+    manifest = load_yaml(manifest_path)
+    restored: List[Dict[str, str]] = []
+    warnings: List[str] = []
+    errors: List[str] = []
+
+    for item in (manifest.get("raw_items") or []) + (manifest.get("refined_pages") or []):
+        if not isinstance(item, dict):
+            continue
+        record, warning = restore_shelf_file(root, shelf_dir, item, force)
+        if record:
+            restored.append(record)
+        if warning:
+            if warning.startswith("restore_conflict") or warning.startswith("restore_missing_source"):
+                errors.append(warning)
+            else:
+                warnings.append(warning)
+
+    if errors:
+        return {"ok": False, "errors": errors, "warnings": warnings, "shelf_id": shelf_id}
+
+    manifest["status"] = "restored_to_local"
+    manifest["restored_at"] = now_iso()
+    manifest["restored_files"] = restored
+    manifest_path.write_text(dump_yaml(manifest), encoding="utf-8")
+
+    archive_dir = shelf_root / "archive" / "restored" / shelf_id
+    if archive_dir.exists():
+        if not force:
+            return {"ok": False, "errors": [f"restored shelf archive already exists: {archive_dir}"], "warnings": warnings, "shelf_id": shelf_id}
+        shutil.rmtree(archive_dir)
+    archive_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(shelf_dir), str(archive_dir))
+    append_log_entry(
+        root / "llm-wiki" / "log.md",
+        f"promotion-shelf-restored | {shelf_id}",
+        [f"restored: {item['to']}" for item in restored],
+    )
+    return {
+        "ok": True,
+        "errors": [],
+        "warnings": warnings,
+        "shelf_id": shelf_id,
+        "restored_count": len(restored),
+        "archived_shelf_dir": str(archive_dir),
     }
 
 
@@ -2128,6 +2806,32 @@ def cmd_submit_promotion(args: argparse.Namespace) -> int:
     return 0 if result["ok"] else 2
 
 
+def cmd_create_promotion_shelf(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    result = create_promotion_shelf(
+        root=root,
+        package_path=Path(args.package),
+        shelf_id=args.shelf_id,
+        shelf_root=Path(args.shelf_root) if args.shelf_root else None,
+        force=args.force,
+        keep_local=args.keep_local,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result["ok"] else 2
+
+
+def cmd_restore_promotion_shelf(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    result = restore_promotion_shelf(
+        root=root,
+        shelf_id=args.shelf_id,
+        shelf_root=Path(args.shelf_root) if args.shelf_root else None,
+        force=args.force,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if result["ok"] else 2
+
+
 def cmd_capture(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     body = args.body if args.body is not None else sys.stdin.read()
@@ -2184,11 +2888,25 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("package")
     s.set_defaults(func=cmd_promotion)
 
-    s = sub.add_parser("submit-promotion", help="Stage a target-free promotion package and its raw/refined files")
+    s = sub.add_parser("submit-promotion", help="Record a target-free promotion package submission")
     s.add_argument("package")
-    s.add_argument("--output-dir", help="Submission output directory; default llm-wiki-promotion-queue/<timestamp>-<package-stem>")
+    s.add_argument("--output-dir", help="Optional copy output directory; default records submission.yaml next to the package")
     s.add_argument("--force", action="store_true", help="Overwrite an existing submission output directory")
     s.set_defaults(func=cmd_submit_promotion)
+
+    s = sub.add_parser("create-promotion-shelf", help="Copy a promotion package into the local promotion-shelf lite artifact")
+    s.add_argument("package")
+    s.add_argument("--shelf-id", help="Stable promotion shelf id; default timestamped id")
+    s.add_argument("--shelf-root", help="Promotion shelf root; default promotion-shelf or harness config")
+    s.add_argument("--keep-local", action="store_true", help="Do not archive matching local llm-wiki files after shelf copy")
+    s.add_argument("--force", action="store_true", help="Overwrite an existing shelf directory")
+    s.set_defaults(func=cmd_create_promotion_shelf)
+
+    s = sub.add_parser("restore-promotion-shelf", help="Restore a shelved promotion back to local llm-wiki and deactivate the shelf")
+    s.add_argument("shelf_id")
+    s.add_argument("--shelf-root", help="Promotion shelf root; default promotion-shelf or harness config")
+    s.add_argument("--force", action="store_true", help="Overwrite conflicting local files and existing restored shelf archive")
+    s.set_defaults(func=cmd_restore_promotion_shelf)
 
     s = sub.add_parser("capture-run", help="Write a post-run personal capture candidate")
     s.add_argument("--title", required=True)

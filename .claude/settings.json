@@ -1,0 +1,34 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/llm-wiki-core/hooks/pre-bundle-validate.sh\" \"$CLAUDE_PROJECT_DIR\"",
+            "timeout": 30,
+            "statusMessage": "Validating wiki stack config..."
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/llm-wiki-core/hooks/session-start.sh\" \"$CLAUDE_PROJECT_DIR\"",
+            "timeout": 30,
+            "statusMessage": "Loading llm-wiki-core context bundle..."
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/llm-wiki-core/hooks/user-prompt-submit-wiki-context.sh\" --agent claude --root \"$CLAUDE_PROJECT_DIR\"",
+            "timeout": 30,
+            "statusMessage": "Injecting llm-wiki-core context..."
+          }
+        ]
+      }
+    ]
+  }
+}

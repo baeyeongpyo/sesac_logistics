@@ -1,0 +1,114 @@
+<?xml version="1.0"?>
+<!--
+  Foxglove visual model derived from PRJ ARANEUM's
+  models/hiwonder_mecanum_forklift/model.sdf at 770b1a8.
+-->
+<robot name="hiwonder_mecanum_forklift">
+  <material name="chassis_dark"><color rgba="0.075 0.080 0.085 1"/></material>
+  <material name="black"><color rgba="0.025 0.027 0.030 1"/></material>
+  <material name="metal"><color rgba="0.58 0.61 0.63 1"/></material>
+  <material name="yellow"><color rgba="0.96 0.59 0.020 1"/></material>
+  <material name="fork"><color rgba="0.17 0.18 0.19 1"/></material>
+  <material name="beacon"><color rgba="1.00 0.025 0.018 0.92"/></material>
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 -0.014" rpy="0 0 0"/>
+      <geometry><mesh filename="package://hiwonder_mecanum_forklift/meshes/mentorpi/base_link.STL"/></geometry>
+      <material name="chassis_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.022" rpy="0 0 0"/>
+      <geometry><box size="0.22 0.13 0.075"/></geometry>
+      <material name="chassis_dark"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.026 -0.006 0.058" rpy="0 0 0"/>
+      <geometry><box size="0.085 0.056 0.006"/></geometry>
+      <material name="yellow"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.030 0.004 0.064" rpy="0 0 0"/>
+      <geometry><box size="0.036 0.032 0.010"/></geometry>
+      <material name="metal"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.012242 0 0.078501" rpy="0 0 0"/>
+      <geometry><mesh filename="package://hiwonder_mecanum_forklift/meshes/mentorpi/lidar_Link.STL"/></geometry>
+      <material name="chassis_dark"/>
+    </visual>
+  </link>
+
+  <link name="front_left_wheel">
+    <visual><geometry><cylinder radius="0.0305" length="0.025"/></geometry><material name="black"/></visual>
+    <visual><geometry><cylinder radius="0.0185" length="0.030"/></geometry><material name="metal"/></visual>
+  </link>
+  <joint name="front_left_wheel_joint" type="continuous">
+    <parent link="base_link"/><child link="front_left_wheel"/>
+    <origin xyz="0.06225 0.071 0.0425" rpy="-1.570796 0 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <link name="rear_left_wheel">
+    <visual><geometry><cylinder radius="0.0305" length="0.025"/></geometry><material name="black"/></visual>
+    <visual><geometry><cylinder radius="0.0185" length="0.030"/></geometry><material name="metal"/></visual>
+  </link>
+  <joint name="rear_left_wheel_joint" type="continuous">
+    <parent link="base_link"/><child link="rear_left_wheel"/>
+    <origin xyz="-0.07225 0.071 0.0425" rpy="-1.570796 0 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <link name="front_right_wheel">
+    <visual><geometry><cylinder radius="0.0305" length="0.025"/></geometry><material name="black"/></visual>
+    <visual><geometry><cylinder radius="0.0185" length="0.030"/></geometry><material name="metal"/></visual>
+  </link>
+  <joint name="front_right_wheel_joint" type="continuous">
+    <parent link="base_link"/><child link="front_right_wheel"/>
+    <origin xyz="0.06225 -0.071 0.0425" rpy="-1.570796 0 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <link name="rear_right_wheel">
+    <visual><geometry><cylinder radius="0.0305" length="0.025"/></geometry><material name="black"/></visual>
+    <visual><geometry><cylinder radius="0.0185" length="0.030"/></geometry><material name="metal"/></visual>
+  </link>
+  <joint name="rear_right_wheel_joint" type="continuous">
+    <parent link="base_link"/><child link="rear_right_wheel"/>
+    <origin xyz="-0.07225 -0.071 0.0425" rpy="-1.570796 0 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <link name="lift_mast">
+    <visual><origin xyz="-0.020 0 -0.125" rpy="0 0 0"/><geometry><box size="0.04 0.11 0.020"/></geometry><material name="chassis_dark"/></visual>
+    <visual><origin xyz="0 0.052 0" rpy="0 0 0"/><geometry><box size="0.018 0.014 0.28"/></geometry><material name="chassis_dark"/></visual>
+    <visual><origin xyz="0 -0.052 0" rpy="0 0 0"/><geometry><box size="0.018 0.014 0.28"/></geometry><material name="chassis_dark"/></visual>
+    <visual><origin xyz="0 0 0.132" rpy="0 0 0"/><geometry><box size="0.020 0.120 0.016"/></geometry><material name="chassis_dark"/></visual>
+    <visual><origin xyz="-0.012 0.041 -0.105" rpy="0 0 0"/><geometry><box size="0.038 0.026 0.038"/></geometry><material name="yellow"/></visual>
+    <visual><origin xyz="-0.012 -0.041 -0.105" rpy="0 0 0"/><geometry><box size="0.038 0.026 0.038"/></geometry><material name="yellow"/></visual>
+    <visual><origin xyz="-0.004 0 0.152" rpy="0 0 0"/><geometry><cylinder radius="0.0075" length="0.012"/></geometry><material name="beacon"/></visual>
+    <visual>
+      <origin xyz="0.035 0 0.100" rpy="0 0.610865 0"/>
+      <geometry><mesh filename="package://hiwonder_mecanum_forklift/meshes/mentorpi/cam_Link.STL"/></geometry>
+      <material name="metal"/>
+    </visual>
+  </link>
+  <joint name="mast_fixed" type="fixed">
+    <parent link="base_link"/><child link="lift_mast"/>
+    <origin xyz="0.115 0 0.20" rpy="0 0 0"/>
+  </joint>
+
+  <link name="fork_carriage">
+    <visual><geometry><box size="0.018 0.112 0.050"/></geometry><material name="chassis_dark"/></visual>
+    <visual><origin xyz="-0.001 0.052 0.052" rpy="0 0 0"/><geometry><box size="0.012 0.010 0.105"/></geometry><material name="chassis_dark"/></visual>
+    <visual><origin xyz="-0.001 -0.052 0.052" rpy="0 0 0"/><geometry><box size="0.012 0.010 0.105"/></geometry><material name="chassis_dark"/></visual>
+    <visual><origin xyz="0.070 0.0282 -0.022" rpy="0 0 0"/><geometry><box size="0.14 0.012 0.010"/></geometry><material name="fork"/></visual>
+    <visual><origin xyz="0.070 -0.0282 -0.022" rpy="0 0 0"/><geometry><box size="0.14 0.012 0.010"/></geometry><material name="fork"/></visual>
+  </link>
+  <joint name="lift_joint" type="prismatic">
+    <parent link="lift_mast"/><child link="fork_carriage"/>
+    <origin xyz="0.030 0 -0.155" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="0" upper="0.12" effort="120" velocity="0.12"/>
+  </joint>
+</robot>

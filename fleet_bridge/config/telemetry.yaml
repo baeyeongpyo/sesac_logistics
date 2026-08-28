@@ -1,0 +1,849 @@
+version: 1
+topics:
+  # config/tmp/vehicle_node_topic의 source/type을 그대로 유지하고 target에 차량 ID만 접두사로 붙인다.
+  - id: amcl_transition_event
+    enabled: true
+    source: "/amcl/transition_event"
+    target: "/{robot}/amcl/transition_event"
+    type: lifecycle_msgs/msg/TransitionEvent
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: amcl_pose
+    enabled: true
+    source: "/amcl_pose"
+    target: "/{robot}/amcl_pose"
+    type: geometry_msgs/msg/PoseWithCovarianceStamped
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: ascamera_depth0_camera_info
+    enabled: true
+    source: "/ascamera/camera_publisher/depth0/camera_info"
+    target: "/{robot}/ascamera/camera_publisher/depth0/camera_info"
+    type: sensor_msgs/msg/CameraInfo
+    paired_with: ascamera_depth0_image_raw
+    replay_rate_hz: 1.0
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 1
+  - id: ascamera_depth0_image_raw
+    enabled: true
+    source: "/ascamera/camera_publisher/depth0/image_raw"
+    target: "/{robot}/ascamera/camera_publisher/depth0/image_raw"
+    type: sensor_msgs/msg/Image
+    paired_with: ascamera_depth0_camera_info
+    worker_rate:
+      max_rate_hz: 5.0
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: ascamera_depth0_points
+    enabled: true
+    source: "/ascamera/camera_publisher/depth0/points"
+    target: "/{robot}/ascamera/camera_publisher/depth0/points"
+    type: sensor_msgs/msg/PointCloud2
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: ascamera_rgb0_camera_info
+    enabled: true
+    source: "/ascamera/camera_publisher/rgb0/camera_info"
+    target: "/{robot}/ascamera/camera_publisher/rgb0/camera_info"
+    type: sensor_msgs/msg/CameraInfo
+    paired_with: ascamera_rgb0_image
+    replay_rate_hz: 1.0
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 1
+  - id: ascamera_rgb0_image
+    enabled: true
+    source: "/ascamera/camera_publisher/rgb0/image"
+    target: "/{robot}/ascamera/camera_publisher/rgb0/image"
+    type: sensor_msgs/msg/Image
+    paired_with: ascamera_rgb0_camera_info
+    worker_rate:
+      max_rate_hz: 5.0
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: behavior_server_transition_event
+    enabled: true
+    source: "/behavior_server/transition_event"
+    target: "/{robot}/behavior_server/transition_event"
+    type: lifecycle_msgs/msg/TransitionEvent
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: behavior_tree_log
+    enabled: true
+    source: "/behavior_tree_log"
+    target: "/{robot}/behavior_tree_log"
+    type: nav2_msgs/msg/BehaviorTreeLog
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: bond
+    enabled: true
+    source: "/bond"
+    target: "/{robot}/bond"
+    type: bond/msg/Status
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: bt_navigator_transition_event
+    enabled: true
+    source: "/bt_navigator/transition_event"
+    target: "/{robot}/bt_navigator/transition_event"
+    type: lifecycle_msgs/msg/TransitionEvent
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: cmd_vel
+    enabled: true
+    source: "/cmd_vel"
+    target: "/{robot}/cmd_vel"
+    type: geometry_msgs/msg/Twist
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: cmd_vel_nav
+    enabled: true
+    source: "/cmd_vel_nav"
+    target: "/{robot}/cmd_vel_nav"
+    type: geometry_msgs/msg/Twist
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: cmd_vel_teleop
+    enabled: true
+    source: "/cmd_vel_teleop"
+    target: "/{robot}/cmd_vel_teleop"
+    type: geometry_msgs/msg/Twist
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: controller_cmd_vel
+    enabled: true
+    source: "/controller/cmd_vel"
+    target: "/{robot}/controller/cmd_vel"
+    type: geometry_msgs/msg/Twist
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: controller_server_transition_event
+    enabled: true
+    source: "/controller_server/transition_event"
+    target: "/{robot}/controller_server/transition_event"
+    type: lifecycle_msgs/msg/TransitionEvent
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: cost_cloud
+    enabled: true
+    source: "/cost_cloud"
+    target: "/{robot}/cost_cloud"
+    type: sensor_msgs/msg/PointCloud2
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: diagnostics
+    enabled: true
+    source: "/diagnostics"
+    target: "/{robot}/diagnostics"
+    type: diagnostic_msgs/msg/DiagnosticArray
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: evaluation
+    enabled: true
+    source: "/evaluation"
+    target: "/{robot}/evaluation"
+    type: dwb_msgs/msg/LocalPlanEvaluation
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: global_costmap_costmap
+    enabled: true
+    source: "/global_costmap/costmap"
+    target: "/{robot}/global_costmap/costmap"
+    type: nav_msgs/msg/OccupancyGrid
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 1
+  - id: global_costmap_costmap_raw
+    enabled: true
+    source: "/global_costmap/costmap_raw"
+    target: "/{robot}/global_costmap/costmap_raw"
+    type: nav2_msgs/msg/Costmap
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 1
+  - id: global_costmap_costmap_updates
+    enabled: true
+    source: "/global_costmap/costmap_updates"
+    target: "/{robot}/global_costmap/costmap_updates"
+    type: map_msgs/msg/OccupancyGridUpdate
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: global_costmap_footprint
+    enabled: true
+    source: "/global_costmap/footprint"
+    target: "/{robot}/global_costmap/footprint"
+    type: geometry_msgs/msg/Polygon
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: global_costmap_transition_event
+    enabled: true
+    source: "/global_costmap/global_costmap/transition_event"
+    target: "/{robot}/global_costmap/global_costmap/transition_event"
+    type: lifecycle_msgs/msg/TransitionEvent
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: global_costmap_published_footprint
+    enabled: true
+    source: "/global_costmap/published_footprint"
+    target: "/{robot}/global_costmap/published_footprint"
+    type: geometry_msgs/msg/PolygonStamped
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: goal_pose
+    enabled: true
+    source: "/goal_pose"
+    target: "/{robot}/goal_pose"
+    type: geometry_msgs/msg/PoseStamped
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: imu
+    enabled: true
+    source: "/imu"
+    target: "/{robot}/imu"
+    type: sensor_msgs/msg/Imu
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: imu_rpy_filtered
+    enabled: true
+    source: "/imu/rpy/filtered"
+    target: "/{robot}/imu/rpy/filtered"
+    type: geometry_msgs/msg/Vector3Stamped
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: imu_steady_state
+    enabled: true
+    source: "/imu/steady_state"
+    target: "/{robot}/imu/steady_state"
+    type: std_msgs/msg/Bool
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: imu_corrected
+    enabled: true
+    source: "/imu_corrected"
+    target: "/{robot}/imu_corrected"
+    type: sensor_msgs/msg/Imu
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: initialpose
+    enabled: true
+    source: "/initialpose"
+    target: "/{robot}/initialpose"
+    type: geometry_msgs/msg/PoseWithCovarianceStamped
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: joint_states
+    enabled: true
+    source: "/joint_states"
+    target: "/{robot}/joint_states"
+    type: sensor_msgs/msg/JointState
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: joy
+    enabled: true
+    source: "/joy"
+    target: "/{robot}/joy"
+    type: sensor_msgs/msg/Joy
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: joy_set_feedback
+    enabled: true
+    source: "/joy/set_feedback"
+    target: "/{robot}/joy/set_feedback"
+    type: sensor_msgs/msg/JoyFeedback
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: local_costmap_clearing_endpoints
+    enabled: true
+    source: "/local_costmap/clearing_endpoints"
+    target: "/{robot}/local_costmap/clearing_endpoints"
+    type: sensor_msgs/msg/PointCloud2
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: local_costmap_costmap
+    enabled: true
+    source: "/local_costmap/costmap"
+    target: "/{robot}/local_costmap/costmap"
+    type: nav_msgs/msg/OccupancyGrid
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 1
+  - id: local_costmap_costmap_raw
+    enabled: true
+    source: "/local_costmap/costmap_raw"
+    target: "/{robot}/local_costmap/costmap_raw"
+    type: nav2_msgs/msg/Costmap
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 1
+  - id: local_costmap_costmap_updates
+    enabled: true
+    source: "/local_costmap/costmap_updates"
+    target: "/{robot}/local_costmap/costmap_updates"
+    type: map_msgs/msg/OccupancyGridUpdate
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: local_costmap_footprint
+    enabled: true
+    source: "/local_costmap/footprint"
+    target: "/{robot}/local_costmap/footprint"
+    type: geometry_msgs/msg/Polygon
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: local_costmap_transition_event
+    enabled: true
+    source: "/local_costmap/local_costmap/transition_event"
+    target: "/{robot}/local_costmap/local_costmap/transition_event"
+    type: lifecycle_msgs/msg/TransitionEvent
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: local_costmap_published_footprint
+    enabled: true
+    source: "/local_costmap/published_footprint"
+    target: "/{robot}/local_costmap/published_footprint"
+    type: geometry_msgs/msg/PolygonStamped
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: local_costmap_voxel_grid
+    enabled: true
+    source: "/local_costmap/voxel_grid"
+    target: "/{robot}/local_costmap/voxel_grid"
+    type: nav2_msgs/msg/VoxelGrid
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: local_plan
+    enabled: true
+    source: "/local_plan"
+    target: "/{robot}/local_plan"
+    type: nav_msgs/msg/Path
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: map
+    enabled: true
+    source: "/map"
+    target: "/{robot}/map"
+    type: nav_msgs/msg/OccupancyGrid
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 1
+  - id: map_server_transition_event
+    enabled: true
+    source: "/map_server/transition_event"
+    target: "/{robot}/map_server/transition_event"
+    type: lifecycle_msgs/msg/TransitionEvent
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: marker
+    enabled: true
+    source: "/marker"
+    target: "/{robot}/marker"
+    type: visualization_msgs/msg/MarkerArray
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: odom
+    enabled: true
+    source: "/odom"
+    target: "/{robot}/odom"
+    type: nav_msgs/msg/Odometry
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: odom_raw
+    enabled: true
+    source: "/odom_raw"
+    target: "/{robot}/odom_raw"
+    type: nav_msgs/msg/Odometry
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: odom_rf2o
+    enabled: true
+    source: "/odom_rf2o"
+    target: "/{robot}/odom_rf2o"
+    type: nav_msgs/msg/Odometry
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: parameter_events
+    enabled: true
+    source: "/parameter_events"
+    target: "/{robot}/parameter_events"
+    type: rcl_interfaces/msg/ParameterEvent
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 100
+  - id: particle_cloud
+    enabled: true
+    source: "/particle_cloud"
+    target: "/{robot}/particle_cloud"
+    type: nav2_msgs/msg/ParticleCloud
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: plan
+    enabled: true
+    source: "/plan"
+    target: "/{robot}/plan"
+    type: nav_msgs/msg/Path
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: plan_smoothed
+    enabled: true
+    source: "/plan_smoothed"
+    target: "/{robot}/plan_smoothed"
+    type: nav_msgs/msg/Path
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: planner_server_transition_event
+    enabled: true
+    source: "/planner_server/transition_event"
+    target: "/{robot}/planner_server/transition_event"
+    type: lifecycle_msgs/msg/TransitionEvent
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: preempt_teleop
+    enabled: true
+    source: "/preempt_teleop"
+    target: "/{robot}/preempt_teleop"
+    type: std_msgs/msg/Empty
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: received_global_plan
+    enabled: true
+    source: "/received_global_plan"
+    target: "/{robot}/received_global_plan"
+    type: nav_msgs/msg/Path
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: robot_description
+    enabled: true
+    source: "/robot_description"
+    target: "/{robot}/robot_description"
+    type: std_msgs/msg/String
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 1
+  - id: ros_robot_controller_battery
+    enabled: true
+    source: "/ros_robot_controller/battery"
+    target: "/{robot}/ros_robot_controller/battery"
+    type: std_msgs/msg/UInt16
+    worker_rate:
+      max_rate_hz: 0.2
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: ros_robot_controller_button
+    enabled: true
+    source: "/ros_robot_controller/button"
+    target: "/{robot}/ros_robot_controller/button"
+    type: ros_robot_controller_msgs/msg/ButtonState
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: ros_robot_controller_imu_raw
+    enabled: true
+    source: "/ros_robot_controller/imu_raw"
+    target: "/{robot}/ros_robot_controller/imu_raw"
+    type: sensor_msgs/msg/Imu
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: ros_robot_controller_joy
+    enabled: true
+    source: "/ros_robot_controller/joy"
+    target: "/{robot}/ros_robot_controller/joy"
+    type: sensor_msgs/msg/Joy
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: ros_robot_controller_pwm_servo_set_state
+    enabled: true
+    source: "/ros_robot_controller/pwm_servo/set_state"
+    target: "/{robot}/ros_robot_controller/pwm_servo/set_state"
+    type: ros_robot_controller_msgs/msg/SetPWMServoState
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: ros_robot_controller_sbus
+    enabled: true
+    source: "/ros_robot_controller/sbus"
+    target: "/{robot}/ros_robot_controller/sbus"
+    type: ros_robot_controller_msgs/msg/Sbus
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: ros_robot_controller_set_buzzer
+    enabled: true
+    source: "/ros_robot_controller/set_buzzer"
+    target: "/{robot}/ros_robot_controller/set_buzzer"
+    type: ros_robot_controller_msgs/msg/BuzzerState
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: ros_robot_controller_set_motor
+    enabled: true
+    source: "/ros_robot_controller/set_motor"
+    target: "/{robot}/ros_robot_controller/set_motor"
+    type: ros_robot_controller_msgs/msg/MotorsState
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: rosout
+    enabled: true
+    source: "/rosout"
+    target: "/{robot}/rosout"
+    type: rcl_interfaces/msg/Log
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 100
+  - id: scan_filtered
+    enabled: true
+    source: "/scan_filtered"
+    target: "/{robot}/scan_filtered"
+    type: sensor_msgs/msg/LaserScan
+    worker_rate:
+      max_rate_hz: 2.0
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: set_odom
+    enabled: true
+    source: "/set_odom"
+    target: "/{robot}/set_odom"
+    type: geometry_msgs/msg/Pose2D
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: set_pose
+    enabled: true
+    source: "/set_pose"
+    target: "/{robot}/set_pose"
+    type: geometry_msgs/msg/PoseWithCovarianceStamped
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: smoother_server_transition_event
+    enabled: true
+    source: "/smoother_server/transition_event"
+    target: "/{robot}/smoother_server/transition_event"
+    type: lifecycle_msgs/msg/TransitionEvent
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: speed_limit
+    enabled: true
+    source: "/speed_limit"
+    target: "/{robot}/speed_limit"
+    type: nav2_msgs/msg/SpeedLimit
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: tf
+    enabled: true
+    source: "/tf"
+    target: "/{robot}/tf"
+    type: tf2_msgs/msg/TFMessage
+    worker_rate: {}
+    qos:
+      reliability: best_effort
+      durability: volatile
+      history: keep_last
+      depth: 1
+  - id: tf_static
+    enabled: true
+    source: "/tf_static"
+    target: "/{robot}/tf_static"
+    type: tf2_msgs/msg/TFMessage
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 1
+  - id: transformed_global_plan
+    enabled: true
+    source: "/transformed_global_plan"
+    target: "/{robot}/transformed_global_plan"
+    type: nav_msgs/msg/Path
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: velocity_smoother_transition_event
+    enabled: true
+    source: "/velocity_smoother/transition_event"
+    target: "/{robot}/velocity_smoother/transition_event"
+    type: lifecycle_msgs/msg/TransitionEvent
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+  - id: waypoint_follower_transition_event
+    enabled: true
+    source: "/waypoint_follower/transition_event"
+    target: "/{robot}/waypoint_follower/transition_event"
+    type: lifecycle_msgs/msg/TransitionEvent
+    worker_rate: {}
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10

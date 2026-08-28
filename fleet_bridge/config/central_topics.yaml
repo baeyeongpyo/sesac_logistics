@@ -1,0 +1,12 @@
+version: 1
+topics:
+  - id: controller_map
+    enabled: true
+    source: /controller_server/map
+    target: /map
+    type: nav_msgs/msg/OccupancyGrid
+    qos:
+      reliability: reliable
+      durability: transient_local
+      history: keep_last
+      depth: 1

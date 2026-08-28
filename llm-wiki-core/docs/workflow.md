@@ -146,8 +146,8 @@ promotion_package:
   reviewer_required: true
 ```
 
-`promotion_package`에는 target artifact를 적지 않는다. submit 단계도 target artifact를 알지 않고, queue 처리자가 별도 프로세스에서 외부 artifact wiki로 반영한다.
-`raw_transfer_policy: raw_copy`이면 `raw_items`가 필수이며 raw 파일이 queue에 복사된다. `none`, `excerpt`, `source_vault_ref`이면 raw 파일 복사본 없이 refined page만 staging될 수 있고, raw 근거는 policy에 맞게 evidence digest, excerpt, 외부 source reference로 설명한다.
+`promotion_package`에는 target artifact를 적지 않는다. submit 단계도 target artifact를 알지 않고, 검토/처리자가 별도 프로세스에서 외부 artifact wiki로 반영한다.
+`raw_transfer_policy: raw_copy`이면 `raw_items`가 필수이며 raw 파일이 package의 `files/raw/**`에 포함된다. `none`, `excerpt`, `source_vault_ref`이면 raw 파일 복사본 없이 refined page만 제출될 수 있고, raw 근거는 policy에 맞게 evidence digest, excerpt, 외부 source reference로 설명한다.
 
 검증한다.
 
@@ -161,9 +161,52 @@ hook으로도 같은 검증을 실행할 수 있다.
 llm-wiki-core/hooks/promotion-submit-validate.sh promotion-package.yaml
 ```
 
-## 5. submit
+## 5. promotion shelf 생성
 
-검증이 통과한 package를 `llm-wiki-promotion-queue/` 아래 review queue에 raw/refined 파일과 함께 staging한다. submit은 현재 repo의 `wiki_stack.yaml`이나 `llm-wiki/`를 읽지 않고, promotion package 폴더 안의 `files/**`만 검증한다.
+promotion package가 검증되면 `submit-promotion`이 local runtime용 lite artifact인 `promotion-shelf/<shelf-id>/`를 자동 생성한다. 수동으로 먼저 만들거나 복구 테스트를 할 때는 `create-promotion-shelf`를 직접 실행할 수 있다.
+
+```bash
+llm-wiki-core/scripts/llm-wiki-core --root . create-promotion-shelf promotion-package.yaml \
+  --shelf-id 20260708-example
+```
+
+기본 동작:
+
+```text
+promotion-shelf/<shelf-id>/
+  manifest.yaml
+  index.md
+  log.md
+  raw/...
+  sources/...
+
+llm-wiki/archive/shelved/<shelf-id>/
+  raw/...
+  sources/...
+```
+
+정제 page의 raw 참조는 shelf/artifact root 기준 상대 locator를 사용한다.
+
+```yaml
+sources:
+  - raw/example_source.md
+```
+
+검증은 locator만으로 하지 않고 `manifest.yaml`과 promotion package의 `sha256`으로 한다. 다른 local page가 같은 raw를 아직 참조하면 해당 raw는 `llm-wiki/raw/**`에 유지되고, command output의 `warnings`에 `raw_retained`가 기록된다.
+
+raw가 shelf나 local runtime에서 resolve되지 않아도 정제 page가 자동으로 제외되지는 않는다. 정제 page는 이미 curated knowledge이므로 `status`, `confidence`, review 상태에 따라 사용하고, raw 부재는 lineage/audit 제한으로 취급한다. 보안/개인정보 때문에 `none`, `excerpt`, `source_vault_ref`를 선택한 promotion은 정상 경로다.
+
+복구가 필요하면 shelf manifest를 기준으로 local wiki에 되돌린다.
+
+```bash
+llm-wiki-core/scripts/llm-wiki-core --root . restore-promotion-shelf 20260708-example
+```
+
+복구 후 shelf는 `promotion-shelf/archive/restored/<shelf-id>/`로 이동하여 active context에서 제외된다.
+
+## 6. submit
+
+검증이 통과한 package는 timestamped review queue로 복사된다. `submit-promotion`은 promotion package 폴더 안의 `files/**`를 검증한 뒤 `llm-wiki-promotion-queue/<shelf-id>/`에 `submission.yaml`을 기록하고, 같은 ID의 `promotion-shelf/<shelf-id>/`를 생성한다.
 
 ```bash
 llm-wiki-core/scripts/llm-wiki-core --root . submit-promotion promotion-package.yaml
@@ -173,26 +216,37 @@ llm-wiki-core/scripts/llm-wiki-core --root . submit-promotion promotion-package.
 
 ```text
 llm-wiki-promotion-queue/
-  20260708-153000-promotion-package/
+  20260708-153000-promotion/
     promotion-package.yaml
     submission.yaml
     files/
       raw/example_source.md
       sources/example_source_summary.md
+promotion-shelf/
+  20260708-153000-promotion/
+    manifest.yaml
+    raw/example_source.md
+    sources/example_source_summary.md
+llm-wiki/archive/shelved/
+  20260708-153000-promotion/
+    raw/example_source.md
+    sources/example_source_summary.md
 ```
 
-queue에 복사된 `promotion-package.yaml`에는 `promotion_package.submitted_at`이 자동으로 추가되어 언제 올린 package인지 확인할 수 있다. 같은 시각은 `submission.yaml`의 `submitted_at`에도 기록된다.
+`promotion-shelf/`와 `llm-wiki/archive/shelved/`는 local LLM runtime 상태이므로 Git에 올리지 않는다. 공유/review 대상은 `llm-wiki-promotion-queue/<shelf-id>/`다.
+
+원본 `promotion-package.yaml`은 submit 과정에서 변형하지 않는다. 제출 시각은 review queue에 복사된 package와 `submission.yaml`에 기록된다.
 
 커밋 예시:
 
 ```bash
-git add llm-wiki-promotion-queue/20260708-153000-promotion-package
+git add llm-wiki-promotion-queue/20260708-153000-promotion
 git commit -m "docs: submit example source summary promotion"
 ```
 
-프로젝트에서 별도 incoming queue 디렉터리를 쓰면 그 경로에 둔다.
+프로젝트에서 별도 incoming 디렉터리를 쓰면 처음부터 해당 디렉터리에 timestamped promotion package를 만든다. `submit-promotion --output-dir <path>`는 호환용 copy output이 필요할 때만 사용한다.
 
-## 6. promotion review 후 반영
+## 7. promotion review 후 반영
 
 reviewer가 package를 승인하면 target wiki page를 생성하거나 수정한다.
 
@@ -211,7 +265,7 @@ llm-wiki-core/scripts/llm-wiki-core --root . validate
 llm-wiki-core/scripts/llm-wiki-core --root . get-context-bundle
 ```
 
-## 7. folder artifact 만들기
+## 8. folder artifact 만들기
 
 기본 artifact는 기존 wiki 폴더 구조를 그대로 사용하는 folder artifact다.
 압축 해제 없이 읽을 수 있고, Git diff/review가 쉽다.
@@ -257,6 +311,7 @@ mutable_source_wiki_policy:
       dependency_type: artifact
       effective_scope: team
       authority_level: policy
+    - source_binding_id: local-promotion-shelf
     - source_binding_id: local-mutable-wiki
 ```
 
@@ -296,6 +351,7 @@ mutable_source_wiki_policy:
       dependency_type: artifact
       effective_scope: team
       authority_level: policy
+    - source_binding_id: local-promotion-shelf
     - source_binding_id: local-mutable-wiki
 ```
 
@@ -335,7 +391,7 @@ llm-wiki-core/scripts/llm-wiki-core --root . get-lineage <page-path>
 # promotion package 검증
 llm-wiki-core/scripts/llm-wiki-core validate-promotion <package.yaml>
 
-# promotion package submit staging
+# promotion package submit manifest
 llm-wiki-core/scripts/llm-wiki-core --root . submit-promotion <package.yaml>
 
 # .wikipkg 생성

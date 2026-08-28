@@ -1,0 +1,15 @@
+server:
+  domain_id: 225
+  foxglove_port: 8765
+  command_api:
+    host: 127.0.0.1
+    port: 8080
+vehicles:
+  - id: robot_1
+    foxglove_uri: ${ROBOT_1_FOXGLOVE_URI}
+    command_api_url: ${ROBOT_1_COMMAND_API_URL}
+    enabled: true
+  - id: robot_2
+    foxglove_uri: ${ROBOT_2_FOXGLOVE_URI}
+    command_api_url: ${ROBOT_2_COMMAND_API_URL}
+    enabled: true
