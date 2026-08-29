@@ -2,14 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import {
+import '../model.mjs';
+
+const {
   computeNavigation,
   createOccupancyMap,
   gridToWorld,
   parseMapYaml,
   parsePgm,
   worldToGrid,
-} from '../model.mjs';
+} = globalThis.Nav2PathModel;
 
 function createRouteTestMap(blockedCells = []) {
   const width = 41;

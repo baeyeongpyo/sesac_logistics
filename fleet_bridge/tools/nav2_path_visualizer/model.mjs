@@ -1,6 +1,6 @@
 const decoder = new TextDecoder();
 
-export const NAVIGATION_CONFIG = Object.freeze({
+const NAVIGATION_CONFIG = Object.freeze({
   robotRadius: 0.16,
   inflationRadius: 0.28,
   localWindowSize: 3.0,
@@ -73,7 +73,7 @@ function consumeP5Separator(bytes, offset) {
 }
 
 /** Parse P2 or P5 Portable Graymap bytes without a browser or ROS dependency. */
-export function parsePgm(input) {
+function parsePgm(input) {
   const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
   const magic = nextHeaderToken(bytes, 0);
   if (magic.value !== 'P2' && magic.value !== 'P5') {
@@ -128,7 +128,7 @@ function yamlNumber(text, key, fallback) {
 }
 
 /** Read only the map_server YAML keys this static visualizer needs. */
-export function parseMapYaml(text) {
+function parseMapYaml(text) {
   if (typeof text !== 'string') {
     throw new Error('지도 YAML은 text여야 합니다.');
   }
@@ -151,7 +151,7 @@ export function parseMapYaml(text) {
 }
 
 /** Convert PGM intensity into map_server-compatible occupancy states. */
-export function createOccupancyMap(pgm, metadata) {
+function createOccupancyMap(pgm, metadata) {
   if (!pgm || !metadata || pgm.pixels.length !== pgm.width * pgm.height) {
     throw new Error('PGM과 지도 metadata가 일치하지 않습니다.');
   }
@@ -170,20 +170,20 @@ export function createOccupancyMap(pgm, metadata) {
   };
 }
 
-export function worldToGrid(map, pose) {
+function worldToGrid(map, pose) {
   const column = Math.floor((pose.x - map.origin[0]) / map.resolution);
   const fromBottom = Math.floor((pose.y - map.origin[1]) / map.resolution);
   return { column, row: map.height - 1 - fromBottom };
 }
 
-export function gridToWorld(map, cell) {
+function gridToWorld(map, cell) {
   return {
     x: map.origin[0] + ((cell.column + 0.5) * map.resolution),
     y: map.origin[1] + ((map.height - cell.row - 0.5) * map.resolution),
   };
 }
 
-export function createExampleMap() {
+function createExampleMap() {
   const width = 20;
   const height = 14;
   const pixels = Array.from({ length: width * height }, (_, index) => {
@@ -463,7 +463,7 @@ function inputError(code, message) {
  * Return a dependency-free NavFn/DWB-inspired approximation.
  * It intentionally mirrors the three plan layers, not Nav2's C++ implementation.
  */
-export function computeNavigation({ map, start, goal, config = {} }) {
+function computeNavigation({ map, start, goal, config = {} }) {
   if (!map || !Array.isArray(map.cells) || !hasFinitePose(start) || !hasFinitePose(goal)) {
     return inputError('INVALID_INPUT', '지도와 시작·목표 위치를 확인하세요.');
   }
@@ -527,3 +527,15 @@ export function computeNavigation({ map, start, goal, config = {} }) {
     },
   };
 }
+
+// Classic scripts can be loaded from file://, unlike ES modules in Chromium.
+globalThis.Nav2PathModel = Object.freeze({
+  NAVIGATION_CONFIG,
+  parsePgm,
+  parseMapYaml,
+  createOccupancyMap,
+  worldToGrid,
+  gridToWorld,
+  createExampleMap,
+  computeNavigation,
+});

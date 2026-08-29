@@ -4,6 +4,12 @@
 
 모든 계산과 PGM/YAML 파일 읽기는 브라우저 안에서 실행됩니다. 서버 실행, 패키지 설치, 네트워크 연결이 필요 없습니다.
 
+`index.html`에는 실행용 JavaScript가 인라인으로 포함되어 있어 Chrome에서도 `file://`로 바로 열 수 있습니다. 소스인 `model.mjs` 또는 `app.mjs`를 수정한 개발자는 배포 전에 아래 명령으로 `index.html` 번들을 갱신합니다. 이 명령은 최종 사용자의 실행 과정에는 필요 없습니다.
+
+```bash
+node fleet_bridge/tools/nav2_path_visualizer/build-standalone.mjs
+```
+
 ## 실행
 
 Finder 또는 브라우저에서 [index.html](./index.html)을 엽니다.

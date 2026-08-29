@@ -1,11 +1,17 @@
-import {
+const {
   computeNavigation,
   createExampleMap,
   createOccupancyMap,
   parseMapYaml,
   parsePgm,
   worldToGrid,
-} from './model.mjs';
+} = globalThis.Nav2PathModel ?? {};
+
+if (!computeNavigation) {
+  throw new Error('Nav2PathModel 초기화에 실패했습니다.');
+}
+
+document.documentElement.dataset.nav2PathRuntime = 'loading';
 
 const elements = {
   pgmFile: document.querySelector('#pgm-file'),
@@ -273,3 +279,4 @@ window.addEventListener('resize', renderCanvas);
 
 renderMetrics();
 renderCanvas();
+document.documentElement.dataset.nav2PathRuntime = 'ready';
