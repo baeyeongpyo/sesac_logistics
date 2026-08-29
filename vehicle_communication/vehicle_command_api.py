@@ -5,6 +5,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 import math
+import signal
 import threading
 import time
 import uuid
@@ -848,14 +849,23 @@ def run_server(arguments, adapter_factory=None, http_server_factory=create_http_
         vehicle_status=vehicle_status,
     )
     http_server = http_server_factory(arguments.host, arguments.port, service)
+    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+
+    def handle_sigterm(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, handle_sigterm)
     try:
         http_server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        service.close()
-        http_server.server_close()
-        adapter.close()
+        try:
+            service.close()
+            http_server.server_close()
+            adapter.close()
+        finally:
+            signal.signal(signal.SIGTERM, previous_sigterm_handler)
 
 
 def main(argv=None):

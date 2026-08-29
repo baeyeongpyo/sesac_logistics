@@ -1,4 +1,4 @@
-# Vehicle Command API 운영 가이드
+# Vehicle Communication 운영 가이드
 
 ## 목적과 실행 방식
 
@@ -20,25 +20,55 @@ API를 검증하기 위해 실행하지 않는다.
 
 ## 실행
 
-차량에서 ROS 2 환경을 로드한 뒤 이 디렉터리의 스크립트를 직접 실행한다.
+차량에는 이 디렉터리 전체를 `/opt/vehicle_communication`으로 배포한다. 차량별 설정은
+`runtime.env`에서만 바꾼다.
+
+```dotenv
+VEHICLE_ROBOT_ID=robot_2
+VEHICLE_COMMAND_API_PORT=8082
+FOXGLOVE_PORT=8765
+```
+
+실행 스크립트는 ROS 2 setup 파일을 직접 `source`하지 않는다. 실행 전 사용하는
+셸에서 `.zshrc`를 통해 ROS 2 환경을 준비해야 한다.
 
 ```bash
-cd /opt/vehicle_command_api
-source /opt/ros/humble/setup.zsh
+cd /opt/vehicle_communication
+chmod +x tools/*.sh
 
-python3 vehicle_command_api.py \
-  --host 0.0.0.0 \
-  --port 8082 \
-  --robot-id robot_2 \
-  --cmd-vel-topic /cmd_vel \
-  --action-name /navigate_to_pose
+# 각각 독립 실행 및 정지
+./tools/foxglove_start.sh
+./tools/foxglove_stop.sh
+./tools/command_api_start.sh
+./tools/command_api_stop.sh
+
+# 두 서비스를 함께 실행 및 정지
+./tools/vehicle_communication_start.sh
+./tools/vehicle_communication_stop.sh
+```
+
+각 start 스크립트는 `ps` 명령으로 자기 서비스의 실제 명령행을 조회한다. Foxglove는
+launch 명령과 `FOXGLOVE_PORT`, Command API는 이 번들의 절대 파일 경로를 함께
+비교한다. 이미 실행 중이면 새 프로세스를 만들지 않고 종료한다. stop 스크립트도
+같은 기준으로 찾아 `SIGTERM`을 전송한다. 통합 정지 스크립트는 API를 먼저 종료한
+뒤 Bridge를 종료한다.
+
+Foxglove Bridge의 허용 topic, QoS, 서비스/파라미터 차단, 압축 설정은
+`tools/foxglove_start.sh`에 고정되어 있다. 변경이 필요하면 해당 스크립트를
+교체해 배포한다.
+
+로그 파일은 차량 사용자의 `~/log`에 생성된다.
+
+```text
+~/log/foxglove_bridge
+~/log/vehicle_command_api
 ```
 
 `0.0.0.0`은 모든 차량 네트워크 인터페이스에서 수신하도록 하는 bind 주소다.
 클라이언트 요청에는 실제 차량 IP를 사용한다. 예를 들어 차량 IP가
 `192.168.100.20`이면 base URL은 `http://192.168.100.20:8082`다.
 
-설정값은 실행 인자로 바꾼다.
+`vehicle_command_api.py`를 직접 실행해야 하는 경우에도 아래 인자를 사용할 수 있다.
 
 | 인자 | 기본값 | 의미 |
 |---|---:|---|
@@ -200,7 +230,7 @@ cancel을 요청한다. 기존 Nav2 또는 다른 publisher가 이후 새 속도
 ROS를 설치하지 않은 개발 환경에서도 HTTP 계약을 검증할 수 있다.
 
 ```bash
-cd /opt/vehicle_command_api
-python3 -m unittest test/test_vehicle_command_api.py -v
+cd /opt/vehicle_communication
+python3 -m unittest discover -s test -v
 python3 -m py_compile vehicle_command_api.py
 ```

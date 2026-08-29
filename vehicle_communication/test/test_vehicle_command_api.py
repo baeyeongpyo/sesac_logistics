@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import threading
@@ -101,6 +102,16 @@ class ReturningHttpServer:
 
     def server_close(self):
         self.closed = True
+
+
+class SigtermHttpServer(ReturningHttpServer):
+    def __init__(self, handlers):
+        super().__init__()
+        self._handlers = handlers
+
+    def serve_forever(self):
+        self.served = True
+        self._handlers[signal.SIGTERM](signal.SIGTERM, None)
 
 
 class VehicleCommandApiServerTest(unittest.TestCase):
@@ -521,6 +532,55 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             adapter_factory=lambda args: adapter,
             http_server_factory=lambda host, port, service: http_server,
         )
+
+        self.assertTrue(http_server.served)
+        self.assertTrue(http_server.closed)
+        self.assertEqual(adapter.messages, [(0.0, 0.0)])
+        self.assertTrue(adapter.closed)
+
+    def test_sigterm_runs_the_same_safe_shutdown_path_as_keyboard_interrupt(self):
+        """Skipping service cleanup on SIGTERM can leave a moving vehicle unmanaged."""
+        self.assertTrue(
+            hasattr(self.module, 'signal'),
+            'the direct runner must install a SIGTERM handler for safe cleanup',
+        )
+        adapter = ClosingFakeAdapter()
+        handlers = {}
+        http_server = SigtermHttpServer(handlers)
+        arguments = SimpleNamespace(
+            host='0.0.0.0',
+            port=8082,
+            robot_id='robot_2',
+            cmd_vel_topic='/cmd_vel',
+            action_name='/navigate_to_pose',
+            battery_topic='/ros_robot_controller/battery',
+            battery_stale_sec=3.0,
+            initial_pose_topic='/initialpose',
+            initial_pose_position_variance=0.25,
+            initial_pose_yaw_variance=0.0685,
+            max_linear_x=0.10,
+            max_angular_z=0.50,
+            max_hold_ms=1000,
+            action_server_timeout_sec=1.0,
+            goal_response_timeout_sec=3.0,
+            cancel_response_timeout_sec=3.0,
+        )
+        original_signal = self.module.signal.signal
+
+        def capture_signal(signum, handler):
+            previous = handlers.get(signum, signal.SIG_DFL)
+            handlers[signum] = handler
+            return previous
+
+        self.module.signal.signal = capture_signal
+        try:
+            self.module.run_server(
+                arguments,
+                adapter_factory=lambda args: adapter,
+                http_server_factory=lambda host, port, service: http_server,
+            )
+        finally:
+            self.module.signal.signal = original_signal
 
         self.assertTrue(http_server.served)
         self.assertTrue(http_server.closed)
