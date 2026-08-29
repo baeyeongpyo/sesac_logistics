@@ -24,6 +24,23 @@ test('standalone page exposes local map inputs and all three navigation layers',
   assert.doesNotMatch(app, /\bfetch\s*\(/);
 });
 
+test('page exposes separate hover inspection, pose picking, and map zoom controls', () => {
+  const html = readFileSync(`${toolRoot}/index.html`, 'utf8');
+  const app = readFileSync(`${toolRoot}/app.mjs`, 'utf8');
+
+  assert.match(html, /id="map-hover-readout"/);
+  assert.match(html, /id="pick-start"/);
+  assert.match(html, /id="pick-goal"/);
+  assert.match(html, /id="zoom-out"/);
+  assert.match(html, /id="zoom-fit"/);
+  assert.match(html, /id="zoom-in"/);
+  assert.match(app, /canvasToMapPoint/);
+  assert.match(app, /canvasVectorToYaw/);
+  assert.match(app, /zoomMapView/);
+  assert.match(app, /pointermove/);
+  assert.match(app, /wheel/);
+});
+
 test('page embeds navigation code so file:// has no JavaScript subresource CORS request', () => {
   const html = readFileSync(`${toolRoot}/index.html`, 'utf8');
   const model = readFileSync(`${toolRoot}/model.mjs`, 'utf8').trim();

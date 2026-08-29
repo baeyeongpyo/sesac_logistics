@@ -23,6 +23,9 @@ const NAVIGATION_CONFIG = Object.freeze({
   }),
 });
 
+const MIN_MAP_ZOOM = 0.5;
+const MAX_MAP_ZOOM = 8;
+
 function isWhitespace(byte) {
   return byte === 9 || byte === 10 || byte === 13 || byte === 32;
 }
@@ -181,6 +184,75 @@ function gridToWorld(map, cell) {
     x: map.origin[0] + ((cell.column + 0.5) * map.resolution),
     y: map.origin[1] + ((map.height - cell.row - 0.5) * map.resolution),
   };
+}
+
+/** Convert a canvas pointer into a continuous map coordinate and its underlying cell. */
+function canvasToMapPoint(map, transform, point) {
+  const gridX = (point.x - transform.left) / transform.scale;
+  const gridY = (point.y - transform.top) / transform.scale;
+  if (gridX < 0 || gridY < 0 || gridX >= map.width || gridY >= map.height) {
+    return undefined;
+  }
+
+  const column = Math.floor(gridX);
+  const row = Math.floor(gridY);
+  return {
+    x: map.origin[0] + (gridX * map.resolution),
+    y: map.origin[1] + ((map.height - gridY) * map.resolution),
+    column,
+    row,
+    occupancy: map.cells[cellIndex(map, { column, row })],
+  };
+}
+
+function clampMapZoom(value) {
+  return Math.min(MAX_MAP_ZOOM, Math.max(MIN_MAP_ZOOM, value));
+}
+
+/** Build the map-to-canvas transform for a fitted or zoomed map view. */
+function createMapTransform(map, width, height, view = {}) {
+  const padding = 32;
+  const fitScale = Math.max(1, Math.min((width - (padding * 2)) / map.width, (height - (padding * 2)) / map.height));
+  const scale = fitScale * clampMapZoom(Number.isFinite(view.zoom) ? view.zoom : 1);
+  const mapWidth = map.width * scale;
+  const mapHeight = map.height * scale;
+  const centerX = (width / 2) + (Number.isFinite(view.offsetX) ? view.offsetX : 0);
+  const centerY = (height / 2) + (Number.isFinite(view.offsetY) ? view.offsetY : 0);
+  const left = centerX - (mapWidth / 2);
+  const top = centerY - (mapHeight / 2);
+
+  return {
+    scale,
+    left,
+    top,
+    point(pose) {
+      return {
+        x: left + (((pose.x - map.origin[0]) / map.resolution) * scale),
+        y: top + ((map.height - ((pose.y - map.origin[1]) / map.resolution)) * scale),
+      };
+    },
+  };
+}
+
+/** Zoom at the pointer while retaining the same map coordinate below it. */
+function zoomMapView(view, factor, anchor, width, height) {
+  const zoom = clampMapZoom(Number.isFinite(view?.zoom) ? view.zoom : 1);
+  const nextZoom = clampMapZoom(zoom * (Number.isFinite(factor) && factor > 0 ? factor : 1));
+  const ratio = nextZoom / zoom;
+  const centerX = (width / 2) + (Number.isFinite(view?.offsetX) ? view.offsetX : 0);
+  const centerY = (height / 2) + (Number.isFinite(view?.offsetY) ? view.offsetY : 0);
+
+  return {
+    zoom: nextZoom,
+    offsetX: anchor.x - ((anchor.x - centerX) * ratio) - (width / 2),
+    offsetY: anchor.y - ((anchor.y - centerY) * ratio) - (height / 2),
+  };
+}
+
+/** Canvas y grows down, whereas Nav2 yaw grows counter-clockwise in map coordinates. */
+function canvasVectorToYaw(vector) {
+  const yaw = Math.atan2(-vector.y, vector.x);
+  return Object.is(yaw, -0) ? 0 : yaw;
 }
 
 function createExampleMap() {
@@ -531,11 +603,17 @@ function computeNavigation({ map, start, goal, config = {} }) {
 // Classic scripts can be loaded from file://, unlike ES modules in Chromium.
 globalThis.Nav2PathModel = Object.freeze({
   NAVIGATION_CONFIG,
+  MIN_MAP_ZOOM,
+  MAX_MAP_ZOOM,
   parsePgm,
   parseMapYaml,
   createOccupancyMap,
   worldToGrid,
   gridToWorld,
+  canvasToMapPoint,
+  createMapTransform,
+  zoomMapView,
+  canvasVectorToYaw,
   createExampleMap,
   computeNavigation,
 });

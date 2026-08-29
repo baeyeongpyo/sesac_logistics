@@ -5,12 +5,16 @@ import { readFileSync } from 'node:fs';
 import '../model.mjs';
 
 const {
+  canvasToMapPoint,
+  canvasVectorToYaw,
   computeNavigation,
+  createMapTransform,
   createOccupancyMap,
   gridToWorld,
   parseMapYaml,
   parsePgm,
   worldToGrid,
+  zoomMapView,
 } = globalThis.Nav2PathModel;
 
 function createRouteTestMap(blockedCells = []) {
@@ -90,6 +94,45 @@ test('world and grid coordinates meet at the cell center', () => {
 
   assert.deepEqual(cell, { column: 1, row: 1 });
   assert.deepEqual(gridToWorld(map, cell), { x: -0.25, y: -0.75 });
+});
+
+test('canvas hover position returns continuous map coordinates and occupancy', () => {
+  const map = createOccupancyMap(
+    { width: 4, height: 4, maxValue: 255, pixels: new Array(16).fill(255) },
+    { resolution: 0.5, origin: [-1, -2], negate: 0, occupiedThresh: 0.65, freeThresh: 0.25 },
+  );
+
+  assert.equal(typeof canvasToMapPoint, 'function');
+  assert.deepEqual(
+    canvasToMapPoint(map, { left: 40, top: 20, scale: 20 }, { x: 70, y: 70 }),
+    { x: -0.25, y: -1.25, column: 1, row: 2, occupancy: 'free' },
+  );
+  assert.equal(canvasToMapPoint(map, { left: 40, top: 20, scale: 20 }, { x: 15, y: 70 }), undefined);
+});
+
+test('pointer-centred zoom preserves the hovered map coordinate', () => {
+  const map = createOccupancyMap(
+    { width: 4, height: 4, maxValue: 255, pixels: new Array(16).fill(255) },
+    { resolution: 0.5, origin: [0, 0], negate: 0, occupiedThresh: 0.65, freeThresh: 0.25 },
+  );
+  const anchor = { x: 76, y: 56 };
+  const initialView = { zoom: 1, offsetX: 0, offsetY: 0 };
+
+  assert.equal(typeof createMapTransform, 'function');
+  assert.equal(typeof zoomMapView, 'function');
+  const before = canvasToMapPoint(map, createMapTransform(map, 200, 160, initialView), anchor);
+  const zoomedView = zoomMapView(initialView, 2, anchor, 200, 160);
+  const after = canvasToMapPoint(map, createMapTransform(map, 200, 160, zoomedView), anchor);
+
+  assert.deepEqual(zoomedView, { zoom: 2, offsetX: 24, offsetY: 24 });
+  assert.deepEqual(after, before);
+});
+
+test('drag direction converts from canvas axes into Nav2 yaw', () => {
+  assert.equal(typeof canvasVectorToYaw, 'function');
+  assert.equal(canvasVectorToYaw({ x: 10, y: 0 }), 0);
+  assert.equal(canvasVectorToYaw({ x: 0, y: -10 }), Math.PI / 2);
+  assert.equal(canvasVectorToYaw({ x: 0, y: 10 }), -Math.PI / 2);
 });
 
 test('navigation result exposes global, transformed, and selected local plans', () => {

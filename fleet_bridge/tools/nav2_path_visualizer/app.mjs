@@ -1,17 +1,23 @@
 const {
+  canvasToMapPoint,
+  canvasVectorToYaw,
   computeNavigation,
   createExampleMap,
+  createMapTransform,
   createOccupancyMap,
   parseMapYaml,
   parsePgm,
-  worldToGrid,
+  zoomMapView,
 } = globalThis.Nav2PathModel ?? {};
 
-if (!computeNavigation) {
+if (!computeNavigation || !canvasToMapPoint || !createMapTransform || !zoomMapView) {
   throw new Error('Nav2PathModel 초기화에 실패했습니다.');
 }
 
 document.documentElement.dataset.nav2PathRuntime = 'loading';
+
+const DRAG_HEADING_THRESHOLD = 8;
+const ZOOM_STEP = 1.25;
 
 const elements = {
   pgmFile: document.querySelector('#pgm-file'),
@@ -19,9 +25,17 @@ const elements = {
   loadMap: document.querySelector('#load-map'),
   useExampleMap: document.querySelector('#use-example-map'),
   runNavigation: document.querySelector('#run-navigation'),
+  pickStart: document.querySelector('#pick-start'),
+  pickGoal: document.querySelector('#pick-goal'),
+  pickHint: document.querySelector('#pick-hint'),
   mapSource: document.querySelector('#map-source'),
   status: document.querySelector('#status-message'),
   canvas: document.querySelector('#map-canvas'),
+  hoverReadout: document.querySelector('#map-hover-readout'),
+  zoomOut: document.querySelector('#zoom-out'),
+  zoomFit: document.querySelector('#zoom-fit'),
+  zoomIn: document.querySelector('#zoom-in'),
+  zoomLevel: document.querySelector('#zoom-level'),
   emptyState: document.querySelector('#empty-state'),
   metricGlobal: document.querySelector('#metric-global'),
   metricTransformed: document.querySelector('#metric-transformed'),
@@ -37,6 +51,11 @@ const state = {
   result: undefined,
   start: undefined,
   goal: undefined,
+  hover: undefined,
+  pickMode: undefined,
+  pointerStart: undefined,
+  pointerEnd: undefined,
+  view: { zoom: 1, offsetX: 0, offsetY: 0 },
 };
 
 function numberInput(id) {
@@ -80,28 +99,6 @@ function renderMetrics(result) {
   elements.metricScore.textContent = result.summary.score?.toFixed(2) ?? '경로 없음';
 }
 
-function makeMapTransform(map, width, height) {
-  const padding = 32;
-  const scale = Math.max(1, Math.min((width - (padding * 2)) / map.width, (height - (padding * 2)) / map.height));
-  const mapWidth = map.width * scale;
-  const mapHeight = map.height * scale;
-  const left = (width - mapWidth) / 2;
-  const top = (height - mapHeight) / 2;
-
-  return {
-    scale,
-    left,
-    top,
-    point(pose) {
-      const cell = worldToGrid(map, pose);
-      return {
-        x: left + ((cell.column + 0.5) * scale),
-        y: top + ((cell.row + 0.5) * scale),
-      };
-    },
-  };
-}
-
 function drawMap(ctx, map, transform) {
   const { scale, left, top } = transform;
   ctx.fillStyle = '#101c22';
@@ -136,6 +133,32 @@ function drawPath(ctx, transform, path, color, width, dash = []) {
   ctx.restore();
 }
 
+function drawHeading(ctx, point, yaw, color, length = 18) {
+  const end = {
+    x: point.x + (Math.cos(yaw) * length),
+    y: point.y - (Math.sin(yaw) * length),
+  };
+  const wing = 5;
+  const left = yaw + (Math.PI * 0.82);
+  const right = yaw - (Math.PI * 0.82);
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 2;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(point.x, point.y);
+  ctx.lineTo(end.x, end.y);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(end.x, end.y);
+  ctx.lineTo(end.x + (Math.cos(left) * wing), end.y - (Math.sin(left) * wing));
+  ctx.lineTo(end.x + (Math.cos(right) * wing), end.y - (Math.sin(right) * wing));
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
 function drawVehicle(ctx, transform, pose) {
   if (!pose) return;
   const point = transform.point(pose);
@@ -166,13 +189,8 @@ function drawGoal(ctx, transform, pose) {
   ctx.beginPath();
   ctx.arc(point.x, point.y, Math.max(6, transform.scale * 0.32), 0, Math.PI * 2);
   ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(point.x - 9, point.y);
-  ctx.lineTo(point.x + 9, point.y);
-  ctx.moveTo(point.x, point.y - 9);
-  ctx.lineTo(point.x, point.y + 9);
-  ctx.stroke();
   ctx.restore();
+  drawHeading(ctx, point, pose.yaw, '#ff7f6b', Math.max(14, transform.scale * 0.6));
 }
 
 function drawLocalWindow(ctx, transform, pose) {
@@ -188,6 +206,43 @@ function drawLocalWindow(ctx, transform, pose) {
   ctx.restore();
 }
 
+function drawHover(ctx, transform) {
+  if (!state.hover) return;
+  const { column, row } = state.hover;
+  const cellLeft = transform.left + (column * transform.scale);
+  const cellTop = transform.top + (row * transform.scale);
+  const point = transform.point(state.hover);
+  ctx.save();
+  ctx.fillStyle = '#75d9c326';
+  ctx.fillRect(cellLeft, cellTop, transform.scale, transform.scale);
+  ctx.strokeStyle = '#75d9c3';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.moveTo(point.x - 8, point.y);
+  ctx.lineTo(point.x + 8, point.y);
+  ctx.moveTo(point.x, point.y - 8);
+  ctx.lineTo(point.x, point.y + 8);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawPickDirection(ctx) {
+  if (!state.pickMode || !state.pointerStart || !state.pointerEnd) return;
+  const dx = state.pointerEnd.x - state.pointerStart.canvasPoint.x;
+  const dy = state.pointerEnd.y - state.pointerStart.canvasPoint.y;
+  if (Math.hypot(dx, dy) < DRAG_HEADING_THRESHOLD) return;
+  ctx.save();
+  ctx.strokeStyle = state.pickMode === 'start' ? '#f4f0e4' : '#ff7f6b';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  ctx.moveTo(state.pointerStart.canvasPoint.x, state.pointerStart.canvasPoint.y);
+  ctx.lineTo(state.pointerEnd.x, state.pointerEnd.y);
+  ctx.stroke();
+  ctx.restore();
+}
+
 function renderCanvas() {
   const canvas = elements.canvas;
   const bounds = canvas.getBoundingClientRect();
@@ -198,7 +253,7 @@ function renderCanvas() {
   canvas.height = Math.floor(height * pixelRatio);
   const ctx = canvas.getContext('2d');
   ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-  const transform = makeMapTransform(state.map, width, height);
+  const transform = createMapTransform(state.map, width, height, state.view);
 
   drawMap(ctx, state.map, transform);
   drawLocalWindow(ctx, transform, state.start);
@@ -207,6 +262,74 @@ function renderCanvas() {
   drawPath(ctx, transform, state.result?.localPlan, '#64e1b7', 4.1);
   drawGoal(ctx, transform, state.goal);
   drawVehicle(ctx, transform, state.start);
+  drawHover(ctx, transform);
+  drawPickDirection(ctx);
+}
+
+function canvasPointFromEvent(event) {
+  const bounds = elements.canvas.getBoundingClientRect();
+  return { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
+}
+
+function currentMapTransform() {
+  const bounds = elements.canvas.getBoundingClientRect();
+  return createMapTransform(state.map, Math.max(1, bounds.width), Math.max(1, bounds.height), state.view);
+}
+
+function updateHover(canvasPoint) {
+  state.hover = canvasToMapPoint(state.map, currentMapTransform(), canvasPoint);
+  if (!state.hover) {
+    elements.hoverReadout.textContent = '지도 위에 커서를 올리면 좌표와 셀 상태를 표시합니다.';
+    return;
+  }
+  const occupancy = state.hover.occupancy === 'free' ? '주행 가능' : state.hover.occupancy === 'occupied' ? '장애물' : '미확정';
+  elements.hoverReadout.textContent = `x ${state.hover.x.toFixed(2)} m · y ${state.hover.y.toFixed(2)} m · cell ${state.hover.column}, ${state.hover.row} · ${occupancy}`;
+}
+
+function updateZoomReadout() {
+  elements.zoomLevel.textContent = `${Math.round(state.view.zoom * 100)}%`;
+}
+
+function setPickMode(mode) {
+  state.pickMode = state.pickMode === mode ? undefined : mode;
+  elements.pickStart.classList.toggle('is-active', state.pickMode === 'start');
+  elements.pickGoal.classList.toggle('is-active', state.pickMode === 'goal');
+  elements.pickStart.setAttribute('aria-pressed', String(state.pickMode === 'start'));
+  elements.pickGoal.setAttribute('aria-pressed', String(state.pickMode === 'goal'));
+  elements.canvas.classList.toggle('is-picking', Boolean(state.pickMode));
+  elements.pickHint.textContent = state.pickMode
+    ? `${state.pickMode === 'start' ? 'Start' : 'Goal'}: 클릭은 x/y, 드래그는 x/y/yaw를 입력합니다.`
+    : '선택 후 지도에서 클릭하세요. 드래그하면 방향(yaw)도 지정합니다.';
+}
+
+function clearResultForPoseEdit() {
+  state.result = undefined;
+  renderMetrics();
+  elements.emptyState.classList.remove('is-hidden');
+}
+
+function updatePoseFromMapPoint(mode, mapPoint, vector) {
+  document.querySelector(`#${mode}-x`).value = mapPoint.x.toFixed(2);
+  document.querySelector(`#${mode}-y`).value = mapPoint.y.toFixed(2);
+  const hasHeading = Math.hypot(vector.x, vector.y) >= DRAG_HEADING_THRESHOLD;
+  if (hasHeading) {
+    const yawDegrees = canvasVectorToYaw(vector) * (180 / Math.PI);
+    document.querySelector(`#${mode}-yaw`).value = yawDegrees.toFixed(1);
+  }
+  state[mode] = readPose(mode);
+  clearResultForPoseEdit();
+  const modeLabel = mode === 'start' ? 'Start' : 'Goal';
+  setStatus(`${modeLabel} 좌표를 지도에서 입력했습니다.${hasHeading ? ' 드래그 방향으로 yaw도 설정했습니다.' : ' yaw는 기존 값을 유지합니다.'}`, 'success');
+}
+
+function resetMapInteraction() {
+  state.hover = undefined;
+  state.pointerStart = undefined;
+  state.pointerEnd = undefined;
+  state.view = { zoom: 1, offsetX: 0, offsetY: 0 };
+  setPickMode();
+  updateHover({ x: -1, y: -1 });
+  updateZoomReadout();
 }
 
 async function loadMapFromFiles() {
@@ -226,8 +349,9 @@ async function loadMapFromFiles() {
     state.result = undefined;
     state.start = undefined;
     state.goal = undefined;
+    resetMapInteraction();
     setMapSource(`${state.mapName} 로드됨`);
-    setStatus('지도를 읽었습니다. 시작·목표 좌표를 입력하세요.', 'success');
+    setStatus('지도를 읽었습니다. Start 또는 Goal을 선택해 지도에서 입력할 수 있습니다.', 'success');
     renderMetrics();
     renderCanvas();
     elements.emptyState.classList.remove('is-hidden');
@@ -242,8 +366,9 @@ function useExampleMap() {
   state.result = undefined;
   state.start = undefined;
   state.goal = undefined;
+  resetMapInteraction();
   setMapSource('내장 예제 지도 사용 중');
-  setStatus('내장 예제 지도로 바꿨습니다. 좌표를 입력하고 실행하세요.', 'success');
+  setStatus('내장 예제 지도로 바꿨습니다. Start 또는 Goal을 선택해 지도에서 입력할 수 있습니다.', 'success');
   renderMetrics();
   renderCanvas();
   elements.emptyState.classList.remove('is-hidden');
@@ -272,11 +397,85 @@ function runNavigation() {
   elements.emptyState.classList.add('is-hidden');
 }
 
+function applyZoom(factor, anchor) {
+  const bounds = elements.canvas.getBoundingClientRect();
+  state.view = zoomMapView(state.view, factor, anchor, Math.max(1, bounds.width), Math.max(1, bounds.height));
+  updateZoomReadout();
+  updateHover(anchor);
+  renderCanvas();
+}
+
+function canvasCenter() {
+  const bounds = elements.canvas.getBoundingClientRect();
+  return { x: bounds.width / 2, y: bounds.height / 2 };
+}
+
+function onPointerDown(event) {
+  if (event.button !== 0) return;
+  const canvasPoint = canvasPointFromEvent(event);
+  const mapPoint = canvasToMapPoint(state.map, currentMapTransform(), canvasPoint);
+  if (!mapPoint) return;
+  state.pointerStart = { canvasPoint, mapPoint };
+  state.pointerEnd = undefined;
+  elements.canvas.setPointerCapture(event.pointerId);
+}
+
+function onPointerMove(event) {
+  const canvasPoint = canvasPointFromEvent(event);
+  updateHover(canvasPoint);
+  if (state.pointerStart && state.pickMode) state.pointerEnd = canvasPoint;
+  renderCanvas();
+}
+
+function onPointerUp(event) {
+  if (!state.pointerStart) return;
+  const endPoint = canvasPointFromEvent(event);
+  const { canvasPoint, mapPoint } = state.pointerStart;
+  if (state.pickMode) {
+    updatePoseFromMapPoint(state.pickMode, mapPoint, {
+      x: endPoint.x - canvasPoint.x,
+      y: endPoint.y - canvasPoint.y,
+    });
+  }
+  state.pointerStart = undefined;
+  state.pointerEnd = undefined;
+  if (elements.canvas.hasPointerCapture(event.pointerId)) elements.canvas.releasePointerCapture(event.pointerId);
+  updateHover(endPoint);
+  renderCanvas();
+}
+
+function onPointerLeave() {
+  if (state.pointerStart) return;
+  updateHover({ x: -1, y: -1 });
+  renderCanvas();
+}
+
 elements.loadMap.addEventListener('click', loadMapFromFiles);
 elements.useExampleMap.addEventListener('click', useExampleMap);
 elements.runNavigation.addEventListener('click', runNavigation);
+elements.pickStart.addEventListener('click', () => setPickMode('start'));
+elements.pickGoal.addEventListener('click', () => setPickMode('goal'));
+elements.zoomOut.addEventListener('click', () => applyZoom(1 / ZOOM_STEP, canvasCenter()));
+elements.zoomIn.addEventListener('click', () => applyZoom(ZOOM_STEP, canvasCenter()));
+elements.zoomFit.addEventListener('click', () => {
+  state.view = { zoom: 1, offsetX: 0, offsetY: 0 };
+  updateZoomReadout();
+  renderCanvas();
+});
+elements.canvas.addEventListener('pointerdown', onPointerDown);
+elements.canvas.addEventListener('pointermove', onPointerMove);
+elements.canvas.addEventListener('pointerup', onPointerUp);
+elements.canvas.addEventListener('pointercancel', onPointerUp);
+elements.canvas.addEventListener('pointerleave', onPointerLeave);
+elements.canvas.addEventListener('wheel', (event) => {
+  event.preventDefault();
+  applyZoom(event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP, canvasPointFromEvent(event));
+}, { passive: false });
 window.addEventListener('resize', renderCanvas);
 
+setPickMode();
+updateHover({ x: -1, y: -1 });
+updateZoomReadout();
 renderMetrics();
 renderCanvas();
 document.documentElement.dataset.nav2PathRuntime = 'ready';
