@@ -197,3 +197,333 @@ export function createExampleMap() {
     { resolution: 0.2, origin: [-2, -1.4], negate: 0, occupiedThresh: 0.65, freeThresh: 0.25 },
   );
 }
+
+class MinPriorityQueue {
+  constructor() {
+    this.items = [];
+  }
+
+  push(priority, value) {
+    const entry = { priority, value };
+    this.items.push(entry);
+    let index = this.items.length - 1;
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+      if (this.items[parent].priority <= entry.priority) break;
+      this.items[index] = this.items[parent];
+      index = parent;
+    }
+    this.items[index] = entry;
+  }
+
+  pop() {
+    if (this.items.length === 0) return undefined;
+    const first = this.items[0];
+    const last = this.items.pop();
+    if (this.items.length > 0) {
+      let index = 0;
+      while (true) {
+        const left = (index * 2) + 1;
+        const right = left + 1;
+        if (left >= this.items.length) break;
+        const child = right < this.items.length && this.items[right].priority < this.items[left].priority ? right : left;
+        if (this.items[child].priority >= last.priority) break;
+        this.items[index] = this.items[child];
+        index = child;
+      }
+      this.items[index] = last;
+    }
+    return first;
+  }
+
+  get size() {
+    return this.items.length;
+  }
+}
+
+const NEIGHBORS = Object.freeze([
+  { column: -1, row: -1, multiplier: Math.SQRT2 },
+  { column: 0, row: -1, multiplier: 1 },
+  { column: 1, row: -1, multiplier: Math.SQRT2 },
+  { column: -1, row: 0, multiplier: 1 },
+  { column: 1, row: 0, multiplier: 1 },
+  { column: -1, row: 1, multiplier: Math.SQRT2 },
+  { column: 0, row: 1, multiplier: 1 },
+  { column: 1, row: 1, multiplier: Math.SQRT2 },
+]);
+
+function cellIndex(map, cell) {
+  return (cell.row * map.width) + cell.column;
+}
+
+function isInMap(map, cell) {
+  return Number.isInteger(cell.column)
+    && Number.isInteger(cell.row)
+    && cell.column >= 0
+    && cell.column < map.width
+    && cell.row >= 0
+    && cell.row < map.height;
+}
+
+function hasFinitePose(pose) {
+  return pose && Number.isFinite(pose.x) && Number.isFinite(pose.y) && Number.isFinite(pose.yaw);
+}
+
+function normalizeAngle(angle) {
+  return Math.atan2(Math.sin(angle), Math.cos(angle));
+}
+
+function angleDistance(first, second) {
+  return Math.abs(normalizeAngle(first - second));
+}
+
+function poseDistance(first, second) {
+  return Math.hypot(first.x - second.x, first.y - second.y);
+}
+
+/** Approximate each cell's distance from obstacles with an 8-connected distance field. */
+function buildClearanceField(map) {
+  const clearance = new Float64Array(map.cells.length);
+  clearance.fill(Infinity);
+  const queue = new MinPriorityQueue();
+
+  for (let index = 0; index < map.cells.length; index += 1) {
+    if (map.cells[index] === 'occupied') {
+      clearance[index] = 0;
+      queue.push(0, index);
+    }
+  }
+
+  while (queue.size > 0) {
+    const { priority: distance, value: index } = queue.pop();
+    if (distance !== clearance[index]) continue;
+    const row = Math.floor(index / map.width);
+    const column = index % map.width;
+    for (const neighbor of NEIGHBORS) {
+      const cell = { column: column + neighbor.column, row: row + neighbor.row };
+      if (!isInMap(map, cell)) continue;
+      const neighborIndex = cellIndex(map, cell);
+      const candidate = distance + (map.resolution * neighbor.multiplier);
+      if (candidate >= clearance[neighborIndex]) continue;
+      clearance[neighborIndex] = candidate;
+      queue.push(candidate, neighborIndex);
+    }
+  }
+
+  return clearance;
+}
+
+function inflationCost(clearance, config) {
+  if (clearance <= config.robotRadius) return Infinity;
+  if (clearance >= config.inflationRadius) return 0;
+  const ratio = (config.inflationRadius - clearance) / (config.inflationRadius - config.robotRadius);
+  return ratio * ratio;
+}
+
+function isTraversable(map, clearanceField, cell, config) {
+  if (!isInMap(map, cell)) return false;
+  const index = cellIndex(map, cell);
+  return map.cells[index] !== 'occupied' && clearanceField[index] > config.robotRadius;
+}
+
+function resolveGoalCell(map, clearanceField, goal, config) {
+  const preferred = worldToGrid(map, goal);
+  if (isTraversable(map, clearanceField, preferred, config)) return preferred;
+
+  let best;
+  for (let row = 0; row < map.height; row += 1) {
+    for (let column = 0; column < map.width; column += 1) {
+      const cell = { column, row };
+      if (!isTraversable(map, clearanceField, cell, config)) continue;
+      const pose = gridToWorld(map, cell);
+      const distance = poseDistance(pose, goal);
+      if (distance > config.goalTolerance || (best && distance >= best.distance)) continue;
+      best = { cell, distance };
+    }
+  }
+  return best?.cell;
+}
+
+function findGlobalPath(map, clearanceField, startCell, goalCell, config) {
+  const length = map.cells.length;
+  const distance = new Float64Array(length);
+  distance.fill(Infinity);
+  const previous = new Int32Array(length);
+  previous.fill(-1);
+  const startIndex = cellIndex(map, startCell);
+  const goalIndex = cellIndex(map, goalCell);
+  const queue = new MinPriorityQueue();
+
+  distance[startIndex] = 0;
+  queue.push(0, startIndex);
+
+  while (queue.size > 0) {
+    const current = queue.pop();
+    if (current.priority !== distance[current.value]) continue;
+    if (current.value === goalIndex) break;
+    const row = Math.floor(current.value / map.width);
+    const column = current.value % map.width;
+
+    for (const neighbor of NEIGHBORS) {
+      const cell = { column: column + neighbor.column, row: row + neighbor.row };
+      if (!isTraversable(map, clearanceField, cell, config)) continue;
+      const neighborIndex = cellIndex(map, cell);
+      const clearancePenalty = inflationCost(clearanceField[neighborIndex], config);
+      const travelCost = map.resolution * neighbor.multiplier * (1 + (3 * clearancePenalty));
+      const candidate = current.priority + travelCost;
+      if (candidate >= distance[neighborIndex]) continue;
+      distance[neighborIndex] = candidate;
+      previous[neighborIndex] = current.value;
+      queue.push(candidate, neighborIndex);
+    }
+  }
+
+  if (!Number.isFinite(distance[goalIndex])) return undefined;
+  const cells = [];
+  for (let index = goalIndex; index !== -1; index = previous[index]) {
+    cells.push({ column: index % map.width, row: Math.floor(index / map.width) });
+  }
+  return cells.reverse();
+}
+
+function cellsToPoses(map, cells, goalYaw) {
+  return cells.map((cell, index) => {
+    const pose = gridToWorld(map, cell);
+    const next = cells[index + 1];
+    if (!next) return { ...pose, yaw: goalYaw };
+    const nextPose = gridToWorld(map, next);
+    return { ...pose, yaw: Math.atan2(nextPose.y - pose.y, nextPose.x - pose.x) };
+  });
+}
+
+function transformPlan(globalPlan, start, config) {
+  const localRadius = config.localWindowSize / 2;
+  return globalPlan.filter((pose) => poseDistance(pose, start) <= localRadius);
+}
+
+function sampleVelocity(minimum, maximum, count, index) {
+  if (count === 1) return minimum;
+  return minimum + (((maximum - minimum) * index) / (count - 1));
+}
+
+function simulateTrajectory(start, velocityX, velocityTheta, map, clearanceField, config) {
+  const poses = [{ ...start }];
+  const linearStep = Math.abs(velocityX) > 0 ? config.linearGranularity / Math.abs(velocityX) : Infinity;
+  const angularStep = Math.abs(velocityTheta) > 0 ? config.angularGranularity / Math.abs(velocityTheta) : Infinity;
+  const timeStep = Math.min(0.05, linearStep, angularStep);
+  let elapsed = 0;
+  let pose = { ...start };
+
+  while (elapsed < config.simulationTime) {
+    const delta = Math.min(timeStep, config.simulationTime - elapsed);
+    const yaw = normalizeAngle(pose.yaw + (velocityTheta * delta));
+    pose = {
+      x: pose.x + (velocityX * Math.cos(yaw) * delta),
+      y: pose.y + (velocityX * Math.sin(yaw) * delta),
+      yaw,
+    };
+    const cell = worldToGrid(map, pose);
+    if (!isTraversable(map, clearanceField, cell, config)) return undefined;
+    poses.push(pose);
+    elapsed += delta;
+  }
+  return poses;
+}
+
+function closestPlanPose(pose, plan) {
+  return plan.reduce((closest, candidate) => (
+    poseDistance(candidate, pose) < poseDistance(closest, pose) ? candidate : closest
+  ));
+}
+
+function scoreTrajectory(trajectory, transformedPlan, goal, clearanceField, map, config) {
+  const finalPose = trajectory.at(-1);
+  const nearestPathPose = closestPlanPose(finalPose, transformedPlan);
+  const obstacleRisk = trajectory.reduce((total, pose) => {
+    const clearance = clearanceField[cellIndex(map, worldToGrid(map, pose))];
+    return total + inflationCost(clearance, config);
+  }, 0) / trajectory.length;
+  const goalDistance = poseDistance(finalPose, goal);
+  const goalAlign = angleDistance(finalPose.yaw, goal.yaw);
+  const rotateToGoal = goalDistance <= config.goalTolerance ? goalAlign : 0;
+
+  return (obstacleRisk * config.criticScales.obstacle)
+    + (angleDistance(finalPose.yaw, nearestPathPose.yaw) * config.criticScales.pathAlign)
+    + (poseDistance(finalPose, nearestPathPose) * config.criticScales.pathDistance)
+    + (goalAlign * config.criticScales.goalAlign)
+    + (goalDistance * config.criticScales.goalDistance)
+    + (rotateToGoal * config.criticScales.rotateToGoal);
+}
+
+function inputError(code, message) {
+  return { ok: false, code, message };
+}
+
+/**
+ * Return a dependency-free NavFn/DWB-inspired approximation.
+ * It intentionally mirrors the three plan layers, not Nav2's C++ implementation.
+ */
+export function computeNavigation({ map, start, goal, config = {} }) {
+  if (!map || !Array.isArray(map.cells) || !hasFinitePose(start) || !hasFinitePose(goal)) {
+    return inputError('INVALID_INPUT', '지도와 시작·목표 위치를 확인하세요.');
+  }
+  const activeConfig = {
+    ...NAVIGATION_CONFIG,
+    ...config,
+    criticScales: { ...NAVIGATION_CONFIG.criticScales, ...config.criticScales },
+  };
+  const clearanceField = buildClearanceField(map);
+  const startCell = worldToGrid(map, start);
+  if (!isTraversable(map, clearanceField, startCell, activeConfig)) {
+    return inputError('START_IN_COLLISION', '시작 위치가 지도 밖이거나 충돌 영역에 있습니다.');
+  }
+  const goalCell = resolveGoalCell(map, clearanceField, goal, activeConfig);
+  if (!goalCell) {
+    return inputError('GOAL_UNREACHABLE', '목표 위치 또는 허용 오차 안에 주행 가능한 셀이 없습니다.');
+  }
+  const globalCells = findGlobalPath(map, clearanceField, startCell, goalCell, activeConfig);
+  if (!globalCells) {
+    return inputError('GLOBAL_PATH_NOT_FOUND', '시작과 목표 사이에서 전역 경로를 찾지 못했습니다.');
+  }
+
+  const resolvedGoal = { ...gridToWorld(map, goalCell), yaw: goal.yaw };
+  const globalPlan = cellsToPoses(map, globalCells, resolvedGoal.yaw);
+  const transformedGlobalPlan = transformPlan(globalPlan, start, activeConfig);
+  let candidateCount = 0;
+  let rejectedCandidateCount = 0;
+  let selected;
+
+  for (let xIndex = 0; xIndex < activeConfig.velocityXSamples; xIndex += 1) {
+    const velocityX = sampleVelocity(activeConfig.minVelocityX, activeConfig.maxVelocityX, activeConfig.velocityXSamples, xIndex);
+    for (let thetaIndex = 0; thetaIndex < activeConfig.velocityThetaSamples; thetaIndex += 1) {
+      const velocityTheta = sampleVelocity(-activeConfig.maxVelocityTheta, activeConfig.maxVelocityTheta, activeConfig.velocityThetaSamples, thetaIndex);
+      candidateCount += 1;
+      const trajectory = simulateTrajectory(start, velocityX, velocityTheta, map, clearanceField, activeConfig);
+      if (!trajectory) {
+        rejectedCandidateCount += 1;
+        continue;
+      }
+      const score = scoreTrajectory(trajectory, transformedGlobalPlan, resolvedGoal, clearanceField, map, activeConfig);
+      if (!selected || score < selected.score) {
+        selected = { trajectory, velocityX, velocityTheta, score };
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    globalPlan,
+    transformedGlobalPlan,
+    localPlan: selected?.trajectory ?? [],
+    summary: {
+      candidateCount,
+      rejectedCandidateCount,
+      selectedVx: selected?.velocityX ?? null,
+      selectedVtheta: selected?.velocityTheta ?? null,
+      score: selected?.score ?? null,
+      unknownCellsTraversed: globalCells.filter((cell) => map.cells[cellIndex(map, cell)] === 'unknown').length,
+      resolvedGoal,
+      reason: selected ? undefined : 'NO_VALID_LOCAL_PLAN',
+    },
+  };
+}

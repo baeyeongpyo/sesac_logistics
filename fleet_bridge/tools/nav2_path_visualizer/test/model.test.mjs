@@ -2,12 +2,39 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  computeNavigation,
   createOccupancyMap,
   gridToWorld,
   parseMapYaml,
   parsePgm,
   worldToGrid,
 } from '../model.mjs';
+
+function createRouteTestMap(blockedCells = []) {
+  const width = 41;
+  const height = 31;
+  const pixels = new Array(width * height).fill(255);
+  const blocked = new Set(blockedCells.map(({ column, row }) => `${column},${row}`));
+
+  for (let row = 0; row < height; row += 1) {
+    for (let column = 0; column < width; column += 1) {
+      const isBorder = row === 0 || row === height - 1 || column === 0 || column === width - 1;
+      const isWall = column === 20 && (row < 10 || row > 20);
+      if (isBorder || isWall || blocked.has(`${column},${row}`)) {
+        pixels[(row * width) + column] = 0;
+      }
+    }
+  }
+
+  return createOccupancyMap(
+    { width, height, maxValue: 255, pixels },
+    { resolution: 0.1, origin: [0, 0], negate: 0, occupiedThresh: 0.65, freeThresh: 0.25 },
+  );
+}
+
+function poseAtCell(map, column, row, yaw = 0) {
+  return { ...gridToWorld(map, { column, row }), yaw };
+}
 
 test('PGM parser reads P2 pixels while ignoring comments', () => {
   const bytes = new TextEncoder().encode('P2\n# warehouse map\n3 2\n255\n0 127 255\n255 0 255\n');
@@ -60,4 +87,37 @@ test('world and grid coordinates meet at the cell center', () => {
 
   assert.deepEqual(cell, { column: 1, row: 1 });
   assert.deepEqual(gridToWorld(map, cell), { x: -0.25, y: -0.75 });
+});
+
+test('navigation result exposes global, transformed, and selected local plans', () => {
+  const map = createRouteTestMap();
+  const start = poseAtCell(map, 5, 15);
+  const goal = poseAtCell(map, 35, 15);
+
+  const result = computeNavigation({ map, start, goal });
+
+  assert.equal(result.ok, true);
+  assert.ok(result.globalPlan.length > 1);
+  assert.ok(result.transformedGlobalPlan.length > 1);
+  assert.ok(result.transformedGlobalPlan.length <= result.globalPlan.length);
+  assert.ok(result.localPlan.length > 1);
+  assert.equal(result.summary.candidateCount, 300);
+  assert.ok(Number.isFinite(result.summary.selectedVx));
+  assert.ok(Number.isFinite(result.summary.selectedVtheta));
+  assert.ok(result.transformedGlobalPlan.every((pose) => Math.hypot(pose.x - start.x, pose.y - start.y) <= 1.5));
+});
+
+test('navigation returns a clear input error when the start cell is blocked', () => {
+  const map = createRouteTestMap([{ column: 5, row: 15 }]);
+  const result = computeNavigation({
+    map,
+    start: poseAtCell(map, 5, 15),
+    goal: poseAtCell(map, 35, 15),
+  });
+
+  assert.deepEqual(result, {
+    ok: false,
+    code: 'START_IN_COLLISION',
+    message: '시작 위치가 지도 밖이거나 충돌 영역에 있습니다.',
+  });
 });
