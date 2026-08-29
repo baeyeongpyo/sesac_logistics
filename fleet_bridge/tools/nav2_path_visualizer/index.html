@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NAV / Path Lab</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">OFFLINE NAVIGATION SANDBOX</p>
+          <h1>NAV <span>/</span> Path Lab</h1>
+        </div>
+        <p class="topbar-note">ROS 토픽 · 차량 · FastAPI 없이, 입력값에서 경로 레이어만 계산합니다.</p>
+      </header>
+
+      <section class="workspace" aria-label="Nav2 경로 시각화 도구">
+        <aside class="control-panel">
+          <section>
+            <div class="section-heading">
+              <p class="step">01</p>
+              <h2>지도 입력</h2>
+            </div>
+            <p class="help">로컬 PGM과 map_server YAML을 브라우저에서만 읽습니다. 파일은 외부로 전송되지 않습니다.</p>
+            <label class="file-field" for="pgm-file">
+              <span>PGM 지도</span>
+              <input id="pgm-file" type="file" accept=".pgm,image/x-portable-graymap" />
+            </label>
+            <label class="file-field" for="yaml-file">
+              <span>YAML metadata</span>
+              <input id="yaml-file" type="file" accept=".yaml,.yml,text/yaml" />
+            </label>
+            <div class="button-row">
+              <button id="load-map" class="button button-secondary" type="button">선택 지도 읽기</button>
+              <button id="use-example-map" class="button button-quiet" type="button">내장 예제</button>
+            </div>
+            <p id="map-source" class="map-source" aria-live="polite">내장 예제 지도 사용 중</p>
+          </section>
+
+          <section>
+            <div class="section-heading">
+              <p class="step">02</p>
+              <h2>시작 · 목표</h2>
+            </div>
+            <div class="pose-grid">
+              <div class="pose-label">Start</div>
+              <label>x <input id="start-x" type="number" step="0.01" value="-1.40" /></label>
+              <label>y <input id="start-y" type="number" step="0.01" value="0.00" /></label>
+              <label>yaw° <input id="start-yaw" type="number" step="1" value="0" /></label>
+              <div class="pose-label">Goal</div>
+              <label>x <input id="goal-x" type="number" step="0.01" value="1.40" /></label>
+              <label>y <input id="goal-y" type="number" step="0.01" value="0.00" /></label>
+              <label>yaw° <input id="goal-yaw" type="number" step="1" value="0" /></label>
+            </div>
+          </section>
+
+          <section class="run-section">
+            <div class="section-heading">
+              <p class="step">03</p>
+              <h2>계산</h2>
+            </div>
+            <button id="run-navigation" class="button button-primary" type="button">경로 시뮬레이션</button>
+            <p id="status-message" class="status-message" role="status">좌표를 입력하고 계산을 실행하세요.</p>
+          </section>
+
+          <section class="assumption">
+            <h2>모델 범위</h2>
+            <p>NavFn/DWB 설정값을 참고한 독립 근사 모델입니다. 실제 Nav2 C++ controller의 결과와 완전히 같지는 않습니다.</p>
+          </section>
+        </aside>
+
+        <section class="visual-panel" aria-label="경로 결과">
+          <div class="visual-header">
+            <div>
+              <p class="eyebrow">PATH LAYERS</p>
+              <h2>지도 기준 경로 판단</h2>
+            </div>
+            <div class="legend" aria-label="경로 범례">
+              <span><i class="swatch global"></i>Global plan</span>
+              <span><i class="swatch transformed"></i>Transformed plan</span>
+              <span><i class="swatch local"></i>Local plan</span>
+            </div>
+          </div>
+
+          <div class="canvas-frame">
+            <canvas id="map-canvas" aria-label="지도와 계산된 경로"></canvas>
+            <p id="empty-state" class="empty-state">시뮬레이션을 실행하면 세 경로 레이어가 표시됩니다.</p>
+          </div>
+
+          <dl class="metric-grid" aria-label="계산 요약">
+            <div><dt>전역 경로</dt><dd id="metric-global">—</dd></div>
+            <div><dt>변환 경로</dt><dd id="metric-transformed">—</dd></div>
+            <div><dt>로컬 궤적</dt><dd id="metric-local">—</dd></div>
+            <div><dt>후보 평가</dt><dd id="metric-candidates">—</dd></div>
+            <div><dt>선택 속도</dt><dd id="metric-velocity">—</dd></div>
+            <div><dt>점수</dt><dd id="metric-score">—</dd></div>
+          </dl>
+        </section>
+      </section>
+    </main>
+
+    <script type="module" src="./app.mjs"></script>
+  </body>
+</html>

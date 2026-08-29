@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   computeNavigation,
@@ -120,4 +121,20 @@ test('navigation returns a clear input error when the start cell is blocked', ()
     code: 'START_IN_COLLISION',
     message: '시작 위치가 지도 밖이거나 충돌 영역에 있습니다.',
   });
+});
+
+test('project P5 map produces all plan layers without a ROS runtime', () => {
+  const pgm = parsePgm(readFileSync(new URL('../../../../map_server/maps/map_0825.pgm', import.meta.url)));
+  const metadata = parseMapYaml(readFileSync(new URL('../../../../map_server/maps/map_0825.yaml', import.meta.url), 'utf8'));
+  const result = computeNavigation({
+    map: createOccupancyMap(pgm, metadata),
+    start: { x: -4, y: -3, yaw: 0 },
+    goal: { x: 3.8, y: 2, yaw: 0 },
+  });
+
+  assert.equal(result.ok, true);
+  assert.ok(result.globalPlan.length > result.transformedGlobalPlan.length);
+  assert.ok(result.transformedGlobalPlan.length > 1);
+  assert.ok(result.localPlan.length > 1);
+  assert.equal(result.summary.candidateCount, 300);
 });
