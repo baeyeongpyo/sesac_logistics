@@ -3156,7 +3156,7 @@ class AutoDockNode(Node):
         vertical_tolerance = self.number(
             "tape_vertical_tolerance_ratio", 0.035, 0.002, 0.10
         )
-        if abs(vertical_error) > vertical_tolerance:
+        if vertical_error < -vertical_tolerance:
             minimum_speed = self.number(
                 "tape_min_forward_speed_m_s", 0.10, 0.10, 0.20
             )
@@ -3169,7 +3169,7 @@ class AutoDockNode(Node):
                 minimum_speed,
                 maximum_speed,
             )
-            forward = math.copysign(speed, -vertical_error)
+            forward = speed
             self.publish_drive(forward, 0.0, 0.0)
             self.publish_status(
                 "running", (
@@ -3193,6 +3193,9 @@ class AutoDockNode(Node):
             tape_angle_deg=round(float(tape["angle_deg"]), 2),
             tape_center_y_ratio=round(float(tape["center_y_ratio"]), 4),
             lateral_speed_m_s=round(direction_sign * lateral_speed, 3),
+            close_tape_reverse_suppressed=bool(
+                vertical_error > vertical_tolerance
+            ),
         )
         return True
 

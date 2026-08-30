@@ -762,7 +762,7 @@ def test_nearest_product_candidate_skips_inventory_blocked_entity():
     assert candidate["entity_id"] == 12
 
 
-def test_tape_pose_hold_corrects_distance_without_lateral_motion():
+def test_tape_pose_hold_never_reverses_when_tape_is_already_close():
     fake = type("FakeDock", (), {})()
     fake.config = {
         "tape_guidance_enabled": True,
@@ -782,9 +782,8 @@ def test_tape_pose_hold_corrects_distance_without_lateral_motion():
         fake, 10.1, 0.0, 0.0, pose_correction_only=True
     )
 
-    assert correcting is True
-    assert commands[0][0] < 0.0
-    assert commands[0][1:] == (0.0, 0.0)
+    assert correcting is False
+    assert commands == []
 
 
 def test_structured_slot_is_normalized():
@@ -1624,7 +1623,7 @@ def test_tape_only_search_uses_configured_angle_not_initial_diagonal(monkeypatch
     assert fake.commands[0][2] < 0.0
 
 
-def test_tape_only_search_corrects_distance_before_lateral(monkeypatch):
+def test_tape_only_search_does_not_reverse_when_tape_is_already_close(monkeypatch):
     fake = tape_search_fake(angle_deg=5.0)
     fake.config["tape_guidance_only"] = True
     fake.latest_tape_guidance["center_y_ratio"] = 0.84
@@ -1633,10 +1632,9 @@ def test_tape_only_search_corrects_distance_before_lateral(monkeypatch):
 
     AutoDockNode.tick_search(fake)
 
-    assert fake.commands == [(-0.10, 0.0, 0.0)]
-    assert fake.statuses[-1][1] == (
-        "warning_tape_distance_correction_before_lateral"
-    )
+    assert fake.commands == [(0.0, 0.12, 0.0)]
+    assert fake.statuses[-1][1] == "warning_tape_pose_held_lateral_search"
+    assert fake.statuses[-1][2]["close_tape_reverse_suppressed"] is True
 
 
 def missing_tape_recovery_fake(front_margin, rear_margin):
