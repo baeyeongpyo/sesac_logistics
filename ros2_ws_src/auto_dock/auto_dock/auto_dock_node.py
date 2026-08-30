@@ -2017,7 +2017,7 @@ class AutoDockNode(Node):
             "lidar_self_mask_front_half_angle_deg", 20.0, 0.0, 90.0
         ))
         max_range = self.number(
-            "lidar_self_mask_front_max_range_m", 0.20, 0.0, 1.0
+            "lidar_self_mask_front_max_range_m", 0.23, 0.0, 1.0
         )
         if abs(normalize_angle(angle)) <= half_angle and distance <= max_range:
             return True

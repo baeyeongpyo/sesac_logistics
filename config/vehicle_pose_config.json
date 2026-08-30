@@ -339,7 +339,7 @@
   "_comment_lidar_self_mask_front_half_angle_deg": "라이다 정면에서 차체 반사로 제외할 좌우 반각(도)",
   "lidar_self_mask_front_half_angle_deg": 20.0,
   "_comment_lidar_self_mask_front_max_range_m": "정면 차체 반사로 제외할 최대 거리(m)",
-  "lidar_self_mask_front_max_range_m": 0.2,
+  "lidar_self_mask_front_max_range_m": 0.23,
   "_comment_lidar_self_mask_fixed_angle_deg": "2호차 정면 차체 반사가 반복되는 LiDAR 중심 각도(도)",
   "lidar_self_mask_fixed_angle_deg": -1.43,
   "_comment_lidar_self_mask_fixed_half_width_deg": "중심 각도 주변에서 제외할 반폭(도); 0이면 비활성",

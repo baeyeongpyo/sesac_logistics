@@ -713,10 +713,10 @@ def test_known_front_chassis_return_is_self_masked():
     fake.number = lambda key, default, *_args: default
 
     assert AutoDockNode.is_lidar_self_return(
-        fake, math.radians(-16.5), 0.20
+        fake, math.radians(-16.5), 0.23
     ) is True
     assert AutoDockNode.is_lidar_self_return(
-        fake, math.radians(-16.5), 0.201
+        fake, math.radians(-16.5), 0.231
     ) is False
 
 

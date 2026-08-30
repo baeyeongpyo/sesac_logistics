@@ -154,7 +154,7 @@ TUNING_FIELDS = (
     ("ready_right_turn_tolerance_deg", "Ready 우회전 오차(°)", 3.0, float, 0.5, 15.0),
     ("right_turn_scan_wait_timeout_sec", "우회전 LiDAR 대기(초)", 2.0, float, 0.5, 5.0),
     ("lidar_self_mask_front_half_angle_deg", "차체마스크 반각(°)", 20.0, float, 0.0, 90.0),
-    ("lidar_self_mask_front_max_range_m", "차체마스크 거리(m)", 0.20, float, 0.0, 1.0),
+    ("lidar_self_mask_front_max_range_m", "차체마스크 거리(m)", 0.23, float, 0.0, 1.0),
     ("lidar_self_mask_fixed_angle_deg", "차체반사 고정각(°)", -1.43, float, -180.0, 180.0),
     ("lidar_self_mask_fixed_half_width_deg", "고정각 마스크 반폭(°)", 1.0, float, 0.0, 10.0),
 )
