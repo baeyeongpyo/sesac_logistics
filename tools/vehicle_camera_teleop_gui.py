@@ -140,8 +140,6 @@ def detect_warning_tape_debug(
             side_areas.append(
                 cv2.countNonZero(region) / max(float(region.size), 1.0)
             )
-        if not side_areas or max(side_areas) < 0.15:
-            continue
         center_x, center_y = centroids[label]
         candidates.append({
             "label": label,
@@ -151,6 +149,9 @@ def detect_warning_tape_debug(
             "area": int(area),
             "x0": int(x),
             "x1": int(x + component_width),
+            "black_adjacent": bool(
+                side_areas and max(side_areas) >= 0.15
+            ),
         })
     best_group = []
     best_score = -1.0
@@ -207,6 +208,9 @@ def detect_warning_tape_debug(
     for candidate in best_group:
         accepted[labels == candidate["label"]] = 255
     accepted_components = len(best_group)
+    black_adjacent_components = sum(
+        int(candidate["black_adjacent"]) for candidate in best_group
+    )
     ys, xs = np.nonzero(accepted)
     debug = {
         "detected": False,
@@ -215,13 +219,16 @@ def detect_warning_tape_debug(
         "raw_yellow_pixels": int(cv2.countNonZero(raw_mask)),
         "yellow_pixels": int(len(xs)),
         "component_count": int(accepted_components),
-        "black_adjacent_components": int(accepted_components),
+        "black_adjacent_components": int(black_adjacent_components),
         "black_adjacent_candidates": int(len(candidates)),
         "span_px": 0 if not len(xs) else int(xs.max()) - int(xs.min()),
         "accepted_mask": accepted,
     }
     if accepted_components < 2:
         debug["reason"] = "yellow_with_black_neighbor<2"
+        return debug
+    if black_adjacent_components < max(1, math.ceil(accepted_components / 2)):
+        debug["reason"] = "black_neighbor_majority_failed"
         return debug
     if len(xs) < int(minimum_yellow_pixels):
         debug["reason"] = f"pixels<{int(minimum_yellow_pixels)}"

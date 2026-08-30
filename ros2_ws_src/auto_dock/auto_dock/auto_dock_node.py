@@ -79,7 +79,8 @@ def scan_direction(angle):
 
 
 def detect_warning_tape(
-    frame, minimum_yellow_pixels=600, minimum_center_y_ratio=None
+    frame, minimum_yellow_pixels=600, minimum_center_y_ratio=None,
+    filter_config=None,
 ):
     """Detect a mostly horizontal yellow/black warning-tape band."""
     if frame is None or frame.size == 0:
@@ -90,14 +91,33 @@ def detect_warning_tape(
     ))
     roi = frame[roi_top:, :]
     roi_height = roi.shape[0]
+    values = filter_config if isinstance(filter_config, dict) else {}
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     yellow = cv2.inRange(
-        hsv, np.asarray((15, 90, 70), dtype=np.uint8),
-        np.asarray((42, 255, 255), dtype=np.uint8),
+        hsv,
+        np.asarray((
+            int(values.get("h_min", 15)),
+            int(values.get("s_min", 90)),
+            int(values.get("v_min", 70)),
+        ), dtype=np.uint8),
+        np.asarray((
+            int(values.get("h_max", 42)),
+            int(values.get("s_max", 255)),
+            int(values.get("v_max", 255)),
+        ), dtype=np.uint8),
     )
-    yellow = cv2.morphologyEx(
-        yellow, cv2.MORPH_OPEN, np.ones((3, 3), dtype=np.uint8)
-    )
+    for operation, key, default in (
+        (cv2.MORPH_OPEN, "open_kernel", 3),
+        (cv2.MORPH_CLOSE, "close_kernel", 1),
+    ):
+        kernel_size = int(values.get(key, default))
+        if kernel_size > 1:
+            if kernel_size % 2 == 0:
+                kernel_size += 1
+            yellow = cv2.morphologyEx(
+                yellow, operation,
+                np.ones((kernel_size, kernel_size), dtype=np.uint8),
+            )
     black = cv2.inRange(
         hsv, np.asarray((0, 0, 0), dtype=np.uint8),
         np.asarray((179, 255, 75), dtype=np.uint8),
@@ -109,9 +129,12 @@ def detect_warning_tape(
         yellow, connectivity=8
     )
     candidates = []
+    minimum_component_pixels = int(values.get(
+        "min_component_pixels", 200 if filter_config is not None else 80
+    ))
     for label in range(1, component_count):
         x, y, component_width, component_height, area = stats[label]
-        if area < 80 or component_width < 12:
+        if area < minimum_component_pixels or component_width < 12:
             continue
         side_width = max(8, int(round(component_width * 0.75)))
         y0 = max(0, y)
@@ -128,8 +151,6 @@ def detect_warning_tape(
             side_areas.append(
                 cv2.countNonZero(region) / max(float(region.size), 1.0)
             )
-        if not side_areas or max(side_areas) < 0.15:
-            continue
         center_x, center_y = centroids[label]
         candidates.append({
             "label": label,
@@ -139,6 +160,9 @@ def detect_warning_tape(
             "area": int(area),
             "x0": int(x),
             "x1": int(x + component_width),
+            "black_adjacent": bool(
+                side_areas and max(side_areas) >= 0.15
+            ),
         })
     best_group = []
     best_score = -1.0
@@ -195,9 +219,13 @@ def detect_warning_tape(
     for candidate in best_group:
         accepted[labels == candidate["label"]] = 255
     accepted_components = len(best_group)
+    black_adjacent_components = sum(
+        int(candidate["black_adjacent"]) for candidate in best_group
+    )
     ys, xs = np.nonzero(accepted)
     if (
         accepted_components < 2
+        or black_adjacent_components < max(1, math.ceil(accepted_components / 2))
         or len(xs) < int(minimum_yellow_pixels)
         or int(xs.max()) - int(xs.min()) < int(width * 0.25)
     ):
@@ -227,17 +255,21 @@ def detect_warning_tape(
         "angle_deg": float(angle_deg),
         "yellow_pixels": int(len(xs)),
         "component_count": int(accepted_components),
-        "black_adjacent_components": int(accepted_components),
+        "black_adjacent_components": int(black_adjacent_components),
         "band_width_px": round(band_width_px, 1),
     }
 
 
-def detect_dock_end_markers(frame, minimum_red_pixels=180):
+def detect_dock_end_markers(
+    frame, minimum_red_pixels=180, warning_tape_filter_config=None
+):
     """Return repeating red DOCK end bands that meet the warning tape."""
     if frame is None or frame.size == 0:
         return {}
     height, width = frame.shape[:2]
-    tape = detect_warning_tape(frame)
+    tape = detect_warning_tape(
+        frame, filter_config=warning_tape_filter_config
+    )
     if tape is None:
         return {}
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -955,6 +987,9 @@ class AutoDockNode(Node):
         # 0 means infer the vehicle namespace from the DDS domain.
         self.declare_parameter("vehicle", 0)
         self.declare_parameter("pose_config", "/shared/vehicle_pose_config.json")
+        self.declare_parameter(
+            "warning_tape_hsv_config", "/home/ubuntu/warning_tape_hsv.json"
+        )
         self.declare_parameter("config_overrides", "{}")
         self.declare_parameter("search_linear_speed_m_s", 0.0)
         self.declare_parameter("trigger_topic", "")
@@ -993,6 +1028,11 @@ class AutoDockNode(Node):
             )
         robot = f"/robot_{self.vehicle}"
         self.pose_config_path = Path(str(self.get_parameter("pose_config").value))
+        self.warning_tape_hsv_path = Path(str(
+            self.get_parameter("warning_tape_hsv_config").value
+        ))
+        self.warning_tape_hsv_cache = None
+        self.warning_tape_hsv_cache_mtime_ns = None
         self.config_overrides = self.parse_overrides(
             str(self.get_parameter("config_overrides").value)
         )
@@ -1238,6 +1278,39 @@ class AutoDockNode(Node):
             self.get_logger().warning(f"pose config read failed: {exc}")
         data.update(self.config_overrides)
         self.config = data
+
+    def warning_tape_filter_values(self):
+        """Reload the GUI-authored HSV mask config when it changes."""
+        path = Path(str(self.config.get(
+            "warning_tape_hsv_config_path", self.warning_tape_hsv_path
+        ))).expanduser()
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            return None
+        if (
+            self.warning_tape_hsv_cache is not None
+            and self.warning_tape_hsv_cache_mtime_ns == mtime_ns
+        ):
+            return self.warning_tape_hsv_cache
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("root must be an object")
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            self.get_logger().warning(f"warning tape HSV config read failed: {exc}")
+            return None
+        payload.setdefault("min_component_pixels", 200)
+        self.warning_tape_hsv_cache = payload
+        self.warning_tape_hsv_cache_mtime_ns = mtime_ns
+        self.get_logger().info(
+            "warning tape HSV config loaded: "
+            f"H={payload.get('h_min', 15)}-{payload.get('h_max', 42)} "
+            f"S={payload.get('s_min', 90)}-{payload.get('s_max', 255)} "
+            f"V={payload.get('v_min', 70)}-{payload.get('v_max', 255)} "
+            f"min_component={payload['min_component_pixels']}"
+        )
+        return self.warning_tape_hsv_cache
 
     def number(self, key, default, minimum=None, maximum=None):
         try:
@@ -1608,6 +1681,7 @@ class AutoDockNode(Node):
         tape_inventory_due = (
             inventory_due and self.dock_inventory_tracker.nearest_tape_only
         )
+        warning_tape_filter = self.warning_tape_filter_values()
         if tape_due or tape_inventory_due:
             previous_tape = getattr(self, "latest_tape_guidance", None)
             previous_tape_age = (
@@ -1634,6 +1708,7 @@ class AutoDockNode(Node):
                     "tape_min_yellow_pixels", 600, 100, 20000
                 )),
                 minimum_center_y_ratio=tracked_roi_minimum,
+                filter_config=warning_tape_filter,
             )
             accepted = AutoDockNode.update_warning_tape_guidance(
                 self, observation, time.monotonic()
@@ -1655,6 +1730,7 @@ class AutoDockNode(Node):
                 minimum_red_pixels=int(self.number(
                     "dock_inventory_minimum_red_pixels", 180, 50, 5000
                 )),
+                warning_tape_filter_config=warning_tape_filter,
             )
             detection = self.latest_detection or {}
             detection_age = time.monotonic() - self.latest_detection_at

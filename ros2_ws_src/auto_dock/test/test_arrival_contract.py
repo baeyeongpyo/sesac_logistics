@@ -163,6 +163,33 @@ def test_warning_tape_tracking_roi_ignores_everything_above_previous_band():
     ) is None
 
 
+def test_warning_tape_uses_saved_hsv_and_drops_small_components():
+    frame = np.full((480, 640, 3), 180, dtype=np.uint8)
+    pale_yellow = cv2.cvtColor(
+        np.asarray([[[30, 50, 220]]], dtype=np.uint8), cv2.COLOR_HSV2BGR
+    )[0, 0].tolist()
+    for start_x in (20, 150, 280):
+        cv2.rectangle(frame, (start_x, 330), (start_x + 80, 355),
+                      pale_yellow, -1)
+        cv2.rectangle(frame, (start_x + 80, 330), (start_x + 120, 355),
+                      (5, 5, 5), -1)
+    cv2.rectangle(frame, (500, 100), (509, 109), pale_yellow, -1)
+    saved = {
+        "h_min": 25, "h_max": 40,
+        "s_min": 30, "s_max": 71,
+        "v_min": 70, "v_max": 255,
+        "open_kernel": 1, "close_kernel": 1,
+        "min_component_pixels": 200,
+    }
+
+    tape = detect_warning_tape(frame, filter_config=saved)
+
+    assert tape is not None
+    assert tape["component_count"] == 3
+    assert tape["black_adjacent_components"] >= 2
+    assert abs(tape["angle_deg"]) < 1.0
+
+
 def test_warning_tape_initial_approach_finishes_near_target_height():
     fake = type("FakeDock", (), {})()
     fake.config = {

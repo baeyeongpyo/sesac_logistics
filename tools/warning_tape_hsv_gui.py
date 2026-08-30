@@ -48,6 +48,7 @@ DEFAULTS = {
     "b_max": 255,
     "open_kernel": 3,
     "close_kernel": 1,
+    "min_component_pixels": 200,
 }
 
 
@@ -94,6 +95,16 @@ def filtered_mask(frame, values):
             mask = cv2.morphologyEx(
                 mask, operation, np.ones((size, size), dtype=np.uint8)
             )
+    minimum_area = int(values.get("min_component_pixels", 0))
+    if minimum_area > 1:
+        count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            mask, connectivity=8
+        )
+        filtered = np.zeros_like(mask)
+        for label in range(1, count):
+            if int(stats[label, cv2.CC_STAT_AREA]) >= minimum_area:
+                filtered[labels == label] = 255
+        mask = filtered
     return hsv, mask
 
 
@@ -208,6 +219,7 @@ class HsvTuner(QMainWindow):
             ("b_max", "B max", 0, 255),
             ("open_kernel", "Open kernel", 1, 21),
             ("close_kernel", "Close kernel", 1, 21),
+            ("min_component_pixels", "Min component px", 0, 5000),
         )
         for key, label, minimum, maximum in specs:
             row = QHBoxLayout()
