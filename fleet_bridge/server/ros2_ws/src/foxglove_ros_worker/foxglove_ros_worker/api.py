@@ -373,6 +373,7 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
                     'summary': 'map 좌표계 목표 주행',
                     'value': {
                         'operation_id': '73d5b9af-5a12-4f34-a96c-5de116df1e8e',
+                        'purpose': 'PICK',
                         'frame_id': 'map',
                         'x': 1.5,
                         'y': 0.0,

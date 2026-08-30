@@ -221,8 +221,9 @@ class VehicleCommandService:
         }
 
     def navigation_goal(self, payload):
-        goal = self._goal(payload, {'operation_id'})
+        goal = self._goal(payload, {'operation_id', 'purpose'})
         operation_id = self._operation_id(payload.get('operation_id'))
+        purpose = self._navigation_purpose(payload.get('purpose'))
         attempt_id = str(uuid.uuid4())
 
         with self._lock:
@@ -234,6 +235,8 @@ class VehicleCommandService:
                 and operation_id != self._status['operation_id']
             ):
                 raise OperationConflictError('OPERATION_ID_MISMATCH')
+            if origin_state == 'PICK_COMPLETE' and purpose != 'PLACE':
+                raise OperationConflictError('DRIVE_PURPOSE_MUST_BE_PLACE')
             self._cancel_manual_timer()
             self._manual_generation += 1
             self._active_navigation_operation = operation_id
@@ -552,6 +555,11 @@ class VehicleCommandService:
             'target': target,
         }
 
+    def _navigation_purpose(self, value):
+        if value is None:
+            return None
+        return self._required_uppercase({'purpose': value}, 'purpose', {'PICK', 'PLACE'})
+
     @staticmethod
     def _auto_dock_rejected(raw_state, reason):
         return (
@@ -757,6 +765,7 @@ def openapi_document(service):
                             'required': ['x', 'y', 'yaw'],
                             'properties': {
                                 'operation_id': {'type': 'string', 'format': 'uuid'},
+                                'purpose': {'type': 'string', 'enum': ['PICK', 'PLACE']},
                                 'frame_id': {'type': 'string', 'default': 'map'},
                                 'x': {'type': 'number'},
                                 'y': {'type': 'number'},

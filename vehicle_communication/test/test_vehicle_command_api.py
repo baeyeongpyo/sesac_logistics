@@ -172,7 +172,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         with urlopen(f'{self.base_url}{path}', timeout=2) as response:
             return response.status, json.load(response)
 
-    def navigation_goal(self, operation_id=None):
+    def navigation_goal(self, operation_id=None, purpose=None):
         _, operation = self.get_json('/v1/operation-status')
         if operation['state'] == 'INIT':
             idle_status, idle = self.mark_idle()
@@ -181,6 +181,8 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         payload = {'frame_id': 'map', 'x': 1.50, 'y': 0.0, 'yaw': 0.0}
         if operation_id is not None:
             payload['operation_id'] = operation_id
+        if purpose is not None:
+            payload['purpose'] = purpose
         return post_json(
             f'{self.base_url}/v1/navigation/goals',
             payload,
@@ -315,6 +317,23 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             'previous_state': 'PLACE_COMPLETE',
             'detail': 'AUTO_DOCK_PLACE_COMPLETED',
         })
+
+    def test_loaded_vehicle_requires_place_purpose_before_drive(self):
+        """A loaded vehicle must not accept an unspecified or Pick-purpose drive."""
+        self.mark_idle()
+        self.auto_dock_command('PICK')
+        self.service.on_auto_dock_drive_ready()
+
+        rejected_status, rejected = self.navigation_goal(INVENTORY_OPERATION_ID)
+        accepted_status, accepted = self.navigation_goal(
+            INVENTORY_OPERATION_ID,
+            purpose='PLACE',
+        )
+
+        self.assertEqual(rejected_status, 409)
+        self.assertEqual(rejected, {'error': 'DRIVE_PURPOSE_MUST_BE_PLACE'})
+        self.assertEqual(accepted_status, 202)
+        self.assertEqual(accepted['state'], 'DRIVE')
 
     def test_auto_dock_error_keeps_operation_for_operator_recovery(self):
         """Dock errors must retain the Inventory operation until explicit recovery."""
