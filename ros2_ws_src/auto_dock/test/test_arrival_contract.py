@@ -2064,6 +2064,10 @@ def test_close_eight_cm_pnp_measurement_remains_valid_for_insertion():
 
 def test_close_valid_target_pauses_before_insertion(monkeypatch):
     fake = type("FakeDock", (), {})()
+    fake.config = {"tape_guidance_enabled": True}
+    fake.latest_tape_guidance = None
+    fake.latest_tape_guidance_at = 0.0
+    fake.tape_initial_detection_complete = False
     candidate = {"depth_yaw": {"yaw_deg": 0.0}}
     pnp = {"yaw_deg": 0.0, "depth_fallback": False}
     fake.valid_measurement = lambda: (candidate, pnp, None)
