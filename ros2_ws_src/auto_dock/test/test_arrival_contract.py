@@ -2562,7 +2562,7 @@ def test_insertion_corrects_lateral_and_yaw_from_visible_target():
     assert commands == [(0.08, pytest.approx(0.01), pytest.approx(0.08))]
 
 
-def test_nearest_candidate_probe_sweeps_both_sides_and_locks_closest():
+def test_nearest_candidate_probe_yaws_both_sides_and_locks_closest():
     fake = type("FakeDock", (), {})()
     fake.config = {
         "tape_guidance_enabled": False,
@@ -2570,7 +2570,6 @@ def test_nearest_candidate_probe_sweeps_both_sides_and_locks_closest():
         "search_lateral_direction": "left",
     }
     fake.number = lambda key, default, *_args: default
-    fake.odom_position = (0.0, 0.0)
     fake.odom_yaw = 0.0
     fake.search_heading_yaw = 0.0
     fake.search_heading_source = "odom"
@@ -2598,17 +2597,17 @@ def test_nearest_candidate_probe_sweeps_both_sides_and_locks_closest():
     assert AutoDockNode.tick_nearest_candidate_probe(
         fake, farther, 1.0, 0.12
     ) is True
-    assert commands[-1] == (0.0, 0.12, 0.0)
+    assert commands[-1] == (0.0, 0.0, 0.18)
 
-    fake.odom_position = (0.0, 0.10)
+    fake.odom_yaw = math.radians(20.0)
     AutoDockNode.tick_nearest_candidate_probe(fake, closer, 1.1, 0.12)
     assert fake.nearest_probe_phase == 1
 
-    fake.odom_position = (0.0, -0.10)
+    fake.odom_yaw = math.radians(-20.0)
     AutoDockNode.tick_nearest_candidate_probe(fake, farther, 1.2, 0.12)
     assert fake.nearest_probe_phase == 2
 
-    fake.odom_position = (0.0, 0.0)
+    fake.odom_yaw = 0.0
     AutoDockNode.tick_nearest_candidate_probe(fake, farther, 1.3, 0.12)
 
     assert fake.nearest_probe_complete is True

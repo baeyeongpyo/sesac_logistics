@@ -3156,45 +3156,39 @@ class AutoDockNode(Node):
             self.nearest_probe_best_distance_cm = distance_cm
             self.nearest_probe_best_entity_id = entity_id
 
-    def tick_nearest_candidate_probe(self, candidate, now, lateral_speed):
-        """Sweep both sides before locking the closest NEAREST product."""
-        if self.nearest_probe_start_position is None:
+    def tick_nearest_candidate_probe(self, candidate, _now, _lateral_speed):
+        """Yaw both ways before locking the closest NEAREST product."""
+        if self.nearest_probe_heading_yaw is None:
             if candidate is None or candidate.get("entity_id") is None:
                 return False
-            if self.odom_position is None:
+            if self.odom_yaw is None:
                 self.nearest_probe_complete = True
                 return False
-            self.nearest_probe_start_position = self.odom_position
-            self.nearest_probe_heading_yaw = (
-                self.search_heading_yaw
-                if self.search_heading_yaw is not None else self.odom_yaw
-            )
-            if self.nearest_probe_heading_yaw is None:
-                self.nearest_probe_complete = True
-                self.nearest_probe_start_position = None
-                return False
+            self.nearest_probe_heading_yaw = self.odom_yaw
             self.nearest_probe_phase = 0
             self.nearest_probe_best_entity_id = None
             self.nearest_probe_best_distance_cm = math.inf
         AutoDockNode.remember_nearest_probe_candidate(self, candidate)
-        start_x, start_y = self.nearest_probe_start_position
-        dx = self.odom_position[0] - start_x
-        dy = self.odom_position[1] - start_y
-        heading = self.nearest_probe_heading_yaw
-        lateral_offset = -math.sin(heading) * dx + math.cos(heading) * dy
-        distance = self.number(
-            "nearest_candidate_probe_distance_m", 0.10, 0.02, 0.30
-        )
+        if self.odom_yaw is None:
+            self.stop_drive()
+            self.publish_status("waiting", "nearest_candidate_probe_odom_missing")
+            return True
+        angle = math.radians(self.number(
+            "nearest_candidate_probe_angle_deg", 20.0, 2.0, 45.0
+        ))
+        tolerance = math.radians(self.number(
+            "nearest_candidate_probe_yaw_tolerance_deg", 1.5, 0.5, 5.0
+        ))
         search_direction = str(
             self.config.get("search_lateral_direction", "left")
         ).strip().lower()
         first_sign = -1.0 if search_direction == "right" else 1.0
-        targets = (first_sign * distance, -first_sign * distance, 0.0)
-        tolerance = self.number(
-            "nearest_candidate_probe_tolerance_m", 0.015, 0.005, 0.05
-        )
+        targets = (first_sign * angle, -first_sign * angle, 0.0)
         phase = min(self.nearest_probe_phase, len(targets) - 1)
-        error = targets[phase] - lateral_offset
+        current_offset = normalize_angle(
+            self.odom_yaw - self.nearest_probe_heading_yaw
+        )
+        error = normalize_angle(targets[phase] - current_offset)
         if abs(error) <= tolerance:
             self.stop_drive()
             self.nearest_probe_phase += 1
@@ -3219,28 +3213,19 @@ class AutoDockNode(Node):
             self.publish_status(
                 "running", "nearest_candidate_probe_endpoint",
                 phase=self.nearest_probe_phase,
-                lateral_offset_m=round(lateral_offset, 3),
+                yaw_offset_deg=round(math.degrees(current_offset), 1),
             )
             return True
-        movement_sign = math.copysign(1.0, error)
-        if AutoDockNode.command_warning_tape_search(
-            self, now, lateral_speed, movement_sign
-        ):
-            return True
-        yaw_error = AutoDockNode.search_heading_error(self)
-        if yaw_error is not None and abs(math.degrees(yaw_error)) > self.number(
-            "tag_search_yaw_tolerance_deg", 3.0, 0.5, 15.0
-        ):
-            self.publish_drive(
-                0.0, 0.0, AutoDockNode.search_angular_command(self, yaw_error)
-            )
-        else:
-            self.publish_drive(0.0, movement_sign * lateral_speed, 0.0)
+        speed = self.number(
+            "nearest_candidate_probe_angular_speed_rad_s", 0.18, 0.05, 0.40
+        )
+        angular = math.copysign(min(speed, max(0.08, abs(error))), error)
+        self.publish_drive(0.0, 0.0, angular)
         self.publish_status(
             "running", "nearest_candidate_probing",
             phase=phase,
-            target_offset_m=round(targets[phase], 3),
-            lateral_offset_m=round(lateral_offset, 3),
+            target_yaw_offset_deg=round(math.degrees(targets[phase]), 1),
+            yaw_offset_deg=round(math.degrees(current_offset), 1),
             best_entity_id=self.nearest_probe_best_entity_id,
             best_distance_cm=(
                 None if not math.isfinite(self.nearest_probe_best_distance_cm)
@@ -3259,7 +3244,7 @@ class AutoDockNode(Node):
             )
             and not getattr(self, "nearest_probe_complete", False)
             and (
-                getattr(self, "nearest_probe_start_position", None) is not None
+                getattr(self, "nearest_probe_heading_yaw", None) is not None
                 or candidate is not None
             )
         )
