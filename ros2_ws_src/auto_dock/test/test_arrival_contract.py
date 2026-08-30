@@ -67,6 +67,40 @@ def test_warning_tape_first_detection_can_use_the_full_frame():
     assert detect_warning_tape(frame) is not None
 
 
+def test_warning_tape_groups_one_band_instead_of_fitting_yellow_clutter():
+    frame = np.full((480, 640, 3), 180, dtype=np.uint8)
+    for x, y, width, height in (
+        (70, 35, 45, 42),
+        (145, 120, 55, 48),
+        (245, 195, 75, 65),
+        (380, 260, 60, 55),
+    ):
+        cv2.rectangle(frame, (x, y), (x + width, y + height), (0, 220, 220), -1)
+        cv2.rectangle(
+            frame, (x + width, y), (x + width + 25, y + height), (5, 5, 5), -1,
+        )
+    for start_x in range(10, 610, 150):
+        end_x = min(start_x + 82, 639)
+        top_left = int(438 - 0.13 * start_x)
+        top_right = int(438 - 0.13 * end_x)
+        cv2.fillConvexPoly(frame, np.asarray([
+            (start_x, top_left), (end_x, top_right),
+            (end_x, top_right + 35), (start_x, top_left + 35),
+        ], dtype=np.int32), (0, 220, 220))
+        black_end = min(end_x + 45, 639)
+        black_top_right = int(438 - 0.13 * black_end)
+        cv2.fillConvexPoly(frame, np.asarray([
+            (end_x, top_right), (black_end, black_top_right),
+            (black_end, black_top_right + 35), (end_x, top_right + 35),
+        ], dtype=np.int32), (5, 5, 5))
+
+    tape = detect_warning_tape(frame)
+
+    assert tape is not None
+    assert -10.0 < tape["angle_deg"] < -5.0
+    assert tape["center_y_ratio"] > 0.75
+
+
 def test_warning_tape_rejects_repeating_yellow_without_adjacent_black():
     frame = np.full((480, 640, 3), 90, dtype=np.uint8)
     for start_x in range(20, 600, 100):

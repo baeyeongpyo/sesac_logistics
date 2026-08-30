@@ -112,11 +112,10 @@ def detect_warning_tape_debug(frame, minimum_yellow_pixels=600):
     black = cv2.morphologyEx(
         black, cv2.MORPH_OPEN, np.ones((3, 3), dtype=np.uint8)
     )
-    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+    count, labels, stats, centroids = cv2.connectedComponentsWithStats(
         yellow, connectivity=8
     )
-    accepted = np.zeros_like(yellow)
-    accepted_components = 0
+    candidates = []
     for label in range(1, count):
         x, y, component_width, component_height, area = stats[label]
         if area < 80 or component_width < 12:
@@ -138,8 +137,55 @@ def detect_warning_tape_debug(frame, minimum_yellow_pixels=600):
             )
         if not side_areas or max(side_areas) < 0.15:
             continue
-        accepted[labels == label] = 255
-        accepted_components += 1
+        center_x, center_y = centroids[label]
+        candidates.append({
+            "label": label,
+            "center_x": float(center_x),
+            "center_y": float(center_y),
+            "height": int(component_height),
+            "area": int(area),
+            "x0": int(x),
+            "x1": int(x + component_width),
+        })
+    best_group = []
+    best_score = -1.0
+    for first_index, first in enumerate(candidates):
+        for second in candidates[first_index + 1:]:
+            dx = second["center_x"] - first["center_x"]
+            dy = second["center_y"] - first["center_y"]
+            if abs(dx) < 12.0:
+                continue
+            angle_deg = math.degrees(math.atan2(dy, dx))
+            if angle_deg >= 90.0:
+                angle_deg -= 180.0
+            if angle_deg < -90.0:
+                angle_deg += 180.0
+            if abs(angle_deg) > 35.0:
+                continue
+            norm = math.hypot(dx, dy)
+            group = []
+            for candidate in candidates:
+                distance = abs(
+                    dy * (candidate["center_x"] - first["center_x"])
+                    - dx * (candidate["center_y"] - first["center_y"])
+                ) / norm
+                tolerance = max(14.0, min(30.0, candidate["height"] * 0.5))
+                if distance <= tolerance:
+                    group.append(candidate)
+            span = max(item["x1"] for item in group) - min(
+                item["x0"] for item in group
+            )
+            area = sum(item["area"] for item in group)
+            score = span * (1.0 + 0.25 * max(0, len(group) - 2)) + min(
+                area, 5000
+            ) * 0.01
+            if score > best_score:
+                best_score = score
+                best_group = group
+    accepted = np.zeros_like(yellow)
+    for candidate in best_group:
+        accepted[labels == candidate["label"]] = 255
+    accepted_components = len(best_group)
     ys, xs = np.nonzero(accepted)
     debug = {
         "detected": False,
@@ -149,6 +195,7 @@ def detect_warning_tape_debug(frame, minimum_yellow_pixels=600):
         "yellow_pixels": int(len(xs)),
         "component_count": int(accepted_components),
         "black_adjacent_components": int(accepted_components),
+        "black_adjacent_candidates": int(len(candidates)),
         "span_px": 0 if not len(xs) else int(xs.max()) - int(xs.min()),
         "accepted_mask": accepted,
     }
