@@ -275,6 +275,56 @@ def test_dock_end_marker_detects_repeating_red_band_at_right_edge():
     assert "left" not in markers
 
 
+def test_dock_end_uses_default_tape_fallback_when_saved_mask_misses():
+    frame = np.full((480, 640, 3), 100, dtype=np.uint8)
+    for top in (120, 190, 260):
+        cv2.rectangle(frame, (595, top), (628, top + 34), (0, 0, 230), -1)
+    for left in (80, 190, 300, 410, 550):
+        cv2.rectangle(frame, (left, 302), (left + 70, 330), (0, 230, 230), -1)
+        cv2.rectangle(frame, (left + 70, 302), (left + 100, 330), (5, 5, 5), -1)
+    deliberately_missing_tape = {
+        "h_min": 100, "h_max": 120,
+        "s_min": 200, "s_max": 255,
+        "v_min": 200, "v_max": 255,
+    }
+
+    markers = detect_dock_end_markers(
+        frame, warning_tape_filter_config=deliberately_missing_tape
+    )
+
+    assert "right" in markers
+
+
+def test_dock_right_end_can_appear_in_left_half_of_camera():
+    frame = np.full((480, 640, 3), 100, dtype=np.uint8)
+    for top in (120, 190, 260):
+        cv2.rectangle(frame, (270, top), (300, top + 34), (0, 0, 230), -1)
+    for left in (20, 90, 160, 230):
+        cv2.rectangle(frame, (left, 302), (left + 50, 330), (0, 230, 230), -1)
+        cv2.rectangle(frame, (left + 50, 302), (left + 70, 330), (5, 5, 5), -1)
+
+    markers = detect_dock_end_markers(frame)
+
+    assert "right" in markers
+    assert markers["right"]["x_px"] < 320
+    assert "left" not in markers
+
+
+def test_dock_left_end_can_appear_in_right_half_of_camera():
+    frame = np.full((480, 640, 3), 100, dtype=np.uint8)
+    for top in (120, 190, 260):
+        cv2.rectangle(frame, (350, top), (380, top + 34), (0, 0, 230), -1)
+    for left in (360, 430, 500, 570):
+        cv2.rectangle(frame, (left, 302), (min(left + 50, 639), 330), (0, 230, 230), -1)
+        cv2.rectangle(frame, (min(left + 50, 639), 302), (min(left + 70, 639), 330), (5, 5, 5), -1)
+
+    markers = detect_dock_end_markers(frame)
+
+    assert "left" in markers
+    assert markers["left"]["x_px"] > 320
+    assert "right" not in markers
+
+
 def test_dock_end_marker_uses_gui_authored_hsv_range():
     frame = np.full((480, 640, 3), 100, dtype=np.uint8)
     blue = cv2.cvtColor(

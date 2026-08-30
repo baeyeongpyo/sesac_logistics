@@ -253,6 +253,8 @@ def detect_warning_tape(
     return {
         "center_y_ratio": float(center_y / height),
         "angle_deg": float(angle_deg),
+        "x_min_px": int(xs.min()),
+        "x_max_px": int(xs.max()),
         "yellow_pixels": int(len(xs)),
         "component_count": int(accepted_components),
         "black_adjacent_components": int(black_adjacent_components),
@@ -262,15 +264,21 @@ def detect_warning_tape(
 
 def detect_dock_end_markers(
     frame, minimum_red_pixels=180, warning_tape_filter_config=None,
-    dock_end_filter_config=None,
+    dock_end_filter_config=None, warning_tape=None,
 ):
     """Return repeating red DOCK end bands that meet the warning tape."""
     if frame is None or frame.size == 0:
         return {}
     height, width = frame.shape[:2]
-    tape = detect_warning_tape(
+    tape = warning_tape if isinstance(warning_tape, dict) else detect_warning_tape(
         frame, filter_config=warning_tape_filter_config
     )
+    if tape is None and warning_tape_filter_config is not None:
+        # The control GUI's proven default tape detector can still be valid
+        # when an old/tightly tuned navigation mask no longer matches current
+        # lighting.  A DOCK end must not be discarded solely because that
+        # optional override missed the same visible warning line.
+        tape = detect_warning_tape(frame)
     if tape is None:
         return {}
     values = dock_end_filter_config if isinstance(
@@ -351,13 +359,10 @@ def detect_dock_end_markers(
         })
     markers = {}
     for side in ("left", "right"):
-        side_components = [
-            item for item in components
-            if (
-                item["center"][0] <= width * 0.45
-                if side == "left" else item["center"][0] >= width * 0.55
-            )
-        ]
+        # A physical dock end may appear anywhere in the camera frame while
+        # strafing.  Its side is determined below by which direction the
+        # horizontal warning tape continues from the endpoint.
+        side_components = components
         best = None
         for first_index, first in enumerate(side_components):
             for second in side_components[first_index + 1:]:
@@ -421,11 +426,21 @@ def detect_dock_end_markers(
             marker_intercept = line_y - marker_slope * line_x
             intersection_x = (tape_intercept - marker_intercept) / denominator
         intersection_y = tape_slope * intersection_x + tape_intercept
-        if (
-            not 0.0 <= intersection_x < width
-            or (side == "right" and intersection_x < width * 0.50)
-            or (side == "left" and intersection_x > width * 0.50)
-        ):
+        if not 0.0 <= intersection_x < width:
+            continue
+        left_tape_span = max(
+            0.0, intersection_x - float(tape.get("x_min_px", intersection_x))
+        )
+        right_tape_span = max(
+            0.0, float(tape.get("x_max_px", intersection_x)) - intersection_x
+        )
+        minimum_direction_span = max(20.0, width * 0.05)
+        if max(left_tape_span, right_tape_span) < minimum_direction_span:
+            continue
+        inferred_side = (
+            "right" if left_tape_span > right_tape_span else "left"
+        )
+        if side != inferred_side:
             continue
         red_bottom = max(item["y"] + item["height"] for item in inliers)
         contact_gap = max(30, int(round(height * 0.10)))
@@ -1776,6 +1791,7 @@ class AutoDockNode(Node):
             inventory_due and self.dock_inventory_tracker.nearest_tape_only
         )
         warning_tape_filter = self.warning_tape_filter_values()
+        current_tape_observation = None
         if tape_due or tape_inventory_due:
             previous_tape = getattr(self, "latest_tape_guidance", None)
             previous_tape_age = (
@@ -1804,6 +1820,7 @@ class AutoDockNode(Node):
                 minimum_center_y_ratio=tracked_roi_minimum,
                 filter_config=warning_tape_filter,
             )
+            current_tape_observation = observation
             accepted = AutoDockNode.update_warning_tape_guidance(
                 self, observation, time.monotonic()
             )
@@ -1827,6 +1844,7 @@ class AutoDockNode(Node):
                 )),
                 warning_tape_filter_config=warning_tape_filter,
                 dock_end_filter_config=dock_end_filter,
+                warning_tape=current_tape_observation,
             )
             detection = self.latest_detection or {}
             detection_age = time.monotonic() - self.latest_detection_at
