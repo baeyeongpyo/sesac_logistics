@@ -5172,13 +5172,29 @@ class TeleopWindow(QMainWindow):
         if not inventory_fresh:
             return frame
         for side, marker in (inventory.get("markers") or {}).items():
-            box = marker.get("box") if isinstance(marker, dict) else None
-            if not isinstance(box, (list, tuple)) or len(box) != 4:
+            if not isinstance(marker, dict):
                 continue
-            x1, y1, x2, y2 = (int(round(value)) for value in box)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+            line = marker.get("line")
+            box = marker.get("box")
+            if (
+                isinstance(line, (list, tuple)) and len(line) == 2
+                and all(isinstance(point, (list, tuple)) and len(point) == 2
+                        for point in line)
+            ):
+                start = tuple(int(round(value)) for value in line[0])
+                end = tuple(int(round(value)) for value in line[1])
+                cv2.line(frame, start, end, (0, 0, 255), 4)
+                cv2.circle(frame, end, 7, (0, 0, 255), -1)
+                label_x, label_y = start
+            elif isinstance(box, (list, tuple)) and len(box) == 4:
+                x1, y1, x2, y2 = (int(round(value)) for value in box)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                label_x, label_y = x1, y1
+            else:
+                continue
             cv2.putText(
-                frame, f"DOCK {str(side).upper()} END", (x1, max(18, y1 - 7)),
+                frame, f"DOCK {str(side).upper()} END",
+                (label_x, max(18, label_y - 7)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 0, 255), 2,
             )
         entities = {

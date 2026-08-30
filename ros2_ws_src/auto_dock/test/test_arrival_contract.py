@@ -272,6 +272,8 @@ def test_dock_end_marker_detects_repeating_red_band_at_right_edge():
 
     assert "right" in markers
     assert markers["right"]["x_px"] > 590
+    assert len(markers["right"]["line"]) == 2
+    assert markers["right"]["line"][1][0] == markers["right"]["x_px"]
     assert "left" not in markers
 
 
@@ -541,8 +543,12 @@ def test_dock_inventory_continues_after_right_end_leaves_view():
 
     slots = {item["entity_id"]: item["slot_id"] for item in snapshot["visible_nearest"]}
     assert slots == {10: "DOCK_R1_C1", 11: "DOCK_R2_C1"}
-    assert snapshot["right_end_detected"] is False
+    assert snapshot["right_end_detected"] is True
     assert snapshot["right_end_anchor_locked"] is True
+
+    expired = tracker.observe([], {}, now=2.6, tape=tape, image_shape=shape)
+    assert expired["right_end_detected"] is False
+    assert expired["right_end_anchor_locked"] is True
 
 
 @pytest.mark.parametrize(("internal", "operation", "expected"), [

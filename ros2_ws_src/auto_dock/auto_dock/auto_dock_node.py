@@ -451,6 +451,10 @@ def detect_dock_end_markers(
         y1 = min(item["y"] for item in inliers)
         x2 = max(item["x"] + item["width"] for item in inliers)
         y2 = max(item["y"] + item["height"] for item in inliers)
+        if abs(vy) < 1e-6:
+            line_top_x = line_x
+        else:
+            line_top_x = line_x + (vx / vy) * (float(y1) - line_y)
         red_pixels = sum(item["area"] for item in inliers)
         confidence = clamp(
             0.5 * min(1.0, len(inliers) / 4.0)
@@ -462,6 +466,10 @@ def detect_dock_end_markers(
             "x_px": round(float(intersection_x), 1),
             "y_px": round(float(intersection_y), 1),
             "box": [int(x1), int(y1), int(x2), int(y2)],
+            "line": [
+                [round(float(clamp(line_top_x, 0.0, width - 1.0)), 1), int(y1)],
+                [round(float(intersection_x), 1), round(float(intersection_y), 1)],
+            ],
             "red_pixels": red_pixels,
             "red_segment_count": len(inliers),
             "tape_endpoint_gap_px": round(tape_endpoint_gap_px, 1),
@@ -486,6 +494,7 @@ class DockInventoryTracker:
         first_row_center_ratio=0.65,
         row_pitch_ratio=1.15,
         maximum_age_sec=3.0,
+        marker_hold_sec=1.5,
         nearest_tape_only=False,
         tape_gap_min_ratio=-0.10,
         tape_gap_max_ratio=0.35,
@@ -494,6 +503,7 @@ class DockInventoryTracker:
         self.first_row_center_ratio = float(first_row_center_ratio)
         self.row_pitch_ratio = float(row_pitch_ratio)
         self.maximum_age_sec = float(maximum_age_sec)
+        self.marker_hold_sec = float(marker_hold_sec)
         self.nearest_tape_only = bool(nearest_tape_only)
         self.tape_gap_min_ratio = float(tape_gap_min_ratio)
         self.tape_gap_max_ratio = float(tape_gap_max_ratio)
@@ -502,6 +512,7 @@ class DockInventoryTracker:
         self.entity_rows = {}
         self.right_end_seen = False
         self.last_markers = {}
+        self.marker_seen_at = {}
         self.rescan_reason = "startup"
 
     def reset(self, reason="rescan_requested"):
@@ -510,6 +521,7 @@ class DockInventoryTracker:
         self.entity_rows = {}
         self.right_end_seen = False
         self.last_markers = {}
+        self.marker_seen_at = {}
         self.rescan_reason = str(reason)
 
     def depth_column(self, distance_cm):
@@ -538,10 +550,21 @@ class DockInventoryTracker:
         tape=None, image_shape=None,
     ):
         now = time.monotonic() if now is None else float(now)
-        right_marker = (markers or {}).get("right")
+        observed_markers = dict(markers or {})
+        for side, marker in observed_markers.items():
+            if side not in {"left", "right"} or not isinstance(marker, dict):
+                continue
+            self.last_markers[side] = dict(marker)
+            self.marker_seen_at[side] = now
+        for side in list(self.last_markers):
+            if now - self.marker_seen_at.get(side, -math.inf) > self.marker_hold_sec:
+                self.last_markers.pop(side, None)
+                self.marker_seen_at.pop(side, None)
+        # Held markers are for stable operator display only.  Never reuse an
+        # old image x coordinate for row geometry after the vehicle strafes.
+        right_marker = observed_markers.get("right")
         if right_marker is not None:
             self.right_end_seen = True
-        self.last_markers = dict(markers or {})
         if right_marker is None and (
             not self.nearest_tape_only or not self.right_end_seen
         ):
@@ -1184,6 +1207,9 @@ class AutoDockNode(Node):
             ),
             maximum_age_sec=self.number(
                 "dock_inventory_max_age_sec", 3.0, 0.5, 30.0
+            ),
+            marker_hold_sec=self.number(
+                "dock_inventory_marker_hold_sec", 1.5, 0.5, 10.0
             ),
             nearest_tape_only=AutoDockNode.boolean(
                 self, "dock_inventory_nearest_tape_only", True
