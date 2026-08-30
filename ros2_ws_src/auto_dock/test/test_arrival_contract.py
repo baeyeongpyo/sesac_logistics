@@ -46,6 +46,30 @@ def test_warning_tape_detector_rejects_blank_floor():
     assert detect_warning_tape(frame) is None
 
 
+def test_warning_tape_first_detection_can_use_the_full_frame():
+    frame = np.full((480, 640, 3), 90, dtype=np.uint8)
+    for start_x in range(20, 600, 100):
+        cv2.rectangle(
+            frame, (start_x, 90), (min(start_x + 58, 639), 120),
+            (0, 220, 220), -1,
+        )
+
+    assert detect_warning_tape(frame, roi_top_ratio=0.55) is None
+    assert detect_warning_tape(frame, roi_top_ratio=0.0) is not None
+
+
+def test_warning_tape_roi_is_full_only_until_first_detection():
+    fake = type("FakeDock", (), {})()
+    fake.config = {"tape_roi_top_ratio": 0.55}
+    fake.number = lambda key, default, *_args: fake.config.get(key, default)
+    fake.tape_initial_detection_complete = False
+
+    assert AutoDockNode.warning_tape_roi_top_ratio(fake) == 0.0
+
+    fake.tape_initial_detection_complete = True
+    assert AutoDockNode.warning_tape_roi_top_ratio(fake) == 0.55
+
+
 @pytest.mark.parametrize(("distance_cm", "accepted"), [
     (29.9, True),
     (30.0, False),
