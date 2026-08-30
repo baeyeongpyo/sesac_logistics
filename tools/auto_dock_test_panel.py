@@ -9,6 +9,7 @@ import argparse
 import json
 import math
 import os
+import signal
 import time
 import tkinter as tk
 from collections import deque
@@ -20,9 +21,12 @@ import cv2
 import numpy as np
 import rclpy
 from cv_bridge import CvBridge
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, Vector3Stamped
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rcl_interfaces.srv import SetParameters
 from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import Empty, String
 
@@ -35,6 +39,12 @@ CHECKBOX_FIELDS = (
     ("lidar_safety_enabled", "LiDAR safety"),
     ("lidar_backoff_enabled", "LiDAR backoff"),
     ("fork_timed_up_complete_enabled", "임시 UP 3초 완료 · 위험"),
+    (
+        "post_lift_rear_opening_test_enabled",
+        "테스트 · 리프트후 우측탐색→후방20cm",
+    ),
+    ("manual_lateral_yaw_hold_enabled", "수동 A/D 횡이동 yaw hold"),
+    ("dock_inventory_scan_enabled", "개발 · DOCK 최근접 슬롯 인식"),
 )
 CHECKBOX_KEYS = {key for key, _label in CHECKBOX_FIELDS}
 TUNING_FIELDS = (
@@ -43,11 +53,38 @@ TUNING_FIELDS = (
     ("lidar_safety_enabled", "LiDAR safety(1/0)", 0, int, 0, 1),
     ("lidar_backoff_enabled", "LiDAR backoff(1/0)", 0, int, 0, 1),
     ("fork_timed_up_complete_enabled", "임시 UP 시간완료(1/0)", 0, int, 0, 1),
+    ("post_lift_rear_opening_test_enabled", "리프트후 후방개구 탐색(1/0)", 0, int, 0, 1),
+    ("manual_lateral_yaw_hold_enabled", "수동 횡이동 yaw hold(1/0)", 1, int, 0, 1),
+    ("manual_lateral_yaw_hold_tolerance_deg", "수동 yaw hold 허용각(°)", 3.0, float, 0.5, 15.0),
+    ("manual_lateral_yaw_hold_speed_rad_s", "수동 yaw hold 회전속도(rad/s)", 0.35, float, 0.10, 0.50),
+    ("dock_inventory_scan_enabled", "DOCK 최근접 슬롯 인식(1/0)", 0, int, 0, 1),
+    ("dock_inventory_scan_interval_sec", "DOCK 인식 주기(초)", 0.50, float, 0.20, 5.0),
+    ("dock_inventory_minimum_red_pixels", "DOCK 빨간끝선 최소픽셀", 180, int, 50, 5000),
+    ("dock_inventory_first_row_center_ratio", "우측끝→R1 중심 비율", 0.65, float, 0.20, 1.50),
+    ("dock_inventory_row_pitch_ratio", "DOCK R간격/팔레트폭", 1.15, float, 0.50, 2.50),
+    ("dock_inventory_depth_c1_min_cm", "DOCK C1 최소 depth(cm)", 20.0, float, 5.0, 200.0),
+    ("dock_inventory_depth_c1_max_cm", "DOCK C1 최대 depth(cm)", 30.0, float, 5.0, 200.0),
+    ("dock_inventory_depth_c2_max_cm", "DOCK C2 최대 depth(cm)", 40.0, float, 5.0, 200.0),
+    ("dock_inventory_depth_c3_max_cm", "DOCK C3 최대 depth(cm)", 50.0, float, 5.0, 200.0),
+    ("dock_inventory_max_age_sec", "DOCK 관측 유효시간(초)", 3.0, float, 0.5, 30.0),
+    ("rear_lateral_gain", "뒤 바퀴 횡이동 배율", 1.20, float, 0.50, 2.00),
+    ("post_lift_opening_lateral_speed_m_s", "후방개구 우측 횡속도(m/s)", 0.12, float, 0.05, 0.20),
+    ("post_lift_opening_jump_cm", "후방개구 급증 판정(cm)", 15.0, float, 5.0, 100.0),
+    ("post_lift_opening_confirmation_frames", "후방개구 확인 프레임", 2, int, 1, 10),
+    ("post_lift_opening_rear_target_cm", "개구후 후방 목표거리(cm)", 20.0, float, 5.0, 100.0),
+    ("post_lift_opening_reverse_speed_m_s", "개구후 후진속도(m/s)", 0.05, float, 0.01, 0.15),
+    ("post_lift_opening_scan_max_age_sec", "개구탐색 LiDAR 유효시간(초)", 0.50, float, 0.10, 2.0),
+    ("post_lift_opening_search_timeout_sec", "개구탐색 제한시간(초)", 30.0, float, 1.0, 120.0),
+    ("post_lift_opening_reverse_timeout_sec", "개구후 후진 제한시간(초)", 10.0, float, 1.0, 60.0),
     ("fork_timed_up_complete_sec", "임시 UP 완료시간(초)", 3.0, float, 0.5, 10.0),
     ("tag_search_max_distance_cm", "탐색 정면태그 최대거리(cm)", 20.0, float, 5.0, 100.0),
+    ("tag_search_min_distance_cm", "탐색 정면태그 최소거리(cm)", 15.0, float, 5.0, 100.0),
+    ("tag_search_reverse_correction_speed_m_s", "정면태그 과근접 후진속도(m/s)", 0.08, float, 0.03, 0.15),
+    ("tag_search_reverse_rear_margin_cm", "과근접 후진 후방여유(cm)", 3.0, float, 0.0, 20.0),
     ("tag_search_noise_max_distance_cm", "탐색 depth 노이즈 상한(cm)", 30.0, float, 10.0, 100.0),
     ("tag_search_yaw_tolerance_deg", "탐색 태그각도 허용(°)", 3.0, float, 0.5, 15.0),
-    ("tag_search_max_angular_speed_rad_s", "탐색 회전보정 제한(rad/s)", 0.06, float, 0.02, 0.15),
+    ("tag_search_min_angular_speed_rad_s", "탐색 최소 회전속도(rad/s)", 0.35, float, 0.10, 0.50),
+    ("tag_search_max_angular_speed_rad_s", "탐색 최대 회전속도(rad/s)", 0.35, float, 0.10, 0.50),
     ("tag_search_forward_correction_speed_m_s", "정면태그 전진보정(m/s)", 0.12, float, 0.08, 0.20),
     ("search_rear_lidar_min_distance_cm", "옵션2 후방LiDAR 최소거리(cm)", 30.0, float, 5.0, 100.0),
     ("search_rear_lidar_max_age_sec", "옵션2 LiDAR 유효시간(초)", 0.50, float, 0.10, 2.0),
@@ -70,15 +107,18 @@ TUNING_FIELDS = (
     ("candidate_confirmation_timeout_sec", "확인 제한(초)", 0.8, float, 0.1, 10.0),
     ("candidate_retry_cooldown_sec", "재탐색 이동(초)", 1.0, float, 0.0, 10.0),
     ("tape_guidance_enabled", "주의테이프 추종(1/0)", 0, int, 0, 1),
+    ("tape_guidance_only", "주의테이프 전용탐색(1/0)", 0, int, 0, 1),
     ("tape_roi_top_ratio", "테이프 ROI 시작(비율)", 0.55, float, 0.30, 0.90),
     ("tape_min_yellow_pixels", "테이프 최소 노랑픽셀", 600, int, 100, 20000),
     ("tape_max_age_sec", "테이프 유효시간(초)", 0.50, float, 0.10, 3.0),
+    ("tape_target_angle_deg", "테이프 평행 기준각(도)", 0.0, float, -35.0, 35.0),
     ("tape_forward_gain", "테이프 전후보정 이득", 0.10, float, 0.0, 1.0),
     ("tape_max_forward_speed_m_s", "테이프 전후속도 제한", 0.03, float, 0.0, 0.10),
     ("tape_yaw_gain", "테이프 회전보정 이득", 0.80, float, 0.0, 3.0),
     ("tape_max_yaw_speed_rad_s", "테이프 회전속도 제한", 0.20, float, 0.0, 0.50),
     ("max_pnp_reprojection_error_px", "PnP 유효오차(px)", 3.0, float, 0.1, 100.0),
     ("max_frontal_error", "정면 오차", 0.35, float, 0.01, 2.0),
+    ("minimum_dock_measurement_cm", "도킹 측정 최소거리(cm)", 5.0, float, 3.0, 30.0),
     ("coarse_center_error_max", "중앙 허용(비율)", 0.10, float, 0.01, 0.50),
     ("centerline_offset_cm", "중심 보정(cm, +좌/-우)", 0.0, float, -30.0, 30.0),
     ("depth_fallback_confirmation_frames", "Depth 확정 프레임", 3, int, 1, 30),
@@ -129,6 +169,8 @@ class TestPanelNode(Node):
         self.last_flow_frame_at = 0.0
         self.previous_flow_gray = None
         self.last_watchdog_report_at = 0.0
+        self.odom_yaw = None
+        self.imu_yaw = None
 
         self.arrival_pub = self.create_publisher(String, f"{robot}/nav2/arrival", 10)
         self.fork_command_pub = self.create_publisher(String, "/fork/command", 10)
@@ -137,6 +179,9 @@ class TestPanelNode(Node):
             String, f"{robot}/auto_dock/test/load_state", 10
         )
         self.cmd_vel_pub = self.create_publisher(Twist, "/controller/cmd_vel", 10)
+        self.controller_param_client = self.create_client(
+            SetParameters, "/odom_publisher/set_parameters"
+        )
 
         status_qos = QoSProfile(depth=1)
         status_qos.reliability = ReliabilityPolicy.RELIABLE
@@ -162,6 +207,10 @@ class TestPanelNode(Node):
             String, f"{robot}/symbol_seg/detections", self.received_yolo, 10,
         )
         self.create_subscription(LaserScan, "/scan_raw", self.received_lidar, 10)
+        self.create_subscription(Odometry, "/odom_raw", self.received_odom, 20)
+        self.create_subscription(
+            Vector3Stamped, "/imu/rpy/filtered", self.received_imu_rpy, 20
+        )
         self.create_subscription(
             Twist, "/controller/cmd_vel", self.received_cmd_vel, 20
         )
@@ -204,6 +253,16 @@ class TestPanelNode(Node):
                 direction = "left" if y >= 0.0 else "right"
             nearest[direction] = min(nearest[direction], float(distance))
         self.lidar_callback(message, nearest)
+
+    def received_odom(self, message):
+        q = message.pose.pose.orientation
+        self.odom_yaw = math.atan2(
+            2.0 * (q.w * q.z + q.x * q.y),
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+        )
+
+    def received_imu_rpy(self, message):
+        self.imu_yaw = float(message.vector.z)
 
     def received_status(self, topic, value):
         try:
@@ -352,10 +411,35 @@ class TestPanelNode(Node):
         message.angular.z = float(angular_z)
         self.cmd_vel_pub.publish(message)
 
+    def set_rear_lateral_gain(self, gain, result_callback):
+        try:
+            request = SetParameters.Request()
+            request.parameters = [
+                Parameter("rear_lateral_gain", value=float(gain)).to_parameter_msg()
+            ]
+            future = self.controller_param_client.call_async(request)
+        except Exception as exc:
+            result_callback(False, str(exc))
+            return
+
+        def finished(completed):
+            try:
+                results = completed.result().results
+                successful = bool(results) and all(result.successful for result in results)
+                reason = "" if successful else "; ".join(
+                    result.reason for result in results if result.reason
+                )
+                result_callback(successful, reason)
+            except Exception as exc:
+                result_callback(False, str(exc))
+
+        future.add_done_callback(finished)
+
 
 class TestPanel:
     def __init__(self, root, args):
         self.root = root
+        self.closing = False
         self.args = args
         self.enabled = tk.BooleanVar(value=False)
         self.arrival_status = tk.StringVar(value="SUCCEEDED")
@@ -383,6 +467,8 @@ class TestPanel:
         self.manual_engaged = False
         self.manual_takeover_active = False
         self.manual_release_jobs = {}
+        self.manual_lateral_yaw_target = None
+        self.manual_lateral_yaw_source = None
         self.last_yolo_signature = None
         self.log_entries = deque(maxlen=10)
         self.lidar_record_file = None
@@ -416,6 +502,7 @@ class TestPanel:
         self.update_enabled()
         self.root.after(20, self.poll_ros)
         self.root.after(50, self.manual_drive_tick)
+        self.root.after(1000, self.apply_rear_lateral_gain)
 
     def build_ui(self):
         style = ttk.Style(self.root)
@@ -542,6 +629,9 @@ class TestPanel:
             ttk.Checkbutton(
                 search_options, text=label, variable=self.tuning_vars[key],
                 onvalue="1", offvalue="0",
+                command=lambda selected_key=key: self.save_checkbox_tuning(
+                    selected_key
+                ),
             ).grid(
                 row=index // 2, column=index % 2, sticky="w", padx=5, pady=2
             )
@@ -588,8 +678,8 @@ class TestPanel:
         self.add_choice_group(
             nav, "타깃", self.target_type,
             (("TAG", "SYMBOLS"), ("SLOT", "SLOT"),
-             ("AUTO", "AUTO_SLOT"), ("없음", "NONE")),
-            0, 6, 4,
+             ("AUTO", "AUTO_SLOT"), ("최근접", "NEAREST"), ("없음", "NONE")),
+            0, 6, 5,
         )
         self.add_choice_group(
             nav, "위치", self.location,
@@ -655,6 +745,8 @@ class TestPanel:
         quick.pack(fill="x", padx=12, pady=6)
         scenarios = (
             ("DOCK PICK", "DOCK_1", "PICK", "NORMAL", "SYMBOLS", "AUTO"),
+            ("DOCK 최근접 NORMAL", "DOCK_1", "PICK", "NORMAL", "NEAREST", "AUTO"),
+            ("DOCK 최근접 FRESH", "DOCK_1", "PICK", "FRESH", "NEAREST", "AUTO"),
             ("NORMAL PLACE", "NORMAL", "PLACE", "NORMAL", "AUTO_SLOT", "AUTO"),
             ("FRESH PLACE", "FRESH", "PLACE", "FRESH", "AUTO_SLOT", "AUTO"),
             ("FRESH PICK", "FRESH", "PICK", "FRESH", "AUTO_SLOT", "AUTO"),
@@ -858,6 +950,16 @@ class TestPanel:
             self.node.publish_stop()
             self.manual_takeover_active = True
         self.manual_engaged = True
+        if (
+            key in {"a", "d"}
+            and not ({"a", "d"} & self.manual_keys)
+        ):
+            if self.node.imu_yaw is not None:
+                self.manual_lateral_yaw_target = self.node.imu_yaw
+                self.manual_lateral_yaw_source = "imu"
+            elif self.node.odom_yaw is not None:
+                self.manual_lateral_yaw_target = self.node.odom_yaw
+                self.manual_lateral_yaw_source = "odom"
         self.manual_keys.add(key)
         self.publish_manual_velocity()
         return "break"
@@ -880,6 +982,9 @@ class TestPanel:
     def finish_manual_key_release(self, key):
         self.manual_release_jobs.pop(key, None)
         self.manual_keys.discard(key)
+        if not ({"a", "d"} & self.manual_keys):
+            self.manual_lateral_yaw_target = None
+            self.manual_lateral_yaw_source = None
         if not self.manual_keys:
             self.manual_engaged = False
         self.publish_manual_velocity()
@@ -910,11 +1015,47 @@ class TestPanel:
         linear_x = linear * (("w" in self.manual_keys) - ("s" in self.manual_keys))
         linear_y = linear * (("a" in self.manual_keys) - ("d" in self.manual_keys))
         angular_z = angular * (("q" in self.manual_keys) - ("e" in self.manual_keys))
+        yaw_hold_active = False
+        if (
+            linear_y != 0.0
+            and angular_z == 0.0
+            and self.tuning_vars["manual_lateral_yaw_hold_enabled"].get() == "1"
+            and self.manual_lateral_yaw_target is not None
+        ):
+            current_yaw = (
+                self.node.imu_yaw
+                if self.manual_lateral_yaw_source == "imu"
+                else self.node.odom_yaw
+            )
+            if current_yaw is None:
+                current_yaw = self.manual_lateral_yaw_target
+            yaw_error = math.atan2(
+                math.sin(self.manual_lateral_yaw_target - current_yaw),
+                math.cos(self.manual_lateral_yaw_target - current_yaw),
+            )
+            try:
+                tolerance = math.radians(float(
+                    self.tuning_vars[
+                        "manual_lateral_yaw_hold_tolerance_deg"
+                    ].get()
+                ))
+                hold_speed = float(
+                    self.tuning_vars["manual_lateral_yaw_hold_speed_rad_s"].get()
+                )
+            except ValueError:
+                tolerance = math.radians(3.0)
+                hold_speed = 0.35
+            if abs(yaw_error) > tolerance:
+                linear_y = 0.0
+                angular_z = math.copysign(hold_speed, yaw_error)
+                yaw_hold_active = True
         self.node.publish_cmd_vel(linear_x, linear_y, angular_z)
         self.record_manual_velocity(linear_x, linear_y, angular_z)
         keys = "+".join(sorted(self.manual_keys)) or "정지"
+        hold_text = " · YAW HOLD" if yaw_hold_active else ""
         self.manual_status.set(
-            f"{keys.upper()} · x={linear_x:+.2f} y={linear_y:+.2f} yaw={angular_z:+.2f}"
+            f"{keys.upper()} · x={linear_x:+.2f} y={linear_y:+.2f} "
+            f"yaw={angular_z:+.2f}{hold_text}"
         )
 
     def manual_drive_tick(self):
@@ -928,6 +1069,8 @@ class TestPanel:
         self.manual_release_jobs.clear()
         self.manual_keys.clear()
         self.manual_engaged = False
+        self.manual_lateral_yaw_target = None
+        self.manual_lateral_yaw_source = None
         if hasattr(self, "node"):
             self.node.publish_cmd_vel()
         self.manual_status.set("정지")
@@ -976,6 +1119,51 @@ class TestPanel:
             return
         self.tuning_notice.set("저장 완료 · STOP 후 다음 Arrival부터 적용")
         self.append_log("CFG", str(self.config_path), json.dumps(updates))
+        self.apply_rear_lateral_gain()
+
+    def apply_rear_lateral_gain(self):
+        try:
+            gain = float(self.tuning_vars["rear_lateral_gain"].get())
+        except ValueError:
+            return
+
+        def applied(successful, reason):
+            if successful:
+                self.tuning_notice.set(
+                    f"저장 완료 · 뒤 바퀴 횡이동 배율 {gain:.2f} 즉시 적용"
+                )
+                self.append_log("CFG", "/odom_publisher", f"rear_lateral_gain={gain:.2f}")
+            else:
+                detail = reason or "파라미터 서비스 응답 없음"
+                self.tuning_notice.set(f"배율 적용 실패: {detail}")
+                self.append_log("ERR", "/odom_publisher", detail)
+
+        self.node.set_rear_lateral_gain(gain, applied)
+
+    def save_checkbox_tuning(self, key):
+        if not self.require_enabled():
+            return
+        try:
+            payload = {}
+            if self.config_path.exists():
+                payload = json.loads(self.config_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("설정 JSON은 object여야 합니다")
+            value = int(self.tuning_vars[key].get())
+            payload[key] = value
+            temporary = self.config_path.with_suffix(self.config_path.suffix + ".tmp")
+            temporary.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary, self.config_path)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            self.tuning_notice.set(f"체크박스 저장 실패: {exc}")
+            return
+        self.tuning_notice.set(
+            f"{key}={value} 자동 저장 · STOP 후 다음 Arrival부터 적용"
+        )
+        self.append_log("CFG", str(self.config_path), f"{key}={value}")
 
     def target_payload(self):
         kind = self.target_type.get()
@@ -984,6 +1172,8 @@ class TestPanel:
         if kind == "SLOT":
             return {"type": kind, "slot_id": self.slot_id.get().strip()}
         if kind == "AUTO_SLOT":
+            return {"type": kind}
+        if kind == "NEAREST":
             return {"type": kind}
         return None
 
@@ -1259,6 +1449,9 @@ class TestPanel:
         self.root.after(20, self.poll_ros)
 
     def close(self):
+        if self.closing:
+            return
+        self.closing = True
         self.stop_manual_drive()
         self.stop_lidar_recording()
         self.node.destroy_node()
@@ -1287,8 +1480,20 @@ def main():
     os.environ["ROS_DOMAIN_ID"] = str(args.ros_domain_id or 214 + args.vehicle)
     rclpy.init()
     root = tk.Tk()
-    TestPanel(root, args)
-    root.mainloop()
+    panel = TestPanel(root, args)
+
+    def request_close(_signum=None, _frame=None):
+        try:
+            root.after_idle(panel.close)
+        except tk.TclError:
+            pass
+
+    signal.signal(signal.SIGINT, request_close)
+    signal.signal(signal.SIGTERM, request_close)
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        panel.close()
 
 
 if __name__ == "__main__":

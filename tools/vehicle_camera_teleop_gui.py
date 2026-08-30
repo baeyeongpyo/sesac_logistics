@@ -92,6 +92,87 @@ from std_msgs.msg import Empty, String, UInt16
 VEHICLE_HOSTS = {1: "192.168.100.38", 2: "192.168.100.35"}
 
 
+def detect_warning_tape_debug(
+    frame, roi_top_ratio=0.55, minimum_yellow_pixels=600
+):
+    """Run the auto-dock tape detector and retain its rejection evidence."""
+    height, width = frame.shape[:2]
+    roi_top = int(max(0.30, min(0.90, float(roi_top_ratio))) * height)
+    roi = frame[roi_top:height]
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    raw_mask = cv2.inRange(
+        hsv, np.asarray((15, 90, 70), dtype=np.uint8),
+        np.asarray((42, 255, 255), dtype=np.uint8),
+    )
+    yellow = cv2.morphologyEx(
+        raw_mask, cv2.MORPH_OPEN, np.ones((3, 3), dtype=np.uint8)
+    )
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        yellow, connectivity=8
+    )
+    accepted = np.zeros_like(yellow)
+    accepted_components = 0
+    for label in range(1, count):
+        _x, _y, component_width, _component_height, area = stats[label]
+        if area < 80 or component_width < 12:
+            continue
+        accepted[labels == label] = 255
+        accepted_components += 1
+    ys, xs = np.nonzero(accepted)
+    debug = {
+        "detected": False,
+        "reason": "",
+        "roi_top": roi_top,
+        "raw_yellow_pixels": int(cv2.countNonZero(raw_mask)),
+        "yellow_pixels": int(len(xs)),
+        "component_count": int(accepted_components),
+        "span_px": 0 if not len(xs) else int(xs.max()) - int(xs.min()),
+        "accepted_mask": accepted,
+    }
+    if accepted_components < 2:
+        debug["reason"] = "components<2"
+        return debug
+    if len(xs) < int(minimum_yellow_pixels):
+        debug["reason"] = f"pixels<{int(minimum_yellow_pixels)}"
+        return debug
+    minimum_span = int(width * 0.25)
+    if debug["span_px"] < minimum_span:
+        debug["reason"] = f"span<{minimum_span}px"
+        return debug
+    points = np.column_stack((xs, ys)).astype(np.float32)
+    vx, vy, line_x, line_y = (
+        float(value) for value in cv2.fitLine(
+            points, cv2.DIST_L2, 0.0, 0.01, 0.01
+        ).reshape(-1)
+    )
+    if abs(vx) < 1e-6:
+        debug["reason"] = "vertical_fit"
+        return debug
+    angle_deg = math.degrees(math.atan2(vy, vx))
+    if angle_deg >= 90.0:
+        angle_deg -= 180.0
+    if angle_deg < -90.0:
+        angle_deg += 180.0
+    debug["angle_deg"] = float(angle_deg)
+    if abs(angle_deg) > 35.0:
+        debug["reason"] = "angle>35deg"
+        return debug
+    center_y = line_y + (vy / vx) * (width * 0.5 - line_x) + roi_top
+    normal_distance = np.abs(-vy * (xs - line_x) + vx * (ys - line_y))
+    band_width_px = float(np.percentile(normal_distance, 90)) * 2.0
+    debug.update({
+        "center_y_ratio": float(center_y / height),
+        "band_width_px": round(band_width_px, 1),
+        "line": (vx, vy, line_x, line_y),
+    })
+    if band_width_px > height * 0.18:
+        debug["reason"] = f"band>{height * 0.18:.0f}px"
+        return debug
+    debug["detected"] = True
+    debug["reason"] = "ok"
+    return debug
+
+
 class DevControlClientNode(Node):
     """ROS I/O client for the optional development GUI/UI."""
 
@@ -102,6 +183,8 @@ class DevControlClientNode(Node):
         self.frame = None
         self.frame_sequence = 0
         self.last_frame_monotonic = 0.0
+        self.tape_frame = None
+        self.tape_frame_monotonic = 0.0
         self.secondary_frame = None
         self.secondary_frame_sequence = 0
         self.secondary_last_frame_monotonic = 0.0
@@ -142,6 +225,9 @@ class DevControlClientNode(Node):
             self.start_mjpeg_stream(args.primary_video_url, "primary")
         else:
             self.image_sub = self.create_subscription(Image, args.image_topic, self.on_image, qos)
+        self.tape_image_sub = self.create_subscription(
+            Image, args.tape_image_topic, self.on_tape_image, qos
+        )
         self.secondary_image_sub = None
         if args.secondary_image_topic:
             self.secondary_image_sub = self.create_subscription(
@@ -170,12 +256,20 @@ class DevControlClientNode(Node):
         self.auto_dock_stop_pub = self.create_publisher(
             Empty, args.auto_dock_stop_topic, 10
         )
+        self.dock_inventory_reset_pub = self.create_publisher(
+            Empty, args.dock_inventory_reset_topic, 10
+        )
         status_qos = QoSProfile(depth=1)
         status_qos.reliability = ReliabilityPolicy.RELIABLE
         status_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.auto_dock_status = {"state": "unknown", "reason": "no_status"}
         self.auto_dock_status_sub = self.create_subscription(
             String, args.auto_dock_status_topic, self.on_auto_dock_status, status_qos
+        )
+        self.latest_dock_inventory = None
+        self.latest_dock_inventory_monotonic = 0.0
+        self.dock_inventory_sub = self.create_subscription(
+            String, args.dock_inventory_topic, self.on_dock_inventory, status_qos
         )
         self.fork_state = {"state": "UNKNOWN", "error": ""}
         self.drive_ready_count = 0
@@ -220,8 +314,23 @@ class DevControlClientNode(Node):
             payload, ensure_ascii=False, separators=(",", ":")
         )))
 
+    def publish_nearest_arrival(self, product_type):
+        payload = {
+            "status": "SUCCEEDED",
+            "location": "DOCK_1",
+            "operation": "PICK",
+            "product_type": str(product_type).strip().upper(),
+            "target": {"type": "NEAREST"},
+        }
+        self.arrival_pub.publish(String(data=json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":")
+        )))
+
     def publish_auto_dock_stop(self):
         self.auto_dock_stop_pub.publish(Empty())
+
+    def publish_dock_inventory_reset(self):
+        self.dock_inventory_reset_pub.publish(Empty())
 
     def on_auto_dock_status(self, msg):
         try:
@@ -230,6 +339,15 @@ class DevControlClientNode(Node):
                 self.auto_dock_status = status
         except (TypeError, ValueError):
             self.get_logger().warning("invalid auto_dock status JSON received")
+
+    def on_dock_inventory(self, msg):
+        try:
+            payload = json.loads(msg.data)
+            if isinstance(payload, dict):
+                self.latest_dock_inventory = payload
+                self.latest_dock_inventory_monotonic = time.monotonic()
+        except (TypeError, ValueError, json.JSONDecodeError):
+            self.get_logger().warning("invalid dock inventory JSON received")
 
     def on_fork_state(self, msg):
         try:
@@ -293,6 +411,10 @@ class DevControlClientNode(Node):
         self.frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         self.frame_sequence += 1
         self.last_frame_monotonic = time.monotonic()
+
+    def on_tape_image(self, msg):
+        self.tape_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        self.tape_frame_monotonic = time.monotonic()
 
     def on_secondary_image(self, msg):
         self.secondary_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
@@ -482,6 +604,9 @@ class HttpViewerSource:
         self.last_battery_monotonic = 0.0
         self.latest_detection = None
         self.latest_detection_monotonic = 0.0
+        self.latest_dock_inventory = None
+        self.latest_dock_inventory_monotonic = 0.0
+        self.auto_dock_status = {"state": "unknown", "reason": "http_viewer_only"}
         self.secondary_stream_stop = threading.Event()
         self.external_stream_threads = []
         self.child_processes = []
@@ -818,8 +943,14 @@ class TeleopWindow(QMainWindow):
         self.last_map_sequence = (-1, -1)
         self.writer = None
         self.record_path = None
+        self.frame_log_file = None
+        self.frame_log_path = None
         self.telemetry_session = None
         self.recorded_frames = 0
+        self.warning_tape_debug = None
+        self.dock_grid_revision = None
+        self.dock_grid_occupied = {}
+        self.dock_grid_last_signature = None
         self.camera_calibration_dir = None
         self.camera_calibration_samples = []
         self.camera_distance_scale = None
@@ -1193,6 +1324,13 @@ class TeleopWindow(QMainWindow):
         )
         self.arrival_button = QPushButton("DOCK PICK Arrival 발행")
         self.arrival_button.clicked.connect(self.publish_arrival_trigger)
+        self.nearest_product = QComboBox()
+        self.nearest_product.addItem("NORMAL", "NORMAL")
+        self.nearest_product.addItem("FRESH", "FRESH")
+        self.nearest_arrival_button = QPushButton("최근접 상품 PICK")
+        self.nearest_arrival_button.clicked.connect(
+            self.publish_nearest_arrival_trigger
+        )
         self.auto_dock_stop_button = QPushButton("AUTO-DOCK STOP 발행")
         self.auto_dock_stop_button.clicked.connect(self.publish_auto_dock_stop)
         self.auto_dock_status_label = QLabel("AUTO-DOCK 상태: 수신 대기")
@@ -1226,15 +1364,18 @@ class TeleopWindow(QMainWindow):
         arc_layout.addWidget(self.run_mode_button, 2, 4)
         arc_layout.addWidget(self.arrival_button, 3, 0, 1, 3)
         arc_layout.addWidget(self.auto_dock_stop_button, 3, 3, 1, 2)
-        arc_layout.addWidget(self.auto_dock_status_label, 4, 0, 1, 5)
-        arc_layout.addWidget(self.fork_flow_status_label, 5, 0, 1, 5)
-        arc_layout.addWidget(self.arc_label, 6, 0, 1, 5)
-        arc_layout.addWidget(QLabel("전후차 (+덜 감)"), 7, 0)
-        arc_layout.addWidget(self.arc_forward_error, 7, 1)
-        arc_layout.addWidget(QLabel("좌우차 (+왼쪽)"), 7, 2)
-        arc_layout.addWidget(self.arc_lateral_error, 7, 3)
-        arc_layout.addWidget(self.arc_sample_save, 7, 4)
-        arc_layout.addWidget(self.arc_sample_label, 8, 0, 1, 5)
+        arc_layout.addWidget(QLabel("태그 미지정"), 4, 0)
+        arc_layout.addWidget(self.nearest_product, 4, 1)
+        arc_layout.addWidget(self.nearest_arrival_button, 4, 2, 1, 3)
+        arc_layout.addWidget(self.auto_dock_status_label, 5, 0, 1, 5)
+        arc_layout.addWidget(self.fork_flow_status_label, 6, 0, 1, 5)
+        arc_layout.addWidget(self.arc_label, 7, 0, 1, 5)
+        arc_layout.addWidget(QLabel("전후차 (+덜 감)"), 8, 0)
+        arc_layout.addWidget(self.arc_forward_error, 8, 1)
+        arc_layout.addWidget(QLabel("좌우차 (+왼쪽)"), 8, 2)
+        arc_layout.addWidget(self.arc_lateral_error, 8, 3)
+        arc_layout.addWidget(self.arc_sample_save, 8, 4)
+        arc_layout.addWidget(self.arc_sample_label, 9, 0, 1, 5)
 
         self.memo = QPlainTextEdit()
         self.memo.setPlaceholderText("캡처 메모 (이미지와 별도 JSON으로 저장)")
@@ -1283,6 +1424,38 @@ class TeleopWindow(QMainWindow):
 
         vehicle_column = QVBoxLayout()
         vehicle_column.addWidget(self.video, 1)
+        self.dock_slot_cells = {}
+        dock_grid_layout = QGridLayout()
+        dock_grid_layout.setSpacing(3)
+        dock_grid_layout.addWidget(QLabel("깊이"), 0, 0)
+        for row in range(1, 9):
+            header = QLabel(f"R{row}")
+            header.setAlignment(Qt.AlignCenter)
+            dock_grid_layout.addWidget(header, 0, row)
+        for display_row, column in enumerate((3, 2, 1), start=1):
+            depth_label = QLabel(f"C{column}")
+            depth_label.setAlignment(Qt.AlignCenter)
+            dock_grid_layout.addWidget(depth_label, display_row, 0)
+            for row in range(1, 9):
+                slot_id = f"DOCK_R{row}_C{column}"
+                cell = QLabel("·")
+                cell.setAlignment(Qt.AlignCenter)
+                cell.setFixedSize(48, 34)
+                cell.setToolTip(slot_id)
+                cell.setStyleSheet(
+                    "background:#262626;color:#888;border:1px solid #555;"
+                    "border-radius:2px;"
+                )
+                self.dock_slot_cells[slot_id] = cell
+                dock_grid_layout.addWidget(cell, display_row, row)
+        self.dock_grid_status = QLabel("슬롯 수신 대기 | C1이 주의선에서 가장 가까운 열")
+        dock_grid_layout.addWidget(self.dock_grid_status, 4, 0, 1, 7)
+        self.dock_grid_reset_button = QPushButton("슬롯 초기화")
+        self.dock_grid_reset_button.clicked.connect(self.reset_dock_slot_grid)
+        dock_grid_layout.addWidget(self.dock_grid_reset_button, 4, 7, 1, 2)
+        dock_grid_panel = QGroupBox("DOCK 슬롯 3×8")
+        dock_grid_panel.setLayout(dock_grid_layout)
+        vehicle_column.addWidget(dock_grid_panel)
         vehicle_column.addWidget(self.entity_map_view)
         vehicle_panel = QGroupBox("차량 카메라 / 태그 엔티티 지도")
         vehicle_panel.setLayout(vehicle_column)
@@ -1475,13 +1648,24 @@ class TeleopWindow(QMainWindow):
                 "mtime": max(path.stat().st_mtime for path in files),
             })
 
-        recording_stems = {
-            path.stem for path in root.glob("teleop_*.*")
-            if path.suffix.lower() in {".mp4", ".jsonl"}
-        }
+        recording_stems = set()
+        for path in root.glob("teleop_*.*"):
+            if path.name.endswith(".frames.jsonl"):
+                recording_stems.add(path.name[:-len(".frames.jsonl")])
+            elif path.suffix.lower() in {".mp4", ".jsonl"}:
+                recording_stems.add(path.stem)
         for stem in recording_stems:
-            files = [root / f"{stem}.mp4", root / f"{stem}.jsonl"]
-            add_record("recording", f"녹화 | {stem}", files, root / f"{stem}.jsonl")
+            files = [
+                root / f"{stem}.mp4",
+                root / f"{stem}.jsonl",
+                root / f"{stem}.frames.jsonl",
+            ]
+            telemetry = root / f"{stem}.jsonl"
+            frame_log = root / f"{stem}.frames.jsonl"
+            add_record(
+                "recording", f"녹화 | {stem}", files,
+                telemetry if telemetry.exists() else frame_log,
+            )
 
         capture_dir = root / "captures"
         capture_stems = {path.stem for path in capture_dir.glob("capture_*.*")}
@@ -2700,6 +2884,12 @@ class TeleopWindow(QMainWindow):
         else:
             self.node.publish_fork("STOP")
 
+    def publish_latched_fork_key(self, key):
+        if key == Qt.Key_Up:
+            self.node.publish_fork("UP")
+        elif key == Qt.Key_Down:
+            self.node.publish_fork("DOWN")
+
     def press_movement_key(self, key):
         timer = self.movement_release_timers.pop(key, None)
         if timer is not None:
@@ -2749,8 +2939,7 @@ class TeleopWindow(QMainWindow):
             return
         if event.key() in self.FORK_KEYS:
             if not event.isAutoRepeat():
-                self.pressed.add(event.key())
-                self.publish_fork_from_keys()
+                self.publish_latched_fork_key(event.key())
             event.accept()
             return
         super().keyPressEvent(event)
@@ -2760,16 +2949,24 @@ class TeleopWindow(QMainWindow):
             self.release_movement_key(event.key())
             event.accept()
             return
-        if event.key() in self.FORK_KEYS and not event.isAutoRepeat():
-            self.pressed.discard(event.key())
-            self.publish_fork_from_keys()
+        if event.key() in self.FORK_KEYS:
             event.accept()
             return
         super().keyReleaseEvent(event)
 
     def eventFilter(self, watched, event):
         """Capture drive keys even when a checkbox, button, or spinbox has focus."""
-        # The memo editor must receive ordinary letters, spaces, and arrow keys
+        # Fork arrows use the same latched command contract as the test panel:
+        # press publishes UP/DOWN once, release does not publish STOP.  Handle
+        # them before the editable-widget exception so focus cannot consume them.
+        if event.type() == QEvent.KeyPress and event.key() in self.FORK_KEYS:
+            if not event.isAutoRepeat():
+                self.publish_latched_fork_key(event.key())
+            return True
+        if event.type() == QEvent.KeyRelease and event.key() in self.FORK_KEYS:
+            return True
+
+        # The memo editor must still receive ordinary letters and spaces
         # instead of treating them as vehicle controls.
         preset_editor = self.preset_combo.lineEdit()
         if self.memo.hasFocus() or (preset_editor is not None and preset_editor.hasFocus()):
@@ -2784,18 +2981,9 @@ class TeleopWindow(QMainWindow):
             if event.key() in self.MOVEMENT_KEYS:
                 self.press_movement_key(event.key())
                 return True
-            if event.key() in self.FORK_KEYS:
-                if not event.isAutoRepeat():
-                    self.pressed.add(event.key())
-                    self.publish_fork_from_keys()
-                return True
         elif event.type() == QEvent.KeyRelease:
             if event.key() in self.MOVEMENT_KEYS and not event.isAutoRepeat():
                 self.release_movement_key(event.key())
-                return True
-            if event.key() in self.FORK_KEYS and not event.isAutoRepeat():
-                self.pressed.discard(event.key())
-                self.publish_fork_from_keys()
                 return True
         return super().eventFilter(watched, event)
 
@@ -3655,6 +3843,16 @@ class TeleopWindow(QMainWindow):
         right = self.target_right.currentData()
         self.node.publish_arrival(left, right)
         self.arc_label.setText(f"DOCK PICK Arrival 발행: {left} / {right}")
+
+    def publish_nearest_arrival_trigger(self):
+        if self.args.http_viewer_only:
+            self.arc_label.setText("HTTP 화면 전용 모드에서는 arrival 발행 불가")
+            return
+        product_type = self.nearest_product.currentData()
+        self.node.publish_nearest_arrival(product_type)
+        self.arc_label.setText(
+            f"DOCK 최근접 {product_type} PICK Arrival 발행"
+        )
 
     def publish_auto_dock_stop(self):
         if self.args.http_viewer_only:
@@ -4758,6 +4956,7 @@ class TeleopWindow(QMainWindow):
         self.update_rotation_estimate()
         self.update_mapping_label()
         self.update_entity_map()
+        self.update_dock_slot_grid()
         self.update_frame()
 
     def update_entity_map(self):
@@ -4774,6 +4973,64 @@ class TeleopWindow(QMainWindow):
             getattr(self.node, "entity_map", None),
         )
 
+    def update_dock_slot_grid(self):
+        inventory = self.node.latest_dock_inventory or {}
+        visible = inventory.get("visible_nearest") or []
+        signature = (
+            inventory.get("revision"),
+            tuple(sorted(
+                str(slot.get("slot_id")) for slot in visible
+                if isinstance(slot, dict)
+            )),
+        )
+        if signature == self.dock_grid_last_signature:
+            return
+        self.dock_grid_last_signature = signature
+        revision = inventory.get("revision")
+        if revision != self.dock_grid_revision:
+            self.dock_grid_revision = revision
+            self.dock_grid_occupied = {}
+        current_slots = set()
+        for slot in visible:
+            if not isinstance(slot, dict):
+                continue
+            slot_id = str(slot.get("slot_id", "")).upper()
+            if slot_id not in self.dock_slot_cells:
+                continue
+            current_slots.add(slot_id)
+            self.dock_grid_occupied[slot_id] = dict(slot)
+        for slot_id, cell in self.dock_slot_cells.items():
+            slot = self.dock_grid_occupied.get(slot_id)
+            if slot is None:
+                cell.setText("·")
+                cell.setStyleSheet(
+                    "background:#262626;color:#888;border:1px solid #555;"
+                    "border-radius:2px;"
+                )
+                continue
+            fresh = str(slot.get("product_type", "")).upper() == "FRESH"
+            background = "#a86600" if fresh else "#167447"
+            border = "#7de8ff" if slot_id in current_slots else "#a0a0a0"
+            cell.setText("별" if fresh else "있음")
+            cell.setStyleSheet(
+                f"background:{background};color:white;border:2px solid {border};"
+                "border-radius:2px;font-weight:bold;"
+            )
+            cell.setToolTip(
+                f"{slot_id} | {slot.get('product_type', '?')} | "
+                f"{slot.get('distance_cm', '?')} cm"
+            )
+        age = time.monotonic() - self.node.latest_dock_inventory_monotonic
+        self.dock_grid_status.setText(
+            f"revision {revision if revision is not None else '-'} | "
+            f"확인 {len(self.dock_grid_occupied)}/24 | "
+            f"현재 화면 {len(current_slots)} | age {age:.1f}s"
+        )
+
+    def reset_dock_slot_grid(self):
+        self.node.publish_dock_inventory_reset()
+        self.dock_grid_status.setText("슬롯 초기화 요청 전송")
+
     def update_frame(self):
         sequences = (
             self.node.frame_sequence,
@@ -4786,12 +5043,202 @@ class TeleopWindow(QMainWindow):
         secondary = None if self.node.secondary_frame is None else self.node.secondary_frame.copy()
         tertiary = None if self.node.tertiary_frame is None else self.node.tertiary_frame.copy()
         self.last_displayed_sequence = sequences
-        if frame is not None and self.writer is not None:
-            recording_frame = self.compose_recording_frame(frame, secondary, tertiary)
+        display_frame = self.render_recording_overlay(frame)
+        if display_frame is not None and self.writer is not None:
+            recording_frame = self.compose_recording_frame(
+                display_frame, secondary, tertiary
+            )
             self.writer.write(recording_frame)
             self.recorded_frames += 1
+            self.write_frame_record()
             self.record_label.setText(f"REC {self.recorded_frames} frames → {self.record_path}")
-        self.show_frame(self.render_detection_overlay(frame), self.video)
+        self.show_frame(display_frame, self.video)
+
+    def render_recording_overlay(self, frame):
+        if frame is None:
+            return None
+        frame = self.render_warning_tape_overlay(frame)
+        inventory = self.node.latest_dock_inventory or {}
+        inventory_age = time.monotonic() - self.node.latest_dock_inventory_monotonic
+        inventory_fresh = bool(inventory) and inventory_age <= 2.0
+        # The standard control_gui source is YOLO's port-8090 MJPEG stream,
+        # which already contains its detection boxes.  Only ROS image input is
+        # raw and needs the client-side detection overlay.
+        if not self.args.primary_video_url:
+            frame = (
+                self.render_inventory_entity_overlay(frame)
+                if inventory_fresh else self.render_detection_overlay(frame)
+            )
+        if not inventory_fresh:
+            return frame
+        for side, marker in (inventory.get("markers") or {}).items():
+            box = marker.get("box") if isinstance(marker, dict) else None
+            if not isinstance(box, (list, tuple)) or len(box) != 4:
+                continue
+            x1, y1, x2, y2 = (int(round(value)) for value in box)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+            cv2.putText(
+                frame, f"DOCK {str(side).upper()} END", (x1, max(18, y1 - 7)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 0, 255), 2,
+            )
+        entities = {
+            item.get("entity_id"): item
+            for item in (self.node.latest_detection or {}).get("entities", [])
+            if isinstance(item, dict) and item.get("entity_id") is not None
+        }
+        visible = inventory.get("visible_nearest") or []
+        for slot in visible:
+            entity = entities.get(slot.get("entity_id")) if isinstance(slot, dict) else None
+            box = entity.get("image_pallet_box") if entity else None
+            if not isinstance(box, (list, tuple)) or len(box) != 4:
+                continue
+            x1, y1, x2, y2 = (int(round(value)) for value in box)
+            label = (
+                f"{slot.get('slot_id', '?')} {slot.get('product_type', '?')} "
+                f"{slot.get('distance_cm', '?')}cm"
+            )
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 120, 0), 3)
+            cv2.putText(
+                frame, label, (x1, min(frame.shape[0] - 8, y2 + 20)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 120, 0), 2,
+            )
+        summary = (
+            f"DOCK inventory | R:{int(bool(inventory.get('right_end_detected')))} "
+            f"L:{int(bool(inventory.get('left_end_detected')))} "
+            f"slots:{len(visible)} rev:{inventory.get('revision', '?')}"
+        )
+        cv2.rectangle(frame, (5, 34), (min(frame.shape[1] - 5, 520), 62), (0, 0, 0), -1)
+        cv2.putText(
+            frame, summary, (10, 55), cv2.FONT_HERSHEY_SIMPLEX,
+            0.55, (0, 180, 255), 2,
+        )
+        return frame
+
+    def render_warning_tape_overlay(self, frame):
+        """Show exactly which yellow pixels pass the auto-dock tape gates."""
+        tape_age = time.monotonic() - self.node.tape_frame_monotonic
+        if self.node.tape_frame is None or tape_age > 0.75:
+            self.warning_tape_debug = {
+                "detected": False,
+                "reason": "raw_frame_stale",
+                "source_age_sec": None if self.node.tape_frame is None else tape_age,
+            }
+            cv2.rectangle(frame, (4, 4), (330, 31), (0, 0, 0), -1)
+            cv2.putText(
+                frame, "TAPE LOST raw camera stale", (9, 24),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 0, 255), 2,
+            )
+            return frame
+        tape_frame = self.node.tape_frame.copy()
+        if tape_frame.shape[:2] != frame.shape[:2]:
+            tape_frame = cv2.resize(
+                tape_frame, (frame.shape[1], frame.shape[0]),
+                interpolation=cv2.INTER_AREA,
+            )
+        debug = detect_warning_tape_debug(tape_frame)
+        accepted = debug.pop("accepted_mask")
+        line = debug.pop("line", None)
+        debug["source_age_sec"] = tape_age
+        debug["source_topic"] = self.args.tape_image_topic
+        self.warning_tape_debug = dict(debug)
+        roi_top = int(debug["roi_top"])
+        cv2.line(frame, (0, roi_top), (frame.shape[1] - 1, roi_top),
+                 (255, 120, 0), 1)
+        contours, _hierarchy = cv2.findContours(
+            accepted, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        shifted = [contour + np.asarray([[[0, roi_top]]]) for contour in contours]
+        cv2.drawContours(frame, shifted, -1, (255, 0, 255), 2)
+        if debug["detected"] and line is not None:
+            vx, vy, line_x, line_y = line
+            left_y = int(round(line_y + (vy / vx) * (0.0 - line_x) + roi_top))
+            right_x = frame.shape[1] - 1
+            right_y = int(round(
+                line_y + (vy / vx) * (right_x - line_x) + roi_top
+            ))
+            cv2.line(frame, (0, left_y), (right_x, right_y), (0, 255, 255), 3)
+            center = (
+                frame.shape[1] // 2,
+                int(round(float(debug["center_y_ratio"]) * frame.shape[0])),
+            )
+            cv2.circle(frame, center, 7, (0, 255, 255), -1)
+            text_line = (
+                f"TAPE OK angle:{debug['angle_deg']:+.1f}deg "
+                f"y:{debug['center_y_ratio']:.3f} px:{debug['yellow_pixels']} "
+                f"comp:{debug['component_count']}"
+            )
+            color = (0, 220, 0)
+        else:
+            text_line = (
+                f"TAPE LOST {debug['reason']} raw:{debug['raw_yellow_pixels']} "
+                f"pass:{debug['yellow_pixels']} comp:{debug['component_count']} "
+                f"span:{debug['span_px']}px"
+            )
+            color = (0, 0, 255)
+        text_width = min(frame.shape[1] - 6, max(280, len(text_line) * 9))
+        cv2.rectangle(frame, (4, 4), (text_width, 31), (0, 0, 0), -1)
+        cv2.putText(
+            frame, text_line, (9, 24), cv2.FONT_HERSHEY_SIMPLEX,
+            0.52, color, 2,
+        )
+        return frame
+
+    def render_inventory_entity_overlay(self, frame):
+        """Draw only complete pallet groups used by the inventory tracker."""
+        detection = self.node.latest_detection or {}
+        if time.monotonic() - self.node.latest_detection_monotonic > 1.0:
+            return frame
+        for entity in detection.get("entities", []):
+            if not isinstance(entity, dict):
+                continue
+            box = entity.get("image_pallet_box")
+            if not isinstance(box, (list, tuple)) or len(box) != 4:
+                continue
+            x1, y1, x2, y2 = (int(round(value)) for value in box)
+            matrix = "/".join(str(value)[:2].upper() for value in entity.get("matrix", []))
+            measurement = entity.get("depth_yaw") or entity.get("pnp") or {}
+            distance = measurement.get("forward_distance_cm")
+            distance_text = "" if distance is None else f" {float(distance):.1f}cm"
+            label = f"PALLET {entity.get('entity_id', '?')} {matrix}{distance_text}"
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 220, 0), 2)
+            cv2.putText(
+                frame, label, (x1, max(18, y1 - 7)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 220, 0), 2,
+            )
+        return frame
+
+    def write_frame_record(self):
+        if self.frame_log_file is None:
+            return
+        now = time.monotonic()
+        record = {
+            "type": "video_frame",
+            "frame_index": self.recorded_frames,
+            "time": time.time(),
+            "monotonic": now,
+            "primary_frame_sequence": self.node.frame_sequence,
+            "primary_frame_age_sec": now - self.node.last_frame_monotonic,
+            "detection_age_sec": (
+                None if self.node.latest_detection is None
+                else now - self.node.latest_detection_monotonic
+            ),
+            "detection": self.node.latest_detection,
+            "dock_inventory_age_sec": (
+                None if self.node.latest_dock_inventory is None
+                else now - self.node.latest_dock_inventory_monotonic
+            ),
+            "dock_inventory": self.node.latest_dock_inventory,
+            "auto_dock_status": self.node.auto_dock_status,
+            "warning_tape": self.warning_tape_debug,
+        }
+        try:
+            self.frame_log_file.write(
+                json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            self.frame_log_file.close()
+            self.frame_log_file = None
+            self.record_label.setText(f"REC frame JSON stopped: {exc}")
 
     def render_detection_overlay(self, frame):
         """Draw the existing detection JSON over the original camera frame."""
@@ -5102,6 +5549,18 @@ class TeleopWindow(QMainWindow):
             self.record.setChecked(False)
             self.record_label.setText("Failed to open video writer")
             return
+        self.frame_log_path = self.record_path.with_suffix(".frames.jsonl")
+        try:
+            self.frame_log_file = self.frame_log_path.open(
+                "w", encoding="utf-8", buffering=1
+            )
+        except OSError as exc:
+            self.writer.release()
+            self.writer = None
+            self.frame_log_path = None
+            self.record.setChecked(False)
+            self.record_label.setText(f"Failed to open frame log: {exc}")
+            return
         self.recorded_frames = 0
         self.telemetry_session = self.record_path.stem
         self.node.start_telemetry(self.telemetry_session)
@@ -5113,13 +5572,24 @@ class TeleopWindow(QMainWindow):
         if self.writer is not None:
             self.writer.release()
             self.writer = None
+        if self.frame_log_file is not None:
+            self.frame_log_file.flush()
+            self.frame_log_file.close()
+            self.frame_log_file = None
         telemetry_ok = False
         if telemetry_session is not None and telemetry_path is not None:
             telemetry_ok = self.node.finish_telemetry(telemetry_session, telemetry_path)
             self.telemetry_session = None
         self.record.setText("Start recording (R)")
         if self.record_path is not None:
-            suffix = f" + {telemetry_path.name}" if telemetry_ok else " (telemetry download failed)"
+            frame_suffix = (
+                "" if self.frame_log_path is None else f" + {self.frame_log_path.name}"
+            )
+            suffix = (
+                f" + {telemetry_path.name}" if telemetry_ok
+                else " (telemetry download failed)"
+            )
+            suffix += frame_suffix
             self.record_label.setText(f"Saved: {self.record_path}{suffix}")
 
     def closeEvent(self, event):
@@ -5140,6 +5610,10 @@ def main():
     )
     parser.add_argument("--webcam-ip", default="210.220.0.12")
     parser.add_argument("--image-topic", default="")
+    parser.add_argument(
+        "--tape-image-topic",
+        default="/ascamera/camera_publisher/rgb0/image",
+    )
     parser.add_argument("--secondary-image-topic", default="")
     parser.add_argument("--secondary-video-url", default="")
     parser.add_argument("--primary-video-url", default="")
@@ -5160,6 +5634,8 @@ def main():
     parser.add_argument("--arrival-topic", default="")
     parser.add_argument("--auto-dock-stop-topic", default="")
     parser.add_argument("--auto-dock-status-topic", default="")
+    parser.add_argument("--dock-inventory-topic", default="")
+    parser.add_argument("--dock-inventory-reset-topic", default="")
     parser.add_argument("--fork-state-topic", default="")
     parser.add_argument("--drive-ready-topic", default="")
     parser.add_argument("--map-topic", default="/map")
@@ -5212,6 +5688,10 @@ def main():
         args.auto_dock_stop_topic = f"{robot_namespace}/auto_dock/stop"
     if not args.auto_dock_status_topic:
         args.auto_dock_status_topic = f"{robot_namespace}/auto_dock/status"
+    if not args.dock_inventory_topic:
+        args.dock_inventory_topic = f"{robot_namespace}/dock/inventory"
+    if not args.dock_inventory_reset_topic:
+        args.dock_inventory_reset_topic = f"{robot_namespace}/dock/inventory/reset"
     if not args.fork_state_topic:
         args.fork_state_topic = f"{robot_namespace}/fork/state"
     if not args.drive_ready_topic:

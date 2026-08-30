@@ -65,6 +65,22 @@ def box_overlap_ratio(first_box, second_box):
     return intersection / min(first_area, second_area)
 
 
+def box_iou(first_box, second_box):
+    """Intersection over union for short-lived detection association."""
+    x1 = max(first_box[0], second_box[0])
+    y1 = max(first_box[1], second_box[1])
+    x2 = min(first_box[2], second_box[2])
+    y2 = min(first_box[3], second_box[3])
+    intersection = max(0, x2 - x1) * max(0, y2 - y1)
+    first_area = max(1, first_box[2] - first_box[0]) * max(
+        1, first_box[3] - first_box[1]
+    )
+    second_area = max(1, second_box[2] - second_box[0]) * max(
+        1, second_box[3] - second_box[1]
+    )
+    return intersection / max(first_area + second_area - intersection, 1)
+
+
 def assign_frame_pallet_groups(entities, minimum_overlap_ratio=0.02):
     """Group simultaneously visible pallet faces whose image boxes overlap."""
     parents = list(range(len(entities)))
@@ -265,6 +281,8 @@ class YoloSymbolSeg(Node):
         self.declare_parameter("input_size", 320)
         self.declare_parameter("max_inference_fps", 4.0)
         self.declare_parameter("confidence", 0.40)
+        self.declare_parameter("pallet_confidence", 0.30)
+        self.declare_parameter("pallet_latch_missed_frames", 1)
         self.declare_parameter("camera_yaw_deg", 0.0)
         self.declare_parameter("yaw_bias_deg", 0.0)
         self.declare_parameter("pose_config", "/shared/vehicle_pose_config.json")
@@ -292,6 +310,12 @@ class YoloSymbolSeg(Node):
         self.inference_interval = 0.0 if max_inference_fps <= 0.0 else 1.0 / max_inference_fps
         self.last_inference_started = 0.0
         self.confidence = float(self.get_parameter("confidence").value)
+        self.pallet_confidence = float(
+            self.get_parameter("pallet_confidence").value
+        )
+        self.pallet_latch_missed_frames = max(
+            0, int(self.get_parameter("pallet_latch_missed_frames").value)
+        )
         pose_config = {}
         pose_config_path = str(self.get_parameter("pose_config").value)
         self.pose_config_path = pose_config_path
@@ -342,6 +366,7 @@ class YoloSymbolSeg(Node):
         self.odom_yaw = None
         self.entity_tracks = []
         self.next_entity_track_id = 1
+        self.pallet_detection_memory = []
         self.previous_pnp_yaw = None
         self.telemetry_lock = threading.Lock()
         self.telemetry_file = None
@@ -587,7 +612,9 @@ class YoloSymbolSeg(Node):
                     front.append(float(value))
         self.log_telemetry("scan", {"front_min_m": min(front) if front else None})
 
-    def remember_complete_entity(self, entity, pnp, depth_yaw=None):
+    def remember_complete_entity(
+        self, entity, pnp, depth_yaw=None, excluded_track_ids=None
+    ):
         """Add/update a short-lived target map entry from a full 2x2 detection."""
         if pnp is None or pnp.get("forward_distance_cm") is None:
             return None
@@ -615,15 +642,20 @@ class YoloSymbolSeg(Node):
         matches = [
             track for track in self.entity_tracks
             if track["matrix"] == matrix
+            and track["id"] not in set(excluded_track_ids or ())
             and math.dist((world_x, world_y), (track["world_x"], track["world_y"])) <= 0.45
         ]
         if matches:
             track = min(matches, key=lambda item: math.dist(
                 (world_x, world_y), (item["world_x"], item["world_y"])
             ))
+            seen_count = (
+                int(track.get("seen_count", 1)) + 1
+                if now - track["seen_at"] <= 0.50 else 1
+            )
             track.update(
                 world_x=world_x, world_y=world_y, world_yaw=world_yaw,
-                seen_at=now,
+                seen_at=now, seen_count=seen_count,
             )
         else:
             track = {
@@ -633,6 +665,7 @@ class YoloSymbolSeg(Node):
                 "world_y": world_y,
                 "world_yaw": world_yaw,
                 "seen_at": now,
+                "seen_count": 1,
             }
             self.next_entity_track_id += 1
             self.entity_tracks.append(track)
@@ -988,6 +1021,44 @@ class YoloSymbolSeg(Node):
             except Exception as exc:
                 self.get_logger().error(f"YOLO inference failed: {exc}")
 
+    def latch_pallet_detections(self, detections, minimum_iou=0.30):
+        """Keep a pallet through one missed inference (one hit in two frames)."""
+        symbols = [item for item in detections if item.get("class") != "pallet"]
+        current = [dict(item) for item in detections if item.get("class") == "pallet"]
+        unused = set(range(len(current)))
+        output = []
+        next_memory = []
+        for previous in self.pallet_detection_memory:
+            best_index = None
+            best_iou = 0.0
+            for index in unused:
+                overlap = box_iou(previous["box"], current[index]["box"])
+                if overlap > best_iou:
+                    best_index, best_iou = index, overlap
+            if best_index is not None and best_iou >= minimum_iou:
+                item = current[best_index]
+                item.pop("latched", None)
+                output.append(item)
+                next_memory.append({**item, "missed_frames": 0})
+                unused.remove(best_index)
+                continue
+            missed_frames = int(previous.get("missed_frames", 0)) + 1
+            if missed_frames <= self.pallet_latch_missed_frames:
+                held = {
+                    key: value for key, value in previous.items()
+                    if key != "missed_frames"
+                }
+                held["latched"] = True
+                output.append(held)
+                next_memory.append({**held, "missed_frames": missed_frames})
+        for index in sorted(unused):
+            item = current[index]
+            item.pop("latched", None)
+            output.append(item)
+            next_memory.append({**item, "missed_frames": 0})
+        self.pallet_detection_memory = next_memory
+        return symbols + output
+
     def infer(self, message):
         started = time.perf_counter()
         source_stamp_ns = (
@@ -1007,7 +1078,11 @@ class YoloSymbolSeg(Node):
         class_scores = predictions[:, 4 : 4 + len(NAMES)]
         class_ids = class_scores.argmax(axis=1)
         scores = class_scores.max(axis=1)
-        selected = np.flatnonzero(scores >= self.confidence)
+        pallet_class_id = NAMES.index("pallet")
+        score_thresholds = np.where(
+            class_ids == pallet_class_id, self.pallet_confidence, self.confidence
+        )
+        selected = np.flatnonzero(scores >= score_thresholds)
         boxes_xywh = predictions[selected, :4]
         boxes = np.empty_like(boxes_xywh)
         boxes[:, 0] = boxes_xywh[:, 0] - boxes_xywh[:, 2] / 2
@@ -1015,8 +1090,25 @@ class YoloSymbolSeg(Node):
         boxes[:, 2] = boxes_xywh[:, 0] + boxes_xywh[:, 2] / 2
         boxes[:, 3] = boxes_xywh[:, 1] + boxes_xywh[:, 3] / 2
         nms_boxes = [[float(x1), float(y1), float(x2 - x1), float(y2 - y1)] for x1, y1, x2, y2 in boxes]
-        kept = cv2.dnn.NMSBoxes(nms_boxes, scores[selected].tolist(), self.confidence, 0.45)
-        kept = np.asarray(kept).reshape(-1) if len(kept) else []
+        # Run NMS per class. A large symbol box must not suppress an overlapping
+        # pallet whose intentionally lower class-specific threshold admitted it.
+        kept = []
+        selected_class_ids = class_ids[selected]
+        for class_id in range(len(NAMES)):
+            class_offsets = np.flatnonzero(selected_class_ids == class_id)
+            if not len(class_offsets):
+                continue
+            class_boxes = [nms_boxes[int(offset)] for offset in class_offsets]
+            class_box_scores = [float(scores[int(selected[offset])]) for offset in class_offsets]
+            threshold = (
+                self.pallet_confidence
+                if class_id == pallet_class_id else self.confidence
+            )
+            class_kept = cv2.dnn.NMSBoxes(
+                class_boxes, class_box_scores, threshold, 0.45
+            )
+            for kept_offset in np.asarray(class_kept).reshape(-1):
+                kept.append(int(class_offsets[int(kept_offset)]))
         annotated = frame.copy()
         results = []
         for keep_index in kept:
@@ -1035,6 +1127,17 @@ class YoloSymbolSeg(Node):
             cv2.rectangle(annotated, (bx1, by1), (bx2, by2), color, 2)
             cv2.putText(annotated, f"{NAMES[class_id]} {score:.2f}", (bx1, max(20, by1 - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
             results.append({"class": NAMES[class_id], "confidence": score, "box": box})
+        results = self.latch_pallet_detections(results)
+        for item in results:
+            if item.get("class") != "pallet" or not item.get("latched"):
+                continue
+            x1, y1, x2, y2 = item["box"]
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), COLORS[pallet_class_id], 2)
+            cv2.putText(
+                annotated, f"pallet HOLD {item['confidence']:.2f}",
+                (x1, max(20, y1 - 7)), cv2.FONT_HERSHEY_SIMPLEX,
+                0.55, COLORS[pallet_class_id], 2,
+            )
         self.attach_individual_tag_depth(results, source_stamp_ns)
         map_entities = [
             entity for entity in pallet_entities(results)
@@ -1077,21 +1180,30 @@ class YoloSymbolSeg(Node):
             candidate = min(complete_entities, key=target_rank)
         candidate_status = None
         entity_observations = []
+        used_entity_track_ids = set()
+        entity_tracks_by_object = {}
         for entity in map_entities:
             entity_pnp = self.estimate_target_pose(entity)
             entity_depth_yaw = self.depth_yaw_from_pair(
                 entity["ordered_tags"][0], entity["ordered_tags"][1], source_stamp_ns
             )
             track = self.remember_complete_entity(
-                entity, entity_pnp, entity_depth_yaw
+                entity, entity_pnp, entity_depth_yaw,
+                excluded_track_ids=used_entity_track_ids,
             )
             if track is None:
                 continue
+            used_entity_track_ids.add(track["id"])
+            entity_tracks_by_object[id(entity)] = track
             entity_observations.append({
                 "entity_id": track["id"],
+                "seen_count": track["seen_count"],
                 "matrix": list(track["matrix"]),
                 "pnp": entity_pnp,
                 "depth_yaw": entity_depth_yaw,
+                "frontal_error": entity["frontal_error"],
+                "top_row_error": entity["top_row_error"],
+                "bottom_row_error": entity["bottom_row_error"],
                 "angle_source": "depth" if entity_depth_yaw is not None else "pnp",
                 "visibility_score": self.face_visibility_score(
                     entity, entity_pnp, entity_depth_yaw
@@ -1159,18 +1271,25 @@ class YoloSymbolSeg(Node):
             depth_yaw = self.depth_yaw_from_pair(
                 candidate["ordered_tags"][0], candidate["ordered_tags"][1], source_stamp_ns
             )
-            entity_track = self.remember_complete_entity(
-                candidate, pnp_pose, depth_yaw
-            )
+            entity_track = entity_tracks_by_object.get(id(candidate))
+            if entity_track is None:
+                entity_track = self.remember_complete_entity(
+                    candidate, pnp_pose, depth_yaw,
+                    excluded_track_ids=used_entity_track_ids,
+                )
             entity_id = None if entity_track is None else entity_track["id"]
             if entity_track is not None and not any(
                 item["entity_id"] == entity_id for item in entity_observations
             ):
                 entity_observations.append({
                     "entity_id": entity_id,
+                    "seen_count": entity_track["seen_count"],
                     "matrix": list(entity_track["matrix"]),
                     "pnp": pnp_pose,
                     "depth_yaw": depth_yaw,
+                    "frontal_error": candidate["frontal_error"],
+                    "top_row_error": candidate["top_row_error"],
+                    "bottom_row_error": candidate["bottom_row_error"],
                     "angle_source": "depth" if depth_yaw is not None else "pnp",
                     "visibility_score": self.face_visibility_score(
                         candidate, pnp_pose, depth_yaw

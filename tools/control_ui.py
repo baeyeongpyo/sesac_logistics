@@ -118,6 +118,7 @@ def auto_dock_status_text(status):
 def runtime_args(cli):
     return SimpleNamespace(
         vehicle=cli.vehicle, ros_domain_id=cli.ros_domain_id, webcam_ip="", image_topic="",
+        tape_image_topic="/ascamera/camera_publisher/rgb0/image",
         secondary_image_topic="", secondary_video_url="", primary_video_url="",
         primary_video_command="", control_host="127.0.0.1", control_port=8091,
         control_url="", control_command="", webcam_1_video_url="",
@@ -129,6 +130,8 @@ def runtime_args(cli):
         arrival_topic=f"/robot_{cli.vehicle}/nav2/arrival",
         auto_dock_stop_topic=f"/robot_{cli.vehicle}/auto_dock/stop",
         auto_dock_status_topic=f"/robot_{cli.vehicle}/auto_dock/status",
+        dock_inventory_topic=f"/robot_{cli.vehicle}/dock/inventory",
+        dock_inventory_reset_topic=f"/robot_{cli.vehicle}/dock/inventory/reset",
         map_topic="/map", entity_map_topic=f"/robot_{cli.vehicle}/tag_entity_map",
         output_dir=f"/home/ubuntu/recordings/vehicle{cli.vehicle}", linear_speed=cli.speed,
         angular_speed=cli.angular_speed, camera_pitch_deg=0.0,

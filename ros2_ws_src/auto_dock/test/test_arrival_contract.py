@@ -7,11 +7,14 @@ import pytest
 
 from auto_dock.auto_dock_node import (
     AutoDockNode,
+    DockInventoryTracker,
     SlotSelector,
     SlotGridVision,
     ZoneOccupancy,
+    detect_dock_end_markers,
     detect_warning_tape,
     normalize_slot_id,
+    pallet_product_type,
     parse_arrival,
     public_fsm_state,
 )
@@ -41,6 +44,241 @@ def test_warning_tape_detector_rejects_blank_floor():
     frame = np.full((480, 640, 3), 130, dtype=np.uint8)
 
     assert detect_warning_tape(frame) is None
+
+
+@pytest.mark.parametrize(("distance_cm", "accepted"), [
+    (29.9, True),
+    (30.0, False),
+    (33.6, False),
+])
+def test_top_pair_target_lock_is_near_range_only(distance_cm, accepted):
+    class FakeNode:
+        target_left = "spade"
+        target_right = "spade"
+        latest_detection_at = math.inf
+        latest_detection = {
+            "target_top": ["spade", "spade"],
+            "candidate": {
+                "entity_id": 26,
+                "depth_yaw": {"forward_distance_cm": distance_cm},
+                "pnp": {"forward_distance_cm": 20.0},
+            },
+        }
+
+        @staticmethod
+        def number(_key, default, _minimum, _maximum):
+            return default
+
+    candidate, _pnp = AutoDockNode.selected_candidate(FakeNode())
+
+    assert (candidate is not None) is accepted
+
+
+def test_dock_end_marker_detects_repeating_red_band_at_right_edge():
+    frame = np.full((480, 640, 3), 100, dtype=np.uint8)
+    for top in (120, 190, 260):
+        cv2.rectangle(frame, (595, top), (628, top + 34), (0, 0, 230), -1)
+    for left in (80, 190, 300, 410, 550):
+        cv2.rectangle(frame, (left, 302), (left + 70, 330), (0, 230, 230), -1)
+    # A red object away from the edge is not a DOCK endpoint.
+    cv2.rectangle(frame, (390, 100), (480, 260), (0, 0, 230), -1)
+
+    markers = detect_dock_end_markers(frame)
+
+    assert "right" in markers
+    assert markers["right"]["x_px"] > 590
+    assert "left" not in markers
+
+
+def test_dock_end_marker_rejects_repeating_red_band_without_yellow_tape():
+    frame = np.full((480, 640, 3), 100, dtype=np.uint8)
+    for top in (120, 190, 260):
+        cv2.rectangle(frame, (595, top), (628, top + 34), (0, 0, 230), -1)
+
+    assert detect_dock_end_markers(frame) == {}
+
+
+def test_dock_end_marker_rejects_red_band_far_above_warning_tape():
+    frame = np.full((480, 640, 3), 100, dtype=np.uint8)
+    for top in (0, 55, 110):
+        cv2.rectangle(frame, (595, top), (628, top + 34), (0, 0, 230), -1)
+    for left in (80, 190, 300, 410, 550):
+        cv2.rectangle(frame, (left, 410), (left + 70, 438), (0, 230, 230), -1)
+
+    assert detect_dock_end_markers(frame) == {}
+
+
+def test_dock_end_marker_rejects_single_red_or_low_saturation_edge_object():
+    frame = np.full((480, 640, 3), 100, dtype=np.uint8)
+    cv2.rectangle(frame, (600, 20), (639, 140), (0, 0, 230), -1)
+    low_saturation_red = cv2.cvtColor(
+        np.asarray([[[8, 110, 180]]], dtype=np.uint8), cv2.COLOR_HSV2BGR
+    )[0, 0]
+    cv2.rectangle(
+        frame, (565, 220), (625, 430),
+        tuple(int(value) for value in low_saturation_red), -1,
+    )
+
+    assert detect_dock_end_markers(frame) == {}
+
+
+@pytest.mark.parametrize(("matrix", "expected"), [
+    (["spade", "heart", "clover", "diamond"], "NORMAL"),
+    (["star", "heart", "clover", "diamond"], "FRESH"),
+])
+def test_pallet_product_type_uses_star_as_fresh(matrix, expected):
+    assert pallet_product_type(matrix) == expected
+
+
+def test_dock_inventory_keeps_only_nearest_visible_entity_per_lateral_row():
+    tracker = DockInventoryTracker(
+        depth_edges_cm=(20.0, 30.0, 40.0, 50.0),
+        first_row_center_ratio=0.5,
+        row_pitch_ratio=1.0,
+        maximum_age_sec=3.0,
+    )
+    entities = [
+        {
+            "entity_id": 1,
+            "matrix": ["star", "heart", "clover", "diamond"],
+            "image_pallet_box": [520, 200, 620, 400],
+            "pnp": {"forward_distance_cm": 25.0},
+            "visibility_score": 8000,
+        },
+        {
+            "entity_id": 2,
+            "matrix": ["spade", "heart", "clover", "diamond"],
+            "image_pallet_box": [520, 160, 620, 300],
+            "pnp": {"forward_distance_cm": 45.0},
+            "visibility_score": 9000,
+        },
+        {
+            "entity_id": 3,
+            "matrix": ["spade", "heart", "clover", "diamond"],
+            "image_pallet_box": [420, 180, 520, 360],
+            "pnp": {"forward_distance_cm": 35.0},
+            "visibility_score": 7000,
+        },
+    ]
+
+    snapshot = tracker.observe(
+        entities,
+        {"right": {"x_px": 620.0, "confidence": 1.0}},
+        now=10.0,
+        source_stamp_ns=123,
+    )
+
+    assert [item["slot_id"] for item in snapshot["visible_nearest"]] == [
+        "DOCK_R1_C1", "DOCK_R2_C2",
+    ]
+    assert snapshot["visible_nearest"][0]["product_type"] == "FRESH"
+    assert snapshot["visible_nearest"][0]["accessible"] is True
+    assert snapshot["visible_nearest"][1]["blocked_by"] == "DOCK_R2_C1"
+    assert snapshot["unreported_slots"] == "UNKNOWN"
+
+
+def test_dock_inventory_reset_requires_a_fresh_observation():
+    tracker = DockInventoryTracker(first_row_center_ratio=0.5, row_pitch_ratio=1.0)
+    tracker.observe([
+        {
+            "entity_id": 1,
+            "matrix": ["star", "heart", "clover", "diamond"],
+            "image_pallet_box": [520, 200, 620, 400],
+            "pnp": {"forward_distance_cm": 25.0},
+        }
+    ], {"right": {"x_px": 620.0}}, now=10.0)
+
+    tracker.reset("pick_fork_complete")
+    snapshot = tracker.snapshot(now=10.1)
+
+    assert snapshot["visible_nearest"] == []
+    assert snapshot["unreported_slots"] == "UNKNOWN"
+    assert snapshot["rescan_reason"] == "pick_fork_complete"
+
+
+def test_dock_inventory_tape_mode_accepts_nearest_row_below_depth_range():
+    tracker = DockInventoryTracker(
+        first_row_center_ratio=0.5,
+        row_pitch_ratio=1.0,
+        nearest_tape_only=True,
+    )
+    entities = [{
+        "entity_id": 130,
+        "matrix": ["star", "star", "star", "star"],
+        "image_pallet_box": [320, 370, 570, 419],
+        "pnp": {"forward_distance_cm": 11.9},
+        "visibility_score": 4805,
+    }]
+
+    snapshot = tracker.observe(
+        entities,
+        {"right": {"x_px": 695.0}},
+        now=10.0,
+        tape={"center_y_ratio": 0.897, "angle_deg": 2.47},
+        image_shape=(480, 640, 3),
+    )
+
+    assert [item["slot_id"] for item in snapshot["visible_nearest"]] == [
+        "DOCK_R1_C1"
+    ]
+    assert snapshot["visible_nearest"][0]["tape_gap_ratio"] == pytest.approx(
+        0.067, abs=0.002
+    )
+
+
+def test_dock_inventory_keeps_entity_row_and_allocates_next_free_row():
+    tracker = DockInventoryTracker(
+        first_row_center_ratio=0.5,
+        row_pitch_ratio=1.0,
+        nearest_tape_only=True,
+    )
+    marker = {"right": {"x_px": 620.0}}
+    tape = {"center_y_ratio": 0.90, "angle_deg": 0.0}
+    shape = (480, 640, 3)
+
+    tracker.observe([{
+        "entity_id": 10,
+        "matrix": ["star"] * 4,
+        "image_pallet_box": [470, 350, 570, 420],
+    }], marker, now=1.0, tape=tape, image_shape=shape)
+    snapshot = tracker.observe([{
+        "entity_id": 10,
+        "matrix": ["star"] * 4,
+        "image_pallet_box": [370, 350, 470, 420],
+    }, {
+        "entity_id": 11,
+        "matrix": ["star"] * 4,
+        "image_pallet_box": [480, 350, 580, 420],
+    }], marker, now=1.1, tape=tape, image_shape=shape)
+
+    slots = {item["entity_id"]: item["slot_id"] for item in snapshot["visible_nearest"]}
+    assert slots == {10: "DOCK_R1_C1", 11: "DOCK_R2_C1"}
+
+
+def test_dock_inventory_continues_after_right_end_leaves_view():
+    tracker = DockInventoryTracker(
+        first_row_center_ratio=0.5,
+        row_pitch_ratio=1.0,
+        nearest_tape_only=True,
+    )
+    tape = {"center_y_ratio": 0.90, "angle_deg": 0.0}
+    shape = (480, 640, 3)
+    tracker.observe([{
+        "entity_id": 10,
+        "matrix": ["star"] * 4,
+        "image_pallet_box": [470, 350, 570, 420],
+    }], {"right": {"x_px": 620.0}}, now=1.0, tape=tape, image_shape=shape)
+
+    snapshot = tracker.observe([{
+        "entity_id": 11,
+        "matrix": ["star"] * 4,
+        "image_pallet_box": [470, 350, 570, 420],
+    }], {}, now=1.1, tape=tape, image_shape=shape)
+
+    slots = {item["entity_id"]: item["slot_id"] for item in snapshot["visible_nearest"]}
+    assert slots == {10: "DOCK_R1_C1", 11: "DOCK_R2_C1"}
+    assert snapshot["right_end_detected"] is False
+    assert snapshot["right_end_anchor_locked"] is True
 
 
 @pytest.mark.parametrize(("internal", "operation", "expected"), [
@@ -76,6 +314,25 @@ def test_test_panel_can_force_unloaded_only_while_idle():
 
     assert fake.load_state == "UNLOADED"
     assert published == [("idle", "test_load_state_override")]
+
+
+def test_manual_dock_inventory_reset_clears_anchor_and_observations():
+    fake = type("FakeDock", (), {})()
+    fake.dock_inventory_tracker = DockInventoryTracker(nearest_tape_only=True)
+    fake.dock_inventory_tracker.right_end_seen = True
+    fake.dock_inventory_tracker.entity_rows = {10: 1}
+    fake.dock_inventory_tracker.observations = {1: {"entity_id": 10}}
+    published = []
+    fake.publish_dock_inventory = (
+        lambda snapshot, reason="observation": published.append((snapshot, reason))
+    )
+
+    AutoDockNode.on_dock_inventory_reset(fake, Empty())
+
+    assert fake.dock_inventory_tracker.right_end_seen is False
+    assert fake.dock_inventory_tracker.entity_rows == {}
+    assert fake.dock_inventory_tracker.observations == {}
+    assert published[-1][1] == "manual_reset"
 
 
 def test_test_load_state_is_rejected_while_busy():
@@ -257,6 +514,118 @@ def test_structured_dock_pick_allows_duplicate_symbols():
     assert arrival["target"] == {
         "type": "SYMBOLS", "left": "heart", "right": "heart"
     }
+
+
+def test_structured_dock_pick_accepts_nearest_product_target():
+    arrival = parse_arrival(json.dumps({
+        "status": "SUCCEEDED",
+        "location": "DOCK_1",
+        "operation": "PICK",
+        "product_type": "FRESH",
+        "target": {"type": "NEAREST"},
+    }))
+
+    assert arrival["target"] == {"type": "NEAREST"}
+
+
+def test_nearest_product_candidate_filters_product_and_uses_depth_distance():
+    fake = type("FakeDock", (), {})()
+    fake.product_type = "NORMAL"
+    fake.number = lambda _key, default, _minimum, _maximum: default
+    detection = {"entities": [
+        {
+            "entity_id": 10,
+            "seen_count": 3,
+            "matrix": ["heart", "spade", "diamond", "clover"],
+            "image_pallet_box": [300, 200, 400, 260],
+            "pnp": {"forward_distance_cm": 24.0},
+            "depth_yaw": {"forward_distance_cm": 18.0, "yaw_deg": 1.0},
+        },
+        {
+            "entity_id": 11,
+            "seen_count": 5,
+            "matrix": ["star", "star", "star", "star"],
+            "image_pallet_box": [200, 200, 300, 260],
+            "pnp": {"forward_distance_cm": 12.0},
+            "depth_yaw": {"forward_distance_cm": 12.0, "yaw_deg": 0.0},
+        },
+        {
+            "entity_id": 12,
+            "seen_count": 4,
+            "matrix": ["diamond", "spade", "heart", "clover"],
+            "image_pallet_box": [400, 200, 500, 260],
+            "pnp": {"forward_distance_cm": 21.0},
+            "depth_yaw": {"forward_distance_cm": 21.0, "yaw_deg": 0.0},
+        },
+    ]}
+
+    candidate, _pnp = AutoDockNode.nearest_product_candidate(fake, detection)
+
+    assert candidate["entity_id"] == 10
+    assert candidate["streak"] == 3
+
+
+def test_nearest_product_candidate_skips_inventory_blocked_entity():
+    fake = type("FakeDock", (), {})()
+    fake.product_type = "NORMAL"
+    fake.number = lambda _key, default, _minimum, _maximum: default
+    fake.dock_inventory_tracker = type("Tracker", (), {
+        "snapshot": lambda _self: {"visible_nearest": [
+            {
+                "entity_id": 10, "accessible": False,
+                "product_type": "NORMAL",
+            },
+            {
+                "entity_id": 12, "accessible": True,
+                "product_type": "NORMAL",
+            },
+        ]}
+    })()
+    detection = {"entities": [
+        {
+            "entity_id": 10,
+            "matrix": ["heart", "spade", "diamond", "clover"],
+            "image_pallet_box": [300, 200, 400, 260],
+            "pnp": {"forward_distance_cm": 18.0},
+            "depth_yaw": {"forward_distance_cm": 18.0, "yaw_deg": 0.0},
+        },
+        {
+            "entity_id": 12,
+            "matrix": ["diamond", "spade", "heart", "clover"],
+            "image_pallet_box": [400, 200, 500, 260],
+            "pnp": {"forward_distance_cm": 21.0},
+            "depth_yaw": {"forward_distance_cm": 21.0, "yaw_deg": 0.0},
+        },
+    ]}
+
+    candidate, _pnp = AutoDockNode.nearest_product_candidate(fake, detection)
+
+    assert candidate["entity_id"] == 12
+
+
+def test_tape_pose_hold_corrects_distance_without_lateral_motion():
+    fake = type("FakeDock", (), {})()
+    fake.config = {
+        "tape_guidance_enabled": True,
+        "tape_pose_filter_alpha": 1.0,
+    }
+    fake.number = lambda key, default, *_args: fake.config.get(key, default)
+    fake.latest_tape_guidance = {"center_y_ratio": 0.80, "angle_deg": 0.0}
+    fake.latest_tape_guidance_at = 10.0
+    fake.tape_reference = {"center_y_ratio": 0.70, "angle_deg": 0.0}
+    fake.tape_filtered_center_y_ratio = 0.70
+    fake.tape_filtered_angle_deg = 0.0
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+    fake.publish_status = lambda *_args, **_kwargs: None
+
+    correcting = AutoDockNode.command_warning_tape_search(
+        fake, 10.1, 0.0, 0.0, pose_correction_only=True
+    )
+
+    assert correcting is True
+    assert commands[0][0] < 0.0
+    assert commands[0][1:] == (0.0, 0.0)
 
 
 def test_structured_slot_is_normalized():
@@ -450,6 +819,105 @@ def test_reverse_starts_right_turn_when_swept_circle_is_clear():
     assert fake.drive_ready_pub.messages == []
 
 
+def test_reverse_enters_enabled_rear_opening_test(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.config = {"post_lift_rear_opening_test_enabled": True}
+    fake.post_lift_reverse_start = (0.0, 0.0)
+    fake.post_lift_reverse_start_yaw = 0.0
+    fake.post_lift_reverse_target_m = 0.27
+    fake.odom_position = (-0.28, 0.0)
+    fake.number = lambda key, default, *_args: default
+    fake.stop_drive = lambda *_args: None
+    statuses = []
+    fake.publish_status = lambda state, reason, **extra: statuses.append(
+        (state, reason, extra)
+    )
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
+
+    AutoDockNode.tick_reversing_after_lift(fake)
+
+    assert fake.state == "post_lift_opening_search"
+    assert fake.post_lift_reverse_target_m is None
+    assert statuses[-1][1] == "post_lift_opening_search_started"
+
+
+def test_post_lift_right_search_detects_confirmed_rear_opening(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.scan_updated_at = 10.0
+    fake.nearest_by_direction = {"rear": (0.30, math.pi, 0.20)}
+    fake.post_lift_opening_started_at = 10.0
+    fake.post_lift_opening_reference_m = None
+    fake.post_lift_opening_previous_m = None
+    fake.post_lift_opening_confirmation_count = 0
+    fake.post_lift_reverse_start_yaw = 0.0
+    fake.odom_yaw = 0.0
+    fake.number = lambda key, default, *_args: default
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+    fake.stop_drive = lambda *_args: None
+    statuses = []
+    fake.publish_status = lambda state, reason, **extra: statuses.append(
+        (state, reason, extra)
+    )
+    fake.cancel = lambda reason: pytest.fail(reason)
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_post_lift_opening_search(fake)
+    fake.nearest_by_direction["rear"] = (0.50, math.pi, 0.20)
+    AutoDockNode.tick_post_lift_opening_search(fake)
+    AutoDockNode.tick_post_lift_opening_search(fake)
+
+    assert commands[:2] == [(0.0, -0.12, 0.0), (0.0, -0.12, 0.0)]
+    assert fake.state == "post_lift_opening_reverse"
+    assert statuses[-1][1] == "post_lift_rear_opening_detected"
+
+
+def test_post_lift_right_search_holds_real_imu_yaw(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.scan_updated_at = 10.0
+    fake.nearest_by_direction = {"rear": (0.30, math.pi, 0.20)}
+    fake.post_lift_opening_started_at = 10.0
+    fake.post_lift_opening_reference_m = None
+    fake.post_lift_opening_confirmation_count = 0
+    fake.post_lift_opening_heading_yaw = 0.0
+    fake.post_lift_opening_heading_source = "imu"
+    fake.imu_yaw = math.radians(10.0)
+    fake.odom_yaw = 0.0
+    fake.number = lambda key, default, *_args: default
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+    fake.publish_status = lambda *_args, **_kwargs: None
+    fake.cancel = lambda reason: pytest.fail(reason)
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_post_lift_opening_search(fake)
+
+    assert commands == [(0.0, 0.0, -0.35)]
+
+
+def test_post_lift_opening_reverses_until_rear_twenty_cm(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.scan_updated_at = 10.0
+    fake.nearest_by_direction = {"rear": (0.25, math.pi, 0.20)}
+    fake.post_lift_opening_reverse_started_at = 10.0
+    fake.number = lambda key, default, *_args: default
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+    fake.stop_drive = lambda *_args: None
+    fake.drive_ready_pub = CapturePublisher()
+    fake.publish_status = lambda *_args, **_kwargs: None
+    fake.cancel = lambda reason: pytest.fail(reason)
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_post_lift_opening_reverse(fake)
+    fake.nearest_by_direction["rear"] = (0.20, math.pi, 0.20)
+    AutoDockNode.tick_post_lift_opening_reverse(fake)
+
+    assert commands == [(-0.05, 0.0, 0.0)]
+    assert fake.state == "ready"
+    assert len(fake.drive_ready_pub.messages) == 1
+
+
 def test_reverse_waits_for_fresh_scan_before_skipping_turn(monkeypatch):
     fake = type("FakeDock", (), {})()
     fake.state = "reversing_after_lift"
@@ -538,11 +1006,13 @@ def test_first_matching_frame_schedules_stop_after_point_two_seconds(monkeypatch
         "search_lateral_speed_m_s": 0.12,
         "search_forward_compensation_m_s": 0.02,
         "search_min_wheel_component_m_s": 0.10,
+        "tape_target_angle_deg": fake.config.get("tape_target_angle_deg", default),
     }.get(key, default)
     fake.publish_status = lambda *_args, **_kwargs: None
     fake.config = {
         "search_lateral_direction": "left",
         "tape_guidance_enabled": False,
+        "tape_target_angle_deg": 0.0,
     }
     fake.search_heading_yaw = None
     fake.odom_yaw = 0.0
@@ -792,7 +1262,7 @@ def test_tag_guided_search_corrects_yaw_before_distance_or_lateral(monkeypatch):
 
     AutoDockNode.tick_search(fake)
 
-    assert commands == [(0.0, 0.0, pytest.approx(-0.06))]
+    assert commands == [(0.0, 0.0, pytest.approx(-0.35))]
 
 
 def rear_lidar_search_fake(rear_distance_m):
@@ -817,6 +1287,7 @@ def rear_lidar_search_fake(rear_distance_m):
     fake.commands = []
     fake.statuses = []
     fake.publish_drive = lambda x, y, yaw: fake.commands.append((x, y, yaw))
+    fake.stop_drive = lambda: fake.commands.append((0.0, 0.0, 0.0))
     fake.publish_status = lambda state, reason, **extra: fake.statuses.append(
         (state, reason, extra)
     )
@@ -864,6 +1335,48 @@ def test_combined_search_checks_rear_then_uses_front_yolo(monkeypatch):
     assert fake.statuses[-1][1] == "front_tag_distance_correction"
 
 
+def test_combined_search_does_not_move_forward_when_front_is_already_close(
+    monkeypatch,
+):
+    fake = rear_lidar_search_fake(0.29)
+    fake.config["tag_guided_lateral_search_enabled"] = True
+    fake.latest_detection = {
+        "detections": [{
+            "class": "spade",
+            "box": [250, 100, 390, 300],
+            "depth": {"forward_distance_cm": 18.0, "bearing_deg": 0.0},
+        }]
+    }
+    fake.latest_detection_at = 10.0
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_search(fake)
+
+    assert fake.commands == [(0.0, 0.0, 0.0)]
+    assert fake.statuses[-1][1] == "search_longitudinal_clearance_conflict"
+
+
+def test_combined_search_does_not_strafe_when_front_tag_is_too_close(
+    monkeypatch,
+):
+    fake = rear_lidar_search_fake(0.30)
+    fake.config["tag_guided_lateral_search_enabled"] = True
+    fake.latest_detection = {
+        "detections": [{
+            "class": "spade",
+            "box": [250, 100, 390, 300],
+            "depth": {"forward_distance_cm": 8.0, "bearing_deg": 0.0},
+        }]
+    }
+    fake.latest_detection_at = 10.0
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_search(fake)
+
+    assert fake.commands == [(0.0, 0.0, 0.0)]
+    assert fake.statuses[-1][1] == "search_longitudinal_clearance_conflict"
+
+
 def test_combined_search_falls_back_to_rear_when_front_depth_missing(monkeypatch):
     fake = rear_lidar_search_fake(0.30)
     fake.config["tag_guided_lateral_search_enabled"] = True
@@ -893,7 +1406,7 @@ def tape_search_fake(angle_deg):
     fake.tape_recovery_done = False
     fake.config = {
         "search_lateral_direction": "left",
-        "tape_guidance_enabled": True,
+        "tape_guidance_enabled": False,
     }
     fake.number = lambda key, default, *_args: {
         "search_linear_speed_m_s": 0.08,
@@ -910,26 +1423,60 @@ def tape_search_fake(angle_deg):
     return fake
 
 
-def test_removed_tape_guidance_cannot_rotate_search_motion(monkeypatch):
+def test_tape_only_search_latches_initial_pose_and_strafes(monkeypatch):
+    fake = tape_search_fake(angle_deg=0.0)
+    fake.config["tape_guidance_only"] = True
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_search(fake)
+
+    assert fake.tape_reference == {
+        "center_y_ratio": 0.80,
+        "angle_deg": 0.0,
+    }
+    assert fake.commands == [(0.0, 0.12, 0.0)]
+    assert fake.statuses[-1][1] == "warning_tape_pose_held_lateral_search"
+
+
+def test_tape_only_search_corrects_yaw_before_lateral(monkeypatch):
     fake = tape_search_fake(angle_deg=10.0)
+    fake.config["tape_guidance_only"] = True
+    fake.tape_reference = {"center_y_ratio": 0.80, "angle_deg": 0.0}
     monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
 
     AutoDockNode.tick_search(fake)
 
-    assert fake.commands[0][0] == pytest.approx(0.02)
-    assert fake.commands[0][1:] == (0.12, 0.0)
-    assert fake.statuses[-1][1] == "lateral_target_search"
+    assert fake.commands[0][:2] == (0.0, 0.0)
+    assert fake.commands[0][2] < 0.0
+    assert fake.statuses[-1][1] == "warning_tape_yaw_correction_before_lateral"
 
 
-def test_removed_tape_guidance_cannot_change_lateral_search(monkeypatch):
-    fake = tape_search_fake(angle_deg=1.0)
+def test_tape_only_search_uses_configured_angle_not_initial_diagonal(monkeypatch):
+    fake = tape_search_fake(angle_deg=10.0)
+    fake.config["tape_guidance_only"] = True
+    fake.config["tape_target_angle_deg"] = 0.0
     monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
 
     AutoDockNode.tick_search(fake)
 
-    assert fake.commands[0][0] == pytest.approx(0.02)
-    assert fake.commands[0][1:] == (0.12, 0.0)
-    assert fake.statuses[-1][1] == "lateral_target_search"
+    assert fake.tape_reference["angle_deg"] == 0.0
+    assert fake.commands[0][:2] == (0.0, 0.0)
+    assert fake.commands[0][2] < 0.0
+
+
+def test_tape_only_search_corrects_distance_before_lateral(monkeypatch):
+    fake = tape_search_fake(angle_deg=5.0)
+    fake.config["tape_guidance_only"] = True
+    fake.latest_tape_guidance["center_y_ratio"] = 0.84
+    fake.tape_reference = {"center_y_ratio": 0.80, "angle_deg": 5.0}
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_search(fake)
+
+    assert fake.commands == [(-0.01, 0.0, 0.0)]
+    assert fake.statuses[-1][1] == (
+        "warning_tape_distance_correction_before_lateral"
+    )
 
 
 def missing_tape_recovery_fake(front_margin, rear_margin):
@@ -970,6 +1517,17 @@ def test_missing_tape_nudges_toward_larger_rear_clearance():
     fake = missing_tape_recovery_fake(front_margin=0.25, rear_margin=0.90)
 
     AutoDockNode.tick_missing_tape_recovery(fake, 10.1)
+
+    assert fake.tape_recovery_direction == "rear"
+    assert fake.commands == [(-0.08, 0.0, 0.0)]
+
+
+def test_tape_only_recovery_forces_short_reverse_when_front_is_clearer():
+    fake = missing_tape_recovery_fake(front_margin=0.80, rear_margin=0.30)
+
+    AutoDockNode.tick_missing_tape_recovery(
+        fake, 10.1, preferred_direction="rear"
+    )
 
     assert fake.tape_recovery_direction == "rear"
     assert fake.commands == [(-0.08, 0.0, 0.0)]
@@ -1027,6 +1585,38 @@ def test_depth_fallback_locks_provisional_world_target_before_coarse_alignment()
     assert result is True
     assert locked
     assert entered == ["pnp_quality_fallback"]
+
+
+def test_visible_requested_top_pair_recovers_without_pallet_entity(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.latest_detection_at = 10.0
+    fake.target_left = "spade"
+    fake.target_right = "heart"
+    fake.target_entity_id = None
+    fake.latest_detection = {
+        "target_top": ["spade", "heart"],
+        "detections": [
+            {
+                "class": "spade", "box": [170, 210, 314, 342],
+                "depth": {
+                    "camera_depth_m": 0.239,
+                    "forward_distance_cm": 9.7,
+                    "bearing_deg": -9.2,
+                },
+            },
+            {"class": "heart", "box": [318, 230, 462, 346]},
+            {"class": "spade", "box": [20, 20, 80, 80]},
+        ],
+    }
+    fake.number = lambda key, default, *_args: default
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    candidate, pnp, reason = AutoDockNode.visible_target_top_pair_measurement(fake)
+
+    assert reason is None
+    assert candidate["center_error"] == pytest.approx(-0.0125)
+    assert candidate["depth_yaw"]["forward_distance_cm"] == pytest.approx(9.7)
+    assert pnp["depth_fallback"] is True
 
 
 def test_coarse_target_loss_continues_with_provisional_world_target():
@@ -1261,6 +1851,25 @@ def test_good_pnp_distance_is_used_when_depth_is_missing():
     assert got_pnp["distance_source"] == "pnp"
 
 
+def test_close_eight_cm_pnp_measurement_remains_valid_for_insertion():
+    candidate = {"frontal_error": 0.06, "depth_yaw": None}
+    pnp = {
+        "forward_distance_cm": 8.26,
+        "reprojection_error_px": 2.35,
+        "lateral_ratio": -0.03,
+        "yaw_deg": 3.1,
+    }
+    fake = type("FakeDock", (), {})()
+    fake.identity_measurement = lambda: (candidate, pnp, None)
+    fake.number = lambda key, default, *_args: default
+
+    got_candidate, got_pnp, reason = AutoDockNode.valid_measurement(fake)
+
+    assert got_candidate == candidate
+    assert reason is None
+    assert got_pnp["distance_source"] == "pnp"
+
+
 def test_close_valid_target_pauses_before_insertion(monkeypatch):
     fake = type("FakeDock", (), {})()
     candidate = {"depth_yaw": {"yaw_deg": 0.0}}
@@ -1290,6 +1899,24 @@ def test_close_valid_target_pauses_before_insertion(monkeypatch):
     assert fake.insert_start_position == (1.0, 2.0)
     assert fake.insert_start_yaw == 0.0
     assert fake.insertion_entry_gap_m == pytest.approx(0.159)
+
+
+def test_aligned_top_pair_at_nine_cm_can_start_insertion(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.valid_measurement = lambda: (None, None, "top_pair_only")
+    fake.target_in_body = lambda: (0.097, 0.0, 0.0)
+    fake.number = lambda key, default, *_args: default
+    fake.stop_drive = lambda *_args: None
+    fake.odom_position = (1.0, 2.0)
+    fake.odom_yaw = 0.0
+    fake.insertion_start_due_at = None
+    fake.publish_status = lambda *_args, **_kwargs: None
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
+
+    AutoDockNode.tick_docking(fake)
+
+    assert fake.insertion_start_due_at == pytest.approx(10.1)
+    assert fake.insertion_entry_gap_m == pytest.approx(0.097)
 
 
 def test_translation_first_alignment_limits_but_keeps_large_yaw_correction():
@@ -1461,3 +2088,4 @@ def test_insertion_corrects_lateral_and_yaw_from_visible_target():
 
     assert updated == [(candidate, pnp, True)]
     assert commands == [(0.08, pytest.approx(0.01), pytest.approx(0.08))]
+    pallet_product_type,
