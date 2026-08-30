@@ -3,7 +3,8 @@
 ## 목적과 실행 방식
 
 `vehicle_command_api.py`는 이미 차량에서 실행 중인 전역 Nav2 action
-`/navigate_to_pose`와 전역 속도 토픽 `/cmd_vel`에 HTTP 요청을 연결한다.
+`/navigate_to_pose`, 전역 속도 토픽 `/cmd_vel`, Auto Dock ROS topic에 HTTP 요청을
+연결한다.
 
 이 프로세스는 Nav2를 새로 실행하지 않는다. 따라서 실차에서 다음처럼 전역
 `/bt_navigator`, `/planner_server`, `/controller_server`가 이미 보이는 경우에
@@ -111,6 +112,10 @@ Foxglove Bridge의 허용 topic, QoS, 서비스/파라미터 차단, 압축 설�
 | `--initial-pose-topic` | `/initialpose` | AMCL 초기 위치 발행 토픽 |
 | `--initial-pose-position-variance` | `0.25` | initial pose X/Y covariance 대각값 (m²) |
 | `--initial-pose-yaw-variance` | `0.0685` | initial pose yaw covariance 대각값 (rad²) |
+| `--auto-dock-arrival-topic` | `/{robot_id}/nav2/arrival` | Auto Dock Pick·Place 시작 JSON 발행 토픽 |
+| `--auto-dock-status-topic` | `/{robot_id}/auto_dock/status` | Auto Dock 상태 JSON 구독 토픽 |
+| `--auto-dock-stop-topic` | `/{robot_id}/auto_dock/stop` | Auto Dock 중단 `std_msgs/msg/Empty` 발행 토픽 |
+| `--auto-dock-drive-ready-topic` | `/{robot_id}/auto_dock/drive_ready` | Auto Dock 실제 완료 `std_msgs/msg/Empty` 구독 토픽 |
 | `--max-linear-x` | `0.10` | 수동 전진/후진 최대 속도 (m/s) |
 | `--max-angular-z` | `0.50` | 수동 회전 최대 속도 (rad/s) |
 | `--max-hold-ms` | `1000` | 수동 속도 유지 최대 시간 (ms) |
@@ -139,20 +144,25 @@ curl -i -X POST http://192.168.100.20:8082/v1/cmd-vel \
 ```
 
 성공하면 `202`와 `MANUAL` 상태를 반환한다. hold 시간이 지나면 API는 0속도를
-한 번 발행하고 상태를 `IDLE`로 바꾼다. 수동 명령을 받기 전에 활성 Nav2 목표가
-있으면 해당 목표의 cancel을 먼저 요청한다.
+한 번 발행하고 명령 전 상태로 복귀한다. `MANUAL`은 물류 작업 상태가 아닌
+유지보수 상태이므로 `INIT`에서는 다시 `INIT`으로, `IDLE`에서는 다시 `IDLE`로
+돌아간다. 수동 명령을 받기 전에 활성 Nav2 목표가 있으면 해당 목표의 cancel을
+먼저 요청한다.
 
 ### Nav2 목표 전송
 
 ```bash
 curl -i -X POST http://192.168.100.20:8082/v1/navigation/goals \
   -H 'Content-Type: application/json' \
-  --data '{"frame_id": "map", "x": 1.50, "y": 0.0, "yaw": 0.0}'
+  --data '{"operation_id":"73d5b9af-5a12-4f34-a96c-5de116df1e8e","purpose":"PICK","frame_id":"map","x":1.50,"y":0.0,"yaw":0.0}'
 ```
 
-성공 시 `202`와 차량이 만든 `operation_id`를 반환한다. `operation_id`는 이후
-상태 조회 및 취소 대상을 지정할 때 사용한다. `frame_id`는 생략하면 `map`이며,
-다른 frame은 거부한다.
+물류 작업에서는 Inventory/중앙 서버가 만든 `operation_id`를 반드시 보낸다. 응답의
+`attempt_id`는 차량 내부 Nav2 action handle 식별자이며 서버 작업 ID와 다르다.
+`operation_id`를 생략하면 독립 주행 검증용 UUID를 차량이 만든다. `purpose`는 적재
+전 주행에서는 선택 사항이지만 `PICK_COMPLETE`의 적재 상태에서는 반드시 `PLACE`여야
+한다. `frame_id`는 생략하면 `map`이며, 다른 frame은 거부한다. 차량은 `INIT`에서
+DRIVE를 받지 않으므로 초기 위치 확인 뒤 아래 `operation/idle` 요청을 먼저 수행해야 한다.
 
 ### 작업 상태 조회
 
@@ -160,18 +170,54 @@ curl -i -X POST http://192.168.100.20:8082/v1/navigation/goals \
 curl -sS http://192.168.100.20:8082/v1/operation-status | python3 -m json.tool
 ```
 
-응답은 `operation_id`, `state`, `detail`을 가진다.
+응답은 현재/직전 서버 작업을 함께 확인할 수 있도록 `operation_id`,
+`previous_operation_id`, `state`, `previous_state`, `detail`을 가진다.
 
 | state | 의미 |
 |---|---|
-| `IDLE` | 실행 중인 명령 없음 |
-| `MANUAL` | 제한 시간 안의 직접 `/cmd_vel` 명령 |
-| `NAVIGATING` | Nav2가 목표를 수락해 주행 중 |
-| `CANCELLING` | Nav2 cancel 결과 대기 중 |
-| `CANCELLED` | 지정 cancel 후 Nav2가 취소 결과를 보고함 |
-| `COMPLETED` | Nav2 goal 성공 |
-| `FAILED` | goal 거절, Nav2 미가용, abort 또는 action 오류 |
-| `STOPPED` | `/v1/stop`이 즉시 0속도를 발행함 |
+| `INIT` | API 기동 직후. 운영자 확인 전에는 물류 작업을 수락하지 않음 |
+| `IDLE` | 적재·진행 명령이 없는 작업 가능 상태 |
+| `DRIVE` | Nav2 목표 주행 중 |
+| `PICKING` | Auto Dock Pick 작업 중 |
+| `PICK_COMPLETE` | Pick 완료 뒤 차량이 적재된 상태 |
+| `PLACE` | Auto Dock Place 작업 중 |
+| `PLACE_COMPLETE` | Place 완료 이벤트 직후의 내부 종료 상태. 스냅샷은 바로 `IDLE`로 전환 |
+| `FAILED` | Nav2 또는 Auto Dock 오류. 운영자 해제 전 새 작업 불가 |
+| `CANCELLED` | cancel 또는 stop으로 중단됨. 운영자 해제 전 새 작업 불가 |
+| `MANUAL` | 제한 시간 직접 `/cmd_vel` 유지보수 명령. 만료 시 명령 전 상태로 복귀 |
+
+### 기동·복구 후 작업 허가
+
+`/v1/localization/initial-pose`는 AMCL에 위치 후보를 발행할 뿐 작업을 허가하지
+않는다. API 기동, `CANCELLED`, `FAILED` 뒤에는 현장 위치와 안전 상태를 확인한 후
+다음 요청으로만 `IDLE`로 전환한다.
+
+```bash
+curl -i -X POST http://192.168.100.20:8082/v1/operation/idle \
+  -H 'Content-Type: application/json' \
+  --data '{"reason":"OPERATOR_CONFIRMED"}'
+```
+
+`PICK_COMPLETE`에서는 적재 상태를 잃지 않도록 이 요청을 거부한다. 재기동이나
+실패 뒤에는 차량이 과거 상태를 복원하지 않는다. 중앙 서버가 Inventory 이력과
+`previous_operation_id`를 대조한 뒤 동일한 `operation_id`로 DRIVE 또는 Auto Dock
+명령을 새로 보낸다.
+
+### Auto Dock Pick·Place 전송
+
+Nav2 목표 도착을 서버가 확인한 다음에만 Auto Dock 명령을 별도로 보낸다.
+
+```bash
+curl -i -X POST http://192.168.100.20:8082/v1/auto-dock \
+  -H 'Content-Type: application/json' \
+  --data '{"operation_id":"73d5b9af-5a12-4f34-a96c-5de116df1e8e","operation":"PICK","product_type":"NORMAL","location":"DOCK_1","target":{"type":"NEAREST"}}'
+```
+
+`PICK`은 `IDLE`, `PLACE`는 동일한 작업 ID의 `PICK_COMPLETE`에서만 수락한다. API는
+위 JSON에 `status: "SUCCEEDED"`를 추가하여 `/{robot_id}/nav2/arrival`에 발행한다.
+Auto Dock의 `READY` status는 완료가 아니다. fork, 후진, 준비 자세까지 끝난
+`/{robot_id}/auto_dock/drive_ready`만 `PICK_COMPLETE` 또는 `PLACE_COMPLETE`으로
+판정한다. `PLACE_COMPLETE` 뒤에는 자동으로 `IDLE` snapshot으로 전환한다.
 
 ### 차량 상태 조회
 
@@ -194,8 +240,10 @@ curl -sS http://192.168.100.20:8082/v1/vehicle-status | python3 -m json.tool
   },
   "operation": {
     "operation_id": null,
+    "previous_operation_id": "73d5b9af-5a12-4f34-a96c-5de116df1e8e",
     "state": "IDLE",
-    "detail": "READY"
+    "previous_state": "CANCELLED",
+    "detail": "OPERATOR_READY"
   }
 }
 ```
@@ -224,7 +272,7 @@ curl -i -X POST http://192.168.100.20:8082/v1/localization/initial-pose \
 }
 ```
 
-`NAVIGATING`, `CANCELLING`, 또는 `MANUAL` 상태에서는 위치 재설정이 위험하므로
+`DRIVE`, `PICKING`, `PLACE`, 또는 `MANUAL` 상태에서는 위치 재설정이 위험하므로
 발행하지 않고 `409`을 반환한다. 호출자는 먼저 `/v1/stop`을 직접 호출하고,
 Nav2의 취소 처리가 끝난 뒤 initial pose 요청을 다시 수행해야 한다.
 
@@ -246,17 +294,18 @@ curl -i -X POST http://192.168.100.20:8082/v1/navigation/cancel \
 curl -i -X POST http://192.168.100.20:8082/v1/stop
 ```
 
-`cancel`은 지정된 활성 Nav2 작업의 영구 취소를 요청한다. Nav2가 canceled
-결과를 전달하면 상태는 `CANCELLED`가 된다. `stop`은 먼저 `/cmd_vel`에 0속도를
-발행하고 활성 작업의 cancel을 함께 요청하며, 즉시 `STOPPED`를 반환한다.
+`cancel`은 지정된 활성 Nav2 작업의 영구 취소를 요청하고 상태를 `CANCELLED`로
+바꾼다. `stop`은 먼저 `/cmd_vel`에 0속도를 발행하고 활성 Nav2 또는 Auto Dock
+작업의 cancel/stop topic을 함께 요청한다. 둘 다 자동으로 `IDLE`로 돌아가지 않으며
+원인 조치와 `operation/idle` 운영자 확인 뒤에만 다음 작업을 받을 수 있다.
 
-## 현재 단계의 안전 경계
+## 안전 경계와 Reporter 분리
 
-이 1차 독립 API는 현재 배선된 `/cmd_vel` 경로에 0속도 메시지를 발행하고 Nav2
-cancel을 요청한다. 기존 Nav2 또는 다른 publisher가 이후 새 속도 메시지를
-발행하지 못하게 하는 하드웨어 수준 stop latch는 만들지 않는다. stop latch,
-자동 재개 금지, Fleet Manager 상태 보고와 재전송 정책은 다음 단계에서 기존
-`cmd_vel` mux/중재 경로 및 Fleet Manager API와 함께 적용한다.
+`stop`은 Nav2 cancel과 Auto Dock stop topic을 요청하고 0속도 명령을 발행하지만,
+하드웨어 수준 stop latch 또는 다른 publisher의 속도 명령 차단 기능은 제공하지
+않는다. 작업 완료·실패 이벤트를 중앙 서버에 재전송하는 기능도 이 패키지의
+책임이 아니다. 그 기능은 Nav2와 Auto Dock 양쪽에서 재사용할 별도
+`vehicle_task_reporter` 패키지에서 상태 스냅샷을 읽어 구현한다.
 
 ## 로컬 검증
 

@@ -101,6 +101,11 @@ GET /api/v1/vehicle-command/{robot_id}/vehicle-status
 | `PLACE_COMPLETE` | Place 완료 이벤트가 생성된 순간의 종료 상태다. | 불가 |
 | `FAILED` | Nav2, Auto Dock 또는 차량 명령 처리 실패다. | 불가 |
 | `CANCELLED` | 운영자 취소 또는 즉시 정지로 작업을 중단했다. | 불가 |
+| `MANUAL` | 제한 시간 `/cmd_vel` 유지보수 명령이 활성화된 상태다. | 불가 |
+
+`MANUAL`은 물류 작업 상태가 아니라 기존 직접 속도 검증 API의 호환 상태다. 타이머가
+끝나면 명령 전 상태로 돌아간다. DRIVE 중 수동 명령이 들어오면 Nav2를 먼저 취소하고,
+타이머 종료 뒤에는 `CANCELLED`로 복귀한다.
 
 Auto Dock의 `SEARCHING`, `ALIGNING`, `INSERTING`, `WAIT_UP_COMPLETE`,
 `WAIT_DOWN_COMPLETE`, `REVERSING`, `TURNING`은 공개 상태로 추가하지 않는다.
@@ -164,7 +169,8 @@ DRIVE와 Auto Dock은 서로 다른 명령이다. 정상 작업과 재시작 뒤
 
 `/v1/navigation/goals`는 물류 작업의 경우 Inventory가 만든
 `operation_id`를 받아야 한다. Nav2 action handle을 위한 차량 내부 attempt ID는
-별도로 생성해 재시도와 같은 Inventory 작업 UUID를 혼동하지 않는다.
+별도로 생성해 재시도와 같은 Inventory 작업 UUID를 혼동하지 않는다. Pick 완료 뒤
+적재 상태에서는 `purpose: "PLACE"`가 있는 같은 `operation_id`의 DRIVE만 수락한다.
 
 `/v1/auto-dock`은 Nav2 goal을 받지 않는다. 서버가 Nav2 성공 이벤트를 확인한
 뒤 호출하며, 차량 API는 다음 JSON을 `/{robot_id}/nav2/arrival` topic에

@@ -4,14 +4,15 @@
 각 차량의 Foxglove Bridge WebSocket은 telemetry를 ROS 2 Domain 225의 차량별
 `/{robot_id}/*` topic으로 재발행하는 데만 사용한다.
 명령 API는 차량별 `vehicle_command_api` HTTP endpoint로 `cmd_vel`, Nav2 goal/cancel,
-초기 위치, 상태 조회, `stop`을 전달하고 Swagger UI를 제공한다.
+Auto Dock Pick·Place, 초기 위치, 작업 가능 상태 전환, 상태 조회, `stop`을 전달하고
+Swagger UI를 제공한다.
 
 ```text
 robot_1 Foxglove Bridge :8766          server / Humble / Domain 225
   /odom, /tf, /amcl_pose  ────────>  worker-robot-1 -> /robot_1/*
 robot_1 vehicle_command_api :8082  <── Command API :8080
-  /v1/cmd-vel, /v1/navigation/*,
-  /v1/stop
+  /v1/cmd-vel, /v1/navigation/*, /v1/auto-dock,
+  /v1/operation/idle, /v1/stop
 
 robot_2 Foxglove Bridge :8766          server Foxglove Bridge :8765
   /odom, /tf, /amcl_pose  ────────>  worker-robot-2 -> /robot_2/*
@@ -258,13 +259,16 @@ Fleet Manager는 차량 HTTP API로 자동 폴백하지 않는다. 차량 API �
 | `GET /api/v1/vehicle-command/{robot_id}/openapi.json` | `GET /openapi.json` |
 | `GET /api/v1/vehicle-command/{robot_id}/operation-status` | `GET /v1/operation-status` |
 | `GET /api/v1/vehicle-command/{robot_id}/vehicle-status` | `GET /v1/vehicle-status` |
+| `POST /api/v1/vehicle-command/{robot_id}/operation/idle` | `POST /v1/operation/idle` |
 | `POST /api/v1/vehicle-command/{robot_id}/cmd-vel` | `POST /v1/cmd-vel` |
 | `POST /api/v1/vehicle-command/{robot_id}/navigation/goals` | `POST /v1/navigation/goals` |
+| `POST /api/v1/vehicle-command/{robot_id}/auto-dock` | `POST /v1/auto-dock` |
 | `POST /api/v1/vehicle-command/{robot_id}/navigation/cancel` | `POST /v1/navigation/cancel` |
 | `POST /api/v1/vehicle-command/{robot_id}/localization/initial-pose` | `POST /v1/localization/initial-pose` |
 | `POST /api/v1/vehicle-command/{robot_id}/stop` | `POST /v1/stop` |
 
-예를 들어 차량-native Nav2 목표와 AMCL 초기 위치 요청은 다음과 같다. 주행 중
+예를 들어 Inventory/중앙 서버가 만든 작업 ID를 포함한 차량-native Nav2 목표와
+AMCL 초기 위치 요청은 다음과 같다. 주행 중
 `initial-pose`가 차량에서 `409 {"error":"VEHICLE_MOTION_ACTIVE"}`로 거부되면 이 응답도
 Fleet Manager에서 동일하게 반환된다. 호출자는 먼저 별도의 `stop`을 성공시킨 뒤 초기 위치를
 다시 요청해야 한다.
@@ -272,13 +276,31 @@ Fleet Manager에서 동일하게 반환된다. 호출자는 먼저 별도의 `st
 ```bash
 curl -X POST http://127.0.0.1:8080/api/v1/vehicle-command/robot_1/navigation/goals \
   -H 'content-type: application/json' \
-  -d '{"x":1.0,"y":2.0,"yaw":0.0}'
+  -d '{"operation_id":"73d5b9af-5a12-4f34-a96c-5de116df1e8e","purpose":"PICK","x":1.0,"y":2.0,"yaw":0.0}'
 
 curl -X POST http://127.0.0.1:8080/api/v1/vehicle-command/robot_1/localization/initial-pose \
   -H 'content-type: application/json' \
   -d '{"x":1.0,"y":2.0,"yaw":0.0}'
 
 curl http://127.0.0.1:8080/api/v1/vehicle-command/robot_1/vehicle-status
+```
+
+차량 API는 기동 직후 `INIT`이므로, 초기 위치와 안전 상태를 확인한 뒤 명시적으로
+`IDLE`로 전환해야 한다. `INIT_POSE` 요청만으로는 작업을 받을 수 없다.
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/vehicle-command/robot_1/operation/idle \
+  -H 'content-type: application/json' \
+  -d '{"reason":"OPERATOR_CONFIRMED"}'
+```
+
+중앙 서버는 DRIVE 성공 확인 뒤 같은 `operation_id`로 Pick 또는 Place를 따로
+지시한다. Fleet Bridge는 이를 조합하거나 재개하지 않고 payload를 그대로 전달한다.
+
+```bash
+curl -X POST http://127.0.0.1:8080/api/v1/vehicle-command/robot_1/auto-dock \
+  -H 'content-type: application/json' \
+  -d '{"operation_id":"73d5b9af-5a12-4f34-a96c-5de116df1e8e","operation":"PICK","product_type":"NORMAL","location":"DOCK_1","target":{"type":"NEAREST"}}'
 ```
 
 ## 상태와 네트워크 확인
