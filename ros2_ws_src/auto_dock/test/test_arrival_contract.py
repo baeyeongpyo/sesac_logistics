@@ -2560,4 +2560,58 @@ def test_insertion_corrects_lateral_and_yaw_from_visible_target():
 
     assert updated == [(candidate, pnp, True)]
     assert commands == [(0.08, pytest.approx(0.01), pytest.approx(0.08))]
+
+
+def test_nearest_candidate_probe_sweeps_both_sides_and_locks_closest():
+    fake = type("FakeDock", (), {})()
+    fake.config = {
+        "tape_guidance_enabled": False,
+        "tape_guidance_only": False,
+        "search_lateral_direction": "left",
+    }
+    fake.number = lambda key, default, *_args: default
+    fake.odom_position = (0.0, 0.0)
+    fake.odom_yaw = 0.0
+    fake.search_heading_yaw = 0.0
+    fake.search_heading_source = "odom"
+    fake.nearest_probe_start_position = None
+    fake.nearest_probe_heading_yaw = None
+    fake.nearest_probe_phase = 0
+    fake.nearest_probe_best_entity_id = None
+    fake.nearest_probe_best_distance_cm = math.inf
+    fake.nearest_probe_complete = False
+    fake.target_entity_id = None
+    commands = []
+    statuses = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+    fake.stop_drive = lambda *_args: commands.append((0.0, 0.0, 0.0))
+    fake.publish_status = lambda *args, **kwargs: statuses.append((args, kwargs))
+    farther = {
+        "entity_id": 1,
+        "pnp": {"forward_distance_cm": 35.0},
+    }
+    closer = {
+        "entity_id": 2,
+        "pnp": {"forward_distance_cm": 24.0},
+    }
+
+    assert AutoDockNode.tick_nearest_candidate_probe(
+        fake, farther, 1.0, 0.12
+    ) is True
+    assert commands[-1] == (0.0, 0.12, 0.0)
+
+    fake.odom_position = (0.0, 0.10)
+    AutoDockNode.tick_nearest_candidate_probe(fake, closer, 1.1, 0.12)
+    assert fake.nearest_probe_phase == 1
+
+    fake.odom_position = (0.0, -0.10)
+    AutoDockNode.tick_nearest_candidate_probe(fake, farther, 1.2, 0.12)
+    assert fake.nearest_probe_phase == 2
+
+    fake.odom_position = (0.0, 0.0)
+    AutoDockNode.tick_nearest_candidate_probe(fake, farther, 1.3, 0.12)
+
+    assert fake.nearest_probe_complete is True
+    assert fake.target_entity_id == 2
+    assert statuses[-1][0] == ("running", "nearest_candidate_probe_complete")
     pallet_product_type,

@@ -1297,6 +1297,12 @@ class AutoDockNode(Node):
         self.backoff_command = (0.0, 0.0)
         self.backoff_direction = None
         self.backoff_attempt_count = 0
+        self.nearest_probe_start_position = None
+        self.nearest_probe_heading_yaw = None
+        self.nearest_probe_phase = 0
+        self.nearest_probe_best_entity_id = None
+        self.nearest_probe_best_distance_cm = math.inf
+        self.nearest_probe_complete = False
         self.was_docking_before_interrupt = False
 
         self.cmd_pub = self.create_publisher(
@@ -1588,6 +1594,12 @@ class AutoDockNode(Node):
         self.candidate_stop_due_at = None
         self.candidate_confirmation_started_at = None
         self.candidate_retry_not_before = 0.0
+        self.nearest_probe_start_position = None
+        self.nearest_probe_heading_yaw = None
+        self.nearest_probe_phase = 0
+        self.nearest_probe_best_entity_id = None
+        self.nearest_probe_best_distance_cm = math.inf
+        self.nearest_probe_complete = False
         self.latest_tape_guidance = None
         self.latest_tape_guidance_at = 0.0
         self.tape_initial_detection_complete = False
@@ -1699,6 +1711,12 @@ class AutoDockNode(Node):
         self.candidate_stop_due_at = None
         self.candidate_confirmation_started_at = None
         self.candidate_retry_not_before = 0.0
+        self.nearest_probe_start_position = None
+        self.nearest_probe_heading_yaw = None
+        self.nearest_probe_phase = 0
+        self.nearest_probe_best_entity_id = None
+        self.nearest_probe_best_distance_cm = math.inf
+        self.nearest_probe_complete = False
         self.scan_sweep_started_yaw = None
         self.scan_sweep_phase = 0
         self.scan_candidate_seen_at = None
@@ -2209,6 +2227,9 @@ class AutoDockNode(Node):
             if not isinstance(entity, dict):
                 continue
             entity_id = entity.get("entity_id")
+            locked_entity_id = getattr(self, "target_entity_id", None)
+            if locked_entity_id is not None and entity_id != locked_entity_id:
+                continue
             if (
                 observed_entity_ids
                 and entity_id not in accessible_entity_ids
@@ -3122,9 +3143,137 @@ class AutoDockNode(Node):
             standoff_cm=round(standoff * 100.0, 1),
         )
 
+    def remember_nearest_probe_candidate(self, candidate):
+        if not isinstance(candidate, dict):
+            return
+        entity_id = candidate.get("entity_id")
+        if entity_id is None:
+            return
+        distance_cm = DockInventoryTracker.entity_distance_cm(candidate)
+        if distance_cm is None:
+            return
+        if distance_cm < getattr(self, "nearest_probe_best_distance_cm", math.inf):
+            self.nearest_probe_best_distance_cm = distance_cm
+            self.nearest_probe_best_entity_id = entity_id
+
+    def tick_nearest_candidate_probe(self, candidate, now, lateral_speed):
+        """Sweep both sides before locking the closest NEAREST product."""
+        if self.nearest_probe_start_position is None:
+            if candidate is None or candidate.get("entity_id") is None:
+                return False
+            if self.odom_position is None:
+                self.nearest_probe_complete = True
+                return False
+            self.nearest_probe_start_position = self.odom_position
+            self.nearest_probe_heading_yaw = (
+                self.search_heading_yaw
+                if self.search_heading_yaw is not None else self.odom_yaw
+            )
+            if self.nearest_probe_heading_yaw is None:
+                self.nearest_probe_complete = True
+                self.nearest_probe_start_position = None
+                return False
+            self.nearest_probe_phase = 0
+            self.nearest_probe_best_entity_id = None
+            self.nearest_probe_best_distance_cm = math.inf
+        AutoDockNode.remember_nearest_probe_candidate(self, candidate)
+        start_x, start_y = self.nearest_probe_start_position
+        dx = self.odom_position[0] - start_x
+        dy = self.odom_position[1] - start_y
+        heading = self.nearest_probe_heading_yaw
+        lateral_offset = -math.sin(heading) * dx + math.cos(heading) * dy
+        distance = self.number(
+            "nearest_candidate_probe_distance_m", 0.10, 0.02, 0.30
+        )
+        search_direction = str(
+            self.config.get("search_lateral_direction", "left")
+        ).strip().lower()
+        first_sign = -1.0 if search_direction == "right" else 1.0
+        targets = (first_sign * distance, -first_sign * distance, 0.0)
+        tolerance = self.number(
+            "nearest_candidate_probe_tolerance_m", 0.015, 0.005, 0.05
+        )
+        phase = min(self.nearest_probe_phase, len(targets) - 1)
+        error = targets[phase] - lateral_offset
+        if abs(error) <= tolerance:
+            self.stop_drive()
+            self.nearest_probe_phase += 1
+            if self.nearest_probe_phase >= len(targets):
+                selected_entity_id = self.nearest_probe_best_entity_id
+                self.nearest_probe_start_position = None
+                self.nearest_probe_heading_yaw = None
+                self.nearest_probe_phase = 0
+                self.nearest_probe_complete = True
+                if selected_entity_id is not None:
+                    self.target_entity_id = selected_entity_id
+                self.publish_status(
+                    "running", "nearest_candidate_probe_complete",
+                    entity_id=selected_entity_id,
+                    distance_cm=(
+                        None if not math.isfinite(
+                            self.nearest_probe_best_distance_cm
+                        ) else round(self.nearest_probe_best_distance_cm, 1)
+                    ),
+                )
+                return True
+            self.publish_status(
+                "running", "nearest_candidate_probe_endpoint",
+                phase=self.nearest_probe_phase,
+                lateral_offset_m=round(lateral_offset, 3),
+            )
+            return True
+        movement_sign = math.copysign(1.0, error)
+        if AutoDockNode.command_warning_tape_search(
+            self, now, lateral_speed, movement_sign
+        ):
+            return True
+        yaw_error = AutoDockNode.search_heading_error(self)
+        if yaw_error is not None and abs(math.degrees(yaw_error)) > self.number(
+            "tag_search_yaw_tolerance_deg", 3.0, 0.5, 15.0
+        ):
+            self.publish_drive(
+                0.0, 0.0, AutoDockNode.search_angular_command(self, yaw_error)
+            )
+        else:
+            self.publish_drive(0.0, movement_sign * lateral_speed, 0.0)
+        self.publish_status(
+            "running", "nearest_candidate_probing",
+            phase=phase,
+            target_offset_m=round(targets[phase], 3),
+            lateral_offset_m=round(lateral_offset, 3),
+            best_entity_id=self.nearest_probe_best_entity_id,
+            best_distance_cm=(
+                None if not math.isfinite(self.nearest_probe_best_distance_cm)
+                else round(self.nearest_probe_best_distance_cm, 1)
+            ),
+        )
+        return True
+
     def tick_search(self):
         candidate, _pnp = self.selected_candidate()
         now = time.monotonic()
+        probe_requested = (
+            getattr(self, "target_type", "SYMBOLS") == "NEAREST"
+            and AutoDockNode.boolean(
+                self, "nearest_candidate_probe_enabled", False
+            )
+            and not getattr(self, "nearest_probe_complete", False)
+            and (
+                getattr(self, "nearest_probe_start_position", None) is not None
+                or candidate is not None
+            )
+        )
+        if probe_requested:
+            fallback_speed = self.number(
+                "search_linear_speed_m_s", 0.03, 0.01, 0.30
+            )
+            probe_lateral_speed = self.number(
+                "search_lateral_speed_m_s", fallback_speed, 0.01, 0.30
+            )
+            if AutoDockNode.tick_nearest_candidate_probe(
+                self, candidate, now, probe_lateral_speed
+            ):
+                return
         if now < getattr(self, "candidate_retry_not_before", 0.0):
             candidate = None
         if candidate is not None and self.candidate_stop_due_at is None:
