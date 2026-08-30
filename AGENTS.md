@@ -96,6 +96,17 @@ Use this state sequence when interpreting or planning tasks:
 Do not reject a task merely because forward motion from the work pose is
 blocked. First evaluate the straight reverse escape and its complete swept area.
 
+## Real-vehicle minimum drive command
+
+The real mecanum vehicles have a low-speed dead zone. For autonomous forward,
+reverse, or lateral motion, a non-zero linear command must have an absolute
+value of at least `0.10 m/s`; commands such as `0.01-0.09 m/s` may be published
+but leave the wheels stalled or ineffective. Controller gains must therefore
+produce either exactly zero or clamp the commanded `linear.x`/`linear.y` (and
+each mixed wheel component when applicable) to a reliable minimum of
+`0.10 m/s`. Do not diagnose a stationary vehicle as a perception/FSM failure
+until the current `/controller/cmd_vel` has been checked against this dead zone.
+
 ## Vehicle ROS 2 access and DDS domains
 
 Use the existing interactive Bash functions when inspecting the real vehicles.
