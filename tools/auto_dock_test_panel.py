@@ -438,7 +438,6 @@ class TestPanel:
         self.closing = False
         self.replacement_command = None
         self.args = args
-        self.enabled = tk.BooleanVar(value=False)
         self.arrival_status = tk.StringVar(value="SUCCEEDED")
         self.arrival_reason = tk.StringVar(value="manual_test_failure")
         self.location = tk.StringVar(value="DOCK_1")
@@ -496,7 +495,6 @@ class TestPanel:
         self.root.bind_all("<KeyRelease>", self.on_manual_key_release)
         self.root.bind("<Button-1>", self.on_panel_click, add="+")
         self.root.bind("<FocusOut>", self.on_focus_out)
-        self.update_enabled()
         self.root.after(20, self.poll_ros)
         self.root.after(50, self.manual_drive_tick)
         self.root.after(1000, self.apply_rear_lateral_gain)
@@ -514,12 +512,6 @@ class TestPanel:
             bg="#8b1e1e", fg="white", font=("DejaVu Sans", 11, "bold"), pady=8,
         )
         warning.pack(fill="x")
-
-        enable = tk.Checkbutton(
-            self.root, text="실차 이벤트 발행 활성화", variable=self.enabled,
-            command=self.update_enabled, fg="#8b1e1e", font=("DejaVu Sans", 10, "bold"),
-        )
-        enable.pack(anchor="w", padx=12, pady=(8, 2))
 
         stop = tk.Button(
             self.root, text="■ AUTO-DOCK STOP", command=self.publish_stop,
@@ -924,17 +916,6 @@ class TestPanel:
             )
             self.tuning_toggle_button.configure(text="▼ Auto Dock 상세 설정 접기")
 
-    def update_enabled(self):
-        state = "normal" if self.enabled.get() else "disabled"
-        for button in self.action_buttons:
-            button.configure(state=state)
-        if not self.enabled.get() and hasattr(self, "node"):
-            self.stop_manual_drive()
-            self.manual_takeover_active = False
-
-    def require_enabled(self):
-        return self.enabled.get()
-
     @staticmethod
     def is_text_input(widget):
         return widget.winfo_class() in {"Entry", "TEntry", "TCombobox", "Text"}
@@ -947,7 +928,7 @@ class TestPanel:
         key = str(event.keysym).lower()
         if key not in {"w", "a", "s", "d", "q", "e"}:
             return None
-        if not self.require_enabled() or self.is_text_input(event.widget):
+        if self.is_text_input(event.widget):
             return None
         release_job = self.manual_release_jobs.pop(key, None)
         if release_job is not None:
@@ -1008,7 +989,7 @@ class TestPanel:
         return linear, angular
 
     def publish_manual_velocity(self):
-        if not self.require_enabled() or not self.manual_engaged:
+        if not self.manual_engaged:
             self.node.publish_cmd_vel()
             self.record_manual_velocity(0.0, 0.0, 0.0)
             self.manual_status.set("정지")
@@ -1099,8 +1080,6 @@ class TestPanel:
                 self.tuning_vars[key].set(str(value))
 
     def save_tuning(self):
-        if not self.require_enabled():
-            return
         updates = {}
         try:
             for key, label, _default, kind, minimum, maximum in TUNING_FIELDS:
@@ -1147,8 +1126,6 @@ class TestPanel:
         self.node.set_rear_lateral_gain(gain, applied)
 
     def save_checkbox_tuning(self, key):
-        if not self.require_enabled():
-            return
         try:
             payload = {}
             if self.config_path.exists():
@@ -1196,13 +1173,10 @@ class TestPanel:
         return payload
 
     def publish_arrival(self):
-        if self.require_enabled():
-            self.manual_takeover_active = False
-            self.node.publish_arrival(self.arrival_payload())
+        self.manual_takeover_active = False
+        self.node.publish_arrival(self.arrival_payload())
 
     def publish_scenario(self, values):
-        if not self.require_enabled():
-            return
         _, location, operation, product, target_type, slot = values
         self.arrival_status.set("SUCCEEDED")
         self.location.set(location)
@@ -1214,8 +1188,6 @@ class TestPanel:
         self.node.publish_arrival(self.arrival_payload())
 
     def publish_normal_slot(self, slot_id):
-        if not self.require_enabled():
-            return
         self.arrival_status.set("SUCCEEDED")
         self.location.set("NORMAL")
         self.operation.set("PLACE")
@@ -1226,8 +1198,7 @@ class TestPanel:
         self.node.publish_arrival(self.arrival_payload())
 
     def publish_fork_command(self, command):
-        if self.require_enabled():
-            self.node.publish_fork_command(command)
+        self.node.publish_fork_command(command)
 
     def publish_stop(self):
         self.stop_manual_drive()
@@ -1241,8 +1212,7 @@ class TestPanel:
         self.motion_watchdog_status.set(str(status))
 
     def publish_load_state(self, state):
-        if self.require_enabled():
-            self.node.publish_load_state(state)
+        self.node.publish_load_state(state)
 
     def append_log(self, direction, topic, value):
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
