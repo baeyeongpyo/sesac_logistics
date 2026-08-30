@@ -11,7 +11,8 @@ import cv2
 import numpy as np
 import rclpy
 from cv_bridge import CvBridge
-from PyQt5.QtCore import Qt, QTimer
+from geometry_msgs.msg import Twist
+from PyQt5.QtCore import QEvent, Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -20,6 +21,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QDoubleSpinBox,
     QSlider,
     QSpinBox,
     QVBoxLayout,
@@ -68,7 +70,7 @@ def filtered_mask(frame, values):
 
 
 class RawCameraNode(Node):
-    def __init__(self, topic):
+    def __init__(self, topic, cmd_vel_topic):
         super().__init__("warning_tape_hsv_gui")
         self.bridge = CvBridge()
         self.frame = None
@@ -79,12 +81,24 @@ class RawCameraNode(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT,
         )
         self.create_subscription(Image, topic, self.on_image, qos)
+        self.cmd_pub = self.create_publisher(Twist, cmd_vel_topic, 10)
 
     def on_image(self, message):
         self.frame = self.bridge.imgmsg_to_cv2(
             message, desired_encoding="bgr8"
         )
         self.frame_stamp = time.monotonic()
+
+    def drive(self, linear_x=0.0, linear_y=0.0, angular_z=0.0):
+        message = Twist()
+        message.linear.x = float(linear_x)
+        message.linear.y = float(linear_y)
+        message.angular.z = float(angular_z)
+        self.cmd_pub.publish(message)
+
+    def stop(self, repeats=1):
+        for _index in range(repeats):
+            self.drive()
 
 
 class ImageView(QLabel):
@@ -123,6 +137,8 @@ class ImageView(QLabel):
 
 
 class HsvTuner(QMainWindow):
+    MOVEMENT_KEYS = {Qt.Key_W, Qt.Key_A, Qt.Key_S, Qt.Key_D, Qt.Key_Q, Qt.Key_E}
+
     def __init__(self, node, args):
         super().__init__()
         self.node = node
@@ -130,6 +146,10 @@ class HsvTuner(QMainWindow):
         self.config_path = Path(args.config).expanduser()
         self.latest_frame = None
         self.controls = {}
+        self.pressed = set()
+        self.drive_was_active = False
+        self.setFocusPolicy(Qt.StrongFocus)
+        QApplication.instance().installEventFilter(self)
         self.setWindowTitle(f"Vehicle {args.vehicle} warning-tape HSV tuner")
 
         root = QWidget()
@@ -171,8 +191,21 @@ class HsvTuner(QMainWindow):
         controls_row.addLayout(form, 1)
 
         buttons = QVBoxLayout()
-        self.status = QLabel("Waiting for raw camera frame")
+        self.status = QLabel(
+            "Waiting for raw camera frame\n"
+            "Drive: W/S forward/reverse · A/D left/right · Q/E rotate · Space stop"
+        )
         self.status.setWordWrap(True)
+        self.linear_speed = QDoubleSpinBox()
+        self.linear_speed.setRange(0.10, 0.30)
+        self.linear_speed.setSingleStep(0.01)
+        self.linear_speed.setValue(args.linear_speed)
+        self.linear_speed.setSuffix(" m/s")
+        self.angular_speed = QDoubleSpinBox()
+        self.angular_speed.setRange(0.05, 2.0)
+        self.angular_speed.setSingleStep(0.05)
+        self.angular_speed.setValue(args.angular_speed)
+        self.angular_speed.setSuffix(" rad/s")
         save = QPushButton("Save HSV JSON")
         load = QPushButton("Load HSV JSON")
         reset = QPushButton("Reset yellow defaults")
@@ -182,6 +215,10 @@ class HsvTuner(QMainWindow):
         reset.clicked.connect(lambda: self.set_values(DEFAULTS))
         shot.clicked.connect(self.save_snapshot)
         buttons.addWidget(self.status)
+        buttons.addWidget(QLabel("Linear speed"))
+        buttons.addWidget(self.linear_speed)
+        buttons.addWidget(QLabel("Angular speed"))
+        buttons.addWidget(self.angular_speed)
         buttons.addWidget(save)
         buttons.addWidget(load)
         buttons.addWidget(reset)
@@ -200,6 +237,9 @@ class HsvTuner(QMainWindow):
         self.render_timer = QTimer(self)
         self.render_timer.timeout.connect(self.take_latest_frame)
         self.render_timer.start(50)
+        self.drive_timer = QTimer(self)
+        self.drive_timer.timeout.connect(self.publish_drive)
+        self.drive_timer.start(50)
         self.resize(1400, 720)
 
     def values(self):
@@ -212,6 +252,59 @@ class HsvTuner(QMainWindow):
 
     def poll_ros(self):
         rclpy.spin_once(self.node, timeout_sec=0.0)
+
+    def publish_drive(self):
+        active = bool(self.pressed & self.MOVEMENT_KEYS)
+        if not active:
+            if self.drive_was_active:
+                self.node.stop(3)
+                self.drive_was_active = False
+            return
+        linear = self.linear_speed.value()
+        angular = self.angular_speed.value()
+        self.node.drive(
+            linear * (
+                int(Qt.Key_W in self.pressed) - int(Qt.Key_S in self.pressed)
+            ),
+            linear * (
+                int(Qt.Key_A in self.pressed) - int(Qt.Key_D in self.pressed)
+            ),
+            angular * (
+                int(Qt.Key_Q in self.pressed) - int(Qt.Key_E in self.pressed)
+            ),
+        )
+        self.drive_was_active = True
+
+    def emergency_stop(self):
+        self.pressed.clear()
+        self.drive_was_active = False
+        self.node.stop(5)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.WindowDeactivate:
+            self.emergency_stop()
+        if event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Space:
+                self.emergency_stop()
+                return True
+            if event.key() in self.MOVEMENT_KEYS:
+                self.pressed.add(event.key())
+                self.publish_drive()
+                return True
+        if (
+            event.type() == QEvent.KeyRelease
+            and event.key() in self.MOVEMENT_KEYS
+            and not event.isAutoRepeat()
+        ):
+            self.pressed.discard(event.key())
+            self.publish_drive()
+            return True
+        return super().eventFilter(watched, event)
+
+    def focusOutEvent(self, event):
+        if self.pressed:
+            self.emergency_stop()
+        super().focusOutEvent(event)
 
     def take_latest_frame(self):
         if self.node.frame is None:
@@ -284,6 +377,8 @@ class HsvTuner(QMainWindow):
     def closeEvent(self, event):
         self.ros_timer.stop()
         self.render_timer.stop()
+        self.drive_timer.stop()
+        self.emergency_stop()
         self.node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
@@ -296,6 +391,9 @@ def parse_args():
     parser.add_argument(
         "--topic", default="/ascamera/camera_publisher/rgb0/image"
     )
+    parser.add_argument("--cmd-vel-topic", default="/controller/cmd_vel")
+    parser.add_argument("--linear-speed", type=float, default=0.12)
+    parser.add_argument("--angular-speed", type=float, default=0.35)
     parser.add_argument(
         "--config", default="~/warning_tape_hsv.json"
     )
@@ -308,7 +406,7 @@ def parse_args():
 def main():
     args = parse_args()
     rclpy.init()
-    node = RawCameraNode(args.topic)
+    node = RawCameraNode(args.topic, args.cmd_vel_topic)
     app = QApplication(sys.argv)
     window = HsvTuner(node, args)
     window.show()
