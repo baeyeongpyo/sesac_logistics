@@ -70,6 +70,46 @@ def test_warning_tape_roi_is_full_only_until_first_detection():
     assert AutoDockNode.warning_tape_roi_top_ratio(fake) == 0.55
 
 
+def test_warning_tape_initial_approach_finishes_near_target_height():
+    fake = type("FakeDock", (), {})()
+    fake.config = {
+        "tape_target_center_y_ratio": 0.65,
+        "tape_vertical_tolerance_ratio": 0.035,
+    }
+    fake.number = lambda key, default, *_args: fake.config.get(key, default)
+
+    assert AutoDockNode.warning_tape_initial_approach_complete(
+        fake, {"center_y_ratio": 0.43}
+    ) is False
+    assert AutoDockNode.warning_tape_initial_approach_complete(
+        fake, {"center_y_ratio": 0.62}
+    ) is True
+
+
+def test_first_tape_detection_commands_forward_toward_target_height():
+    fake = type("FakeDock", (), {})()
+    fake.config = {
+        "tape_guidance_only": True,
+        "tape_pose_filter_alpha": 1.0,
+        "tape_target_center_y_ratio": 0.65,
+    }
+    fake.number = lambda key, default, *_args: fake.config.get(key, default)
+    fake.latest_tape_guidance = {"center_y_ratio": 0.43, "angle_deg": 0.0}
+    fake.latest_tape_guidance_at = 10.0
+    fake.tape_reference = None
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+    fake.publish_status = lambda *_args, **_kwargs: None
+
+    correcting = AutoDockNode.command_warning_tape_search(
+        fake, 10.1, 0.12, 1.0
+    )
+
+    assert correcting is True
+    assert fake.tape_reference["center_y_ratio"] == pytest.approx(0.65)
+    assert commands == [(pytest.approx(0.022), 0.0, 0.0)]
+
+
 @pytest.mark.parametrize(("distance_cm", "accepted"), [
     (29.9, True),
     (30.0, False),
@@ -1450,12 +1490,13 @@ def tape_search_fake(angle_deg):
 def test_tape_only_search_latches_initial_pose_and_strafes(monkeypatch):
     fake = tape_search_fake(angle_deg=0.0)
     fake.config["tape_guidance_only"] = True
+    fake.latest_tape_guidance["center_y_ratio"] = 0.65
     monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
 
     AutoDockNode.tick_search(fake)
 
     assert fake.tape_reference == {
-        "center_y_ratio": 0.80,
+        "center_y_ratio": 0.65,
         "angle_deg": 0.0,
     }
     assert fake.commands == [(0.0, 0.12, 0.0)]

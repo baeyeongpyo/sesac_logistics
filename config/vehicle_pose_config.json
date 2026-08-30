@@ -273,6 +273,8 @@
   "tape_guidance_enabled": false,
   "_comment_tape_target_angle_deg": "차량이 주의선과 평행할 때 카메라 영상에서 보이는 테이프 각도",
   "tape_target_angle_deg": 0.0,
+  "_comment_tape_target_center_y_ratio": "첫 검출 후 전진해 유지할 주의선 화면 높이 비율",
+  "tape_target_center_y_ratio": 0.65,
   "_comment_tape_guidance_only": "탐색 이동을 주의테이프만으로 제어하고 미검출 시 정지할지 여부",
   "tape_guidance_only": false,
   "_comment_dock_inventory_nearest_tape_only": "주의선에 인접한 가장 가까운 C1 열만 슬롯으로 기록",

@@ -1442,6 +1442,17 @@ class AutoDockNode(Node):
             return 0.0
         return self.number("tape_roi_top_ratio", 0.55, 0.0, 0.90)
 
+    def warning_tape_initial_approach_complete(self, tape):
+        if not isinstance(tape, dict):
+            return False
+        target = self.number(
+            "tape_target_center_y_ratio", 0.65, 0.10, 0.90
+        )
+        tolerance = self.number(
+            "tape_vertical_tolerance_ratio", 0.035, 0.002, 0.10
+        )
+        return float(tape["center_y_ratio"]) >= target - tolerance
+
     def on_slot_image(self, msg):
         zone = self.location.split("_", 1)[0]
         tape_due = (
@@ -1485,7 +1496,12 @@ class AutoDockNode(Node):
             )
             self.latest_tape_guidance_at = time.monotonic()
             if self.latest_tape_guidance is not None:
-                self.tape_initial_detection_complete = True
+                self.tape_initial_detection_complete = (
+                    self.tape_initial_detection_complete
+                    or AutoDockNode.warning_tape_initial_approach_complete(
+                        self, self.latest_tape_guidance
+                    )
+                )
                 self.tape_recovery_start_position = None
                 self.tape_recovery_direction = None
                 self.tape_recovery_done = False
@@ -2927,10 +2943,10 @@ class AutoDockNode(Node):
         ):
             return False
         if self.tape_reference is None:
-            # Preserve the known-good arrival pose instead of forcing the
-            # perspective-projected tape to an incorrect absolute 0 degrees.
             self.tape_reference = {
-                "center_y_ratio": float(tape["center_y_ratio"]),
+                "center_y_ratio": self.number(
+                    "tape_target_center_y_ratio", 0.65, 0.10, 0.90
+                ),
                 "angle_deg": self.number(
                     "tape_target_angle_deg", 0.0, -35.0, 35.0
                 ),
@@ -3369,7 +3385,23 @@ class AutoDockNode(Node):
         )
         distance_ready = minimum_entry_gap <= forward_actual <= standoff + 0.035
         yaw_ready = abs(yaw) < math.radians(3.0)
-        if distance_ready and abs(lateral_actual) < 0.025 and yaw_ready:
+        tape_enabled = (
+            (
+                AutoDockNode.boolean(self, "tape_guidance_enabled", False)
+                or AutoDockNode.boolean(self, "tape_guidance_only", False)
+            )
+            if hasattr(self, "config") else False
+        )
+        initial_tape_approach_ready = (
+            not tape_enabled
+            or getattr(self, "tape_initial_detection_complete", False)
+        )
+        if (
+            distance_ready
+            and abs(lateral_actual) < 0.025
+            and yaw_ready
+            and initial_tape_approach_ready
+        ):
             self.stop_drive(5)
             self.insertion_entry_gap_m = max(0.0, forward_actual)
             pause = self.number("motion_transition_pause_sec", 0.10, 0.10, 2.0)
@@ -3378,12 +3410,17 @@ class AutoDockNode(Node):
                 "running", "aligned_pause_before_insertion", pause_sec=pause
             )
             return
-        tape_enabled = (
-            AutoDockNode.boolean(self, "tape_guidance_enabled", False)
-            or AutoDockNode.boolean(self, "tape_guidance_only", False)
-        )
         lateral_alignment_needed = abs(lateral_actual) >= 0.025
-        if tape_enabled and lateral_alignment_needed:
+        tape_pose_hold_needed = (
+            tape_enabled
+            and (
+                lateral_alignment_needed
+                or not getattr(
+                    self, "tape_initial_detection_complete", False
+                )
+            )
+        )
+        if tape_pose_hold_needed:
             tape_age = now - getattr(self, "latest_tape_guidance_at", 0.0)
             tape_available = (
                 getattr(self, "latest_tape_guidance", None) is not None
@@ -3427,7 +3464,7 @@ class AutoDockNode(Node):
             if not yaw_ready and 0.0 < abs(angular) < min_angular:
                 angular = math.copysign(min_angular, angular)
             forward_command = (
-                0.0 if lateral_alignment_needed and tape_enabled else
+                0.0 if tape_pose_hold_needed else
                 clamp(forward_gain * forward_error, 0.0, max_forward)
             )
             self.publish_drive(
@@ -3441,7 +3478,7 @@ class AutoDockNode(Node):
                 lateral_error_cm=round(lateral_actual * 100.0, 1),
                 yaw_deg=round(math.degrees(yaw), 1),
                 yaw_trusted=yaw_trusted,
-                tape_distance_hold=lateral_alignment_needed and tape_enabled,
+                tape_distance_hold=tape_pose_hold_needed,
             )
             return
         self.publish_drive(
