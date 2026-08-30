@@ -1035,6 +1035,7 @@ class TeleopWindow(QMainWindow):
         super().__init__()
         self.node = node
         self.args = args
+        self.replacement_command = None
         self.pressed = set()
         self.movement_release_timers = {}
         self.last_displayed_sequence = (-1, -1, -1)
@@ -1568,6 +1569,11 @@ class TeleopWindow(QMainWindow):
         main_row.addWidget(vehicle_panel, 1, Qt.AlignTop)
         control_panel = QGroupBox("설정 및 캡처")
         control_layout = QVBoxLayout()
+        self.open_test_panel_button = QPushButton(
+            "Control GUI 종료 → 테스트 패널 열기"
+        )
+        self.open_test_panel_button.clicked.connect(self.switch_to_test_panel)
+        control_layout.addWidget(self.open_test_panel_button)
         mapping_panel = QGroupBox("중앙 목표 매핑")
         mapping_panel.setLayout(mapping_layout)
         control_layout.addWidget(mapping_panel)
@@ -5749,7 +5755,39 @@ class TeleopWindow(QMainWindow):
         self.node.stop(repeats=5)
         self.node.publish_fork("STOP")
         self.finish_recording()
+        if self.replacement_command is not None:
+            subprocess.Popen(
+                [
+                    "/bin/bash", "-lc",
+                    'sleep 0.8; exec "$@"',
+                    "gui-switch", *self.replacement_command,
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
         event.accept()
+
+    def switch_to_test_panel(self):
+        candidates = (
+            Path("/shared/auto_dock_test_panel.py"),
+            Path("/home/ubuntu/ros2_ws/tools/auto_dock_test_panel.py"),
+            Path(__file__).resolve().with_name("auto_dock_test_panel.py"),
+        )
+        target = next((path for path in candidates if path.exists()), None)
+        if target is None:
+            self.status.setText("테스트 패널 파일을 찾지 못했습니다")
+            return
+        self.replacement_command = [
+            sys.executable, str(target),
+            "--vehicle", str(self.args.vehicle),
+            "--ros-domain-id", str(self.args.ros_domain_id),
+            "--config", str(self.args.pose_config),
+            "--image-topic", str(self.args.tape_image_topic),
+        ]
+        self.close()
 
 
 def main():

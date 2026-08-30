@@ -10,6 +10,8 @@ import json
 import math
 import os
 import signal
+import subprocess
+import sys
 import time
 import tkinter as tk
 from collections import deque
@@ -442,6 +444,7 @@ class TestPanel:
     def __init__(self, root, args):
         self.root = root
         self.closing = False
+        self.replacement_command = None
         self.args = args
         self.enabled = tk.BooleanVar(value=False)
         self.arrival_status = tk.StringVar(value="SUCCEEDED")
@@ -532,6 +535,15 @@ class TestPanel:
             font=("DejaVu Sans", 12, "bold"), pady=5,
         )
         stop.pack(fill="x", padx=12, pady=(2, 4))
+
+        switch = tk.Button(
+            self.root,
+            text="테스트 패널 종료 → Control GUI 열기",
+            command=self.switch_to_control_gui,
+            bg="#1d4ed8", fg="white", activebackground="#1e40af",
+            font=("DejaVu Sans", 10, "bold"), pady=4,
+        )
+        switch.pack(fill="x", padx=12, pady=(0, 4))
 
         watchdog = ttk.Frame(self.root)
         watchdog.pack(fill="x", padx=12, pady=(0, 4))
@@ -1450,6 +1462,40 @@ class TestPanel:
         rclpy.spin_once(self.node, timeout_sec=0.0)
         self.root.after(20, self.poll_ros)
 
+    def switch_to_control_gui(self):
+        candidates = (
+            Path("/home/ubuntu/ros2_ws/tools/vehicle_camera_teleop_gui.py"),
+            Path("/shared/vehicle_camera_teleop_gui.py"),
+            Path(__file__).resolve().with_name("vehicle_camera_teleop_gui.py"),
+        )
+        target = next((path for path in candidates if path.exists()), None)
+        if target is None:
+            self.tuning_notice.set("Control GUI 파일을 찾지 못했습니다")
+            return
+        domain = self.args.ros_domain_id or 214 + self.args.vehicle
+        self.replacement_command = [
+            sys.executable, str(target),
+            "--vehicle", str(self.args.vehicle),
+            "--ros-domain-id", str(domain),
+            "--image-topic", self.args.image_topic,
+            "--pose-config", str(self.config_path),
+        ]
+        self.close()
+
+    @staticmethod
+    def launch_replacement(command):
+        subprocess.Popen(
+            [
+                "/bin/bash", "-lc",
+                'sleep 0.8; exec "$@"', "gui-switch", *command,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+
     def close(self):
         if self.closing:
             return
@@ -1459,7 +1505,10 @@ class TestPanel:
         self.node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+        replacement = self.replacement_command
         self.root.destroy()
+        if replacement is not None:
+            self.launch_replacement(replacement)
 
 
 def parse_args():
