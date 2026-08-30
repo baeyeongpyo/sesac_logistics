@@ -312,6 +312,24 @@ def test_dock_right_end_can_appear_in_left_half_of_camera():
     assert "left" not in markers
 
 
+def test_dock_end_accepts_contact_intersection_just_outside_cropped_frame():
+    frame = np.full((480, 640, 3), 100, dtype=np.uint8)
+    for box in (
+        ((570, 140), (595, 165)),
+        ((590, 185), (625, 210)),
+        ((610, 235), (639, 270)),
+    ):
+        cv2.rectangle(frame, box[0], box[1], (0, 0, 230), -1)
+    for left in (40, 150, 260, 370, 480, 590):
+        cv2.rectangle(frame, (left, 302), (min(left + 70, 639), 330), (0, 230, 230), -1)
+        cv2.rectangle(frame, (min(left + 70, 639), 302), (min(left + 100, 639), 330), (5, 5, 5), -1)
+
+    markers = detect_dock_end_markers(frame)
+
+    assert "right" in markers
+    assert markers["right"]["x_px"] >= 640
+
+
 def test_dock_left_end_can_appear_in_right_half_of_camera():
     frame = np.full((480, 640, 3), 100, dtype=np.uint8)
     for top in (120, 190, 260):

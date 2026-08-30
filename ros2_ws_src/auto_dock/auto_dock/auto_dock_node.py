@@ -426,7 +426,8 @@ def detect_dock_end_markers(
             marker_intercept = line_y - marker_slope * line_x
             intersection_x = (tape_intercept - marker_intercept) / denominator
         intersection_y = tape_slope * intersection_x + tape_intercept
-        if not 0.0 <= intersection_x < width:
+        intersection_margin = max(30.0, width * 0.15)
+        if not -intersection_margin <= intersection_x < width + intersection_margin:
             continue
         left_tape_span = max(
             0.0, intersection_x - float(tape.get("x_min_px", intersection_x))

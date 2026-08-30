@@ -5165,10 +5165,10 @@ class TeleopWindow(QMainWindow):
         # which already contains its detection boxes.  Only ROS image input is
         # raw and needs the client-side detection overlay.
         if not self.args.primary_video_url:
-            frame = (
-                self.render_inventory_entity_overlay(frame)
-                if inventory_fresh else self.render_detection_overlay(frame)
-            )
+            # Always show the raw YOLO detections.  Inventory contains only
+            # complete four-tag pallet entities, so replacing this overlay
+            # with inventory hid valid single-star FRESH detections.
+            frame = self.render_detection_overlay(frame)
         if not inventory_fresh:
             return frame
         for side, marker in (inventory.get("markers") or {}).items():
