@@ -158,6 +158,11 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             return response.status, json.load(response)
 
     def navigation_goal(self):
+        _, operation = self.get_json('/v1/operation-status')
+        if operation['state'] == 'INIT':
+            idle_status, idle = self.mark_idle()
+            self.assertEqual(idle_status, 200)
+            self.assertEqual(idle['state'], 'IDLE')
         return post_json(
             f'{self.base_url}/v1/navigation/goals',
             {'frame_id': 'map', 'x': 1.50, 'y': 0.0, 'yaw': 0.0},
@@ -168,6 +173,55 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             f'{self.base_url}/v1/localization/initial-pose',
             {'x': 1.50, 'y': 0.0, 'yaw': 0.0},
         )
+
+    def mark_idle(self):
+        return post_json(
+            f'{self.base_url}/v1/operation/idle',
+            {'reason': 'OPERATOR_CONFIRMED'},
+        )
+
+    def test_startup_stays_init_until_operator_marks_idle(self):
+        """AMCL initial pose alone must not authorise a newly started vehicle."""
+        _, initial_status = self.get_json('/v1/operation-status')
+        initial_pose_status, _ = self.initial_pose()
+        _, after_pose = self.get_json('/v1/operation-status')
+        idle_status, idle = self.mark_idle()
+
+        self.assertEqual(initial_status['state'], 'INIT')
+        self.assertEqual(initial_pose_status, 202)
+        self.assertEqual(after_pose['state'], 'INIT')
+        self.assertEqual(idle_status, 200)
+        self.assertEqual(idle, {
+            'operation_id': None,
+            'previous_operation_id': None,
+            'state': 'IDLE',
+            'previous_state': 'INIT',
+            'detail': 'OPERATOR_READY',
+        })
+
+    def test_failed_operation_keeps_current_id_until_idle_is_explicit(self):
+        """Failure must retain the server operation ID until an operator clears it."""
+        _, goal = self.navigation_goal()
+        self.navigation.complete(goal['operation_id'], 'FAILED')
+
+        _, failed = self.get_json('/v1/operation-status')
+        idle_status, idle = self.mark_idle()
+
+        self.assertEqual(failed, {
+            'operation_id': goal['operation_id'],
+            'previous_operation_id': None,
+            'state': 'FAILED',
+            'previous_state': 'DRIVE',
+            'detail': 'NAVIGATION_FAILED',
+        })
+        self.assertEqual(idle_status, 200)
+        self.assertEqual(idle, {
+            'operation_id': None,
+            'previous_operation_id': goal['operation_id'],
+            'state': 'IDLE',
+            'previous_state': 'FAILED',
+            'detail': 'OPERATOR_READY',
+        })
 
     def test_health_openapi_and_operation_status_are_discoverable(self):
         """Removing a public endpoint must fail the vehicle integration contract."""
@@ -186,6 +240,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
                 '/openapi.json',
                 '/v1/operation-status',
                 '/v1/vehicle-status',
+                '/v1/operation/idle',
                 '/v1/cmd-vel',
                 '/v1/navigation/goals',
                 '/v1/navigation/cancel',
@@ -196,8 +251,10 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         self.assertEqual(status_code, 200)
         self.assertEqual(operation_status, {
             'operation_id': None,
-            'state': 'IDLE',
-            'detail': 'READY',
+            'previous_operation_id': None,
+            'state': 'INIT',
+            'previous_state': None,
+            'detail': 'VEHICLE_BOOTED',
         })
 
     def test_initial_pose_publishes_map_pose_with_configured_covariance(self):
@@ -260,7 +317,9 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             },
             'operation': {
                 'operation_id': goal['operation_id'],
-                'state': 'NAVIGATING',
+                'previous_operation_id': None,
+                'state': 'DRIVE',
+                'previous_state': 'IDLE',
                 'detail': 'NAVIGATION_GOAL_ACCEPTED',
             },
         })
@@ -288,7 +347,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         status, body = self.navigation_goal()
 
         self.assertEqual(status, 202)
-        self.assertEqual(body['state'], 'NAVIGATING')
+        self.assertEqual(body['state'], 'DRIVE')
         operation_id = body['operation_id']
         self.assertIsInstance(uuid.UUID(operation_id), uuid.UUID)
         self.assertEqual(self.navigation.goals, [(
@@ -298,7 +357,9 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         _, operation_status = self.get_json('/v1/operation-status')
         self.assertEqual(operation_status, {
             'operation_id': operation_id,
-            'state': 'NAVIGATING',
+            'previous_operation_id': None,
+            'state': 'DRIVE',
+            'previous_state': 'IDLE',
             'detail': 'NAVIGATION_GOAL_ACCEPTED',
         })
 
@@ -311,8 +372,10 @@ class VehicleCommandApiServerTest(unittest.TestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(operation_status, {
-            'operation_id': body['operation_id'],
-            'state': 'COMPLETED',
+            'operation_id': None,
+            'previous_operation_id': body['operation_id'],
+            'state': 'IDLE',
+            'previous_state': 'DRIVE',
             'detail': 'NAVIGATION_SUCCEEDED',
         })
 
@@ -323,18 +386,19 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             f'{self.base_url}/v1/navigation/cancel',
             {'operation_id': body['operation_id']},
         )
-        self.navigation.complete(body['operation_id'], 'CANCELLED')
         _, operation_status = self.get_json('/v1/operation-status')
 
         self.assertEqual(status, 202)
         self.assertEqual(response, {
             'operation_id': body['operation_id'],
-            'state': 'CANCELLING',
+            'state': 'CANCELLED',
         })
         self.assertEqual(self.navigation.cancel_requests, [body['operation_id']])
         self.assertEqual(operation_status, {
             'operation_id': body['operation_id'],
+            'previous_operation_id': None,
             'state': 'CANCELLED',
+            'previous_state': 'DRIVE',
             'detail': 'NAVIGATION_CANCELLED',
         })
 
@@ -351,15 +415,17 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(response, {
             'operation_id': body['operation_id'],
-            'state': 'STOPPED',
-            'cancel_requested': True,
+            'state': 'CANCELLED',
+            'cancel_requested': False,
         })
         self.assertEqual(self.velocity.messages[-1], (0.0, 0.0))
-        self.assertEqual(self.navigation.cancel_requests, [body['operation_id'], body['operation_id']])
+        self.assertEqual(self.navigation.cancel_requests, [body['operation_id']])
         _, operation_status = self.get_json('/v1/operation-status')
         self.assertEqual(operation_status, {
             'operation_id': body['operation_id'],
-            'state': 'STOPPED',
+            'previous_operation_id': None,
+            'state': 'CANCELLED',
+            'previous_state': 'MANUAL',
             'detail': 'STOP_REQUESTED',
         })
 
@@ -381,13 +447,15 @@ class VehicleCommandApiServerTest(unittest.TestCase):
 
         self.assertEqual(response, {
             'operation_id': body['operation_id'],
-            'state': 'STOPPED',
+            'state': 'CANCELLED',
             'cancel_requested': False,
         })
         self.assertEqual(self.velocity.messages[-1], (0.0, 0.0))
         self.assertEqual(self.service.operation_status(), {
             'operation_id': body['operation_id'],
-            'state': 'STOPPED',
+            'previous_operation_id': None,
+            'state': 'CANCELLED',
+            'previous_state': 'DRIVE',
             'detail': 'STOP_REQUESTED',
         })
 
@@ -418,20 +486,25 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base_url = f'http://127.0.0.1:{self.server.server_address[1]}'
+        self.mark_idle()
 
         status, body = self.navigation_goal()
 
         self.assertEqual(status, 503)
         self.assertEqual(body, {'error': 'NAVIGATION_SERVER_UNAVAILABLE'})
         _, operation_status = self.get_json('/v1/operation-status')
+        self.assertIsInstance(uuid.UUID(operation_status['operation_id']), uuid.UUID)
         self.assertEqual(operation_status, {
-            'operation_id': None,
+            'operation_id': operation_status['operation_id'],
+            'previous_operation_id': None,
             'state': 'FAILED',
+            'previous_state': 'DRIVE',
             'detail': 'NAVIGATION_SERVER_UNAVAILABLE',
         })
 
     def test_manual_velocity_is_bounded_and_expires_to_idle(self):
         """Removing command bounds or the hold-expiry zero must fail direct control safety."""
+        self.mark_idle()
         status, body = post_json(
             f'{self.base_url}/v1/cmd-vel',
             {'linear_x': 0.05, 'angular_z': -0.25, 'hold_ms': 20},
@@ -451,7 +524,9 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         _, operation_status = self.get_json('/v1/operation-status')
         self.assertEqual(operation_status, {
             'operation_id': None,
+            'previous_operation_id': None,
             'state': 'IDLE',
+            'previous_state': 'INIT',
             'detail': 'MANUAL_COMMAND_EXPIRED',
         })
 
@@ -469,8 +544,10 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         self.assertEqual(self.navigation.cancel_requests, [body['operation_id']])
         _, operation_status = self.get_json('/v1/operation-status')
         self.assertEqual(operation_status, {
-            'operation_id': None,
+            'operation_id': body['operation_id'],
+            'previous_operation_id': None,
             'state': 'MANUAL',
+            'previous_state': 'CANCELLED',
             'detail': 'MANUAL_COMMAND_SENT',
         })
 

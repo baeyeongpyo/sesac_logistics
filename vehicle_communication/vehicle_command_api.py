@@ -29,6 +29,10 @@ class InitialPoseMotionError(RuntimeError):
     pass
 
 
+class OperationConflictError(RuntimeError):
+    pass
+
+
 class VehicleStatus:
     """Keep the configured identity and most recent battery reading thread-safe."""
 
@@ -102,12 +106,14 @@ class VehicleCommandService:
         self._manual_timer = None
         self._manual_generation = 0
         self._active_navigation_operation = None
-        self._manual_cancelled_operation = None
-        self._stopped_operation = None
+        self._manual_restore_status = None
+        self._auto_dock_active = False
         self._status = {
             'operation_id': None,
-            'state': 'IDLE',
-            'detail': 'READY',
+            'previous_operation_id': None,
+            'state': 'INIT',
+            'previous_state': None,
+            'detail': 'VEHICLE_BOOTED',
         }
 
     def operation_status(self):
@@ -120,7 +126,11 @@ class VehicleCommandService:
     def initial_pose(self, payload):
         pose = self._goal(payload)
         with self._lock:
-            if self._active_navigation_operation is not None or self._status['state'] == 'MANUAL':
+            if (
+                self._active_navigation_operation is not None
+                or self._auto_dock_active
+                or self._status['state'] == 'MANUAL'
+            ):
                 raise InitialPoseMotionError('VEHICLE_MOTION_ACTIVE')
             if self._initial_pose_publisher is None:
                 raise NavigationUnavailableError('INITIAL_POSE_PUBLISHER_UNAVAILABLE')
@@ -135,6 +145,20 @@ class VehicleCommandService:
             **pose,
         }
 
+    def mark_idle(self, payload):
+        self._validate_fields(payload, {'reason'})
+        reason = payload.get('reason')
+        if not isinstance(reason, str) or not reason:
+            raise CommandValidationError('reason must be a non-empty string')
+        with self._lock:
+            if self._active_navigation_operation is not None or self._auto_dock_active:
+                raise OperationConflictError('VEHICLE_MOTION_ACTIVE')
+            state = self._status['state']
+            if state not in {'INIT', 'CANCELLED', 'FAILED'}:
+                raise OperationConflictError('IDLE_TRANSITION_NOT_ALLOWED')
+            self._complete_to_idle('OPERATOR_READY', state)
+            return dict(self._status)
+
     def command(self, payload):
         self._validate_fields(payload, {'linear_x', 'angular_z', 'hold_ms'})
         linear_x = self._bounded_number(payload, 'linear_x', self.max_linear_x)
@@ -144,17 +168,33 @@ class VehicleCommandService:
         with self._lock:
             active_operation = self._active_navigation_operation
         if active_operation is not None:
-            self.navigation.cancel(active_operation)
+            response = self.navigation.cancel(active_operation)
+            if not response.get('accepted'):
+                raise NavigationCancelError(response.get('error', 'NAVIGATION_CANCEL_REJECTED'))
 
         with self._lock:
-            self._active_navigation_operation = None
-            self._manual_cancelled_operation = active_operation
-            self._stopped_operation = None
+            if (
+                active_operation is not None
+                and active_operation == self._active_navigation_operation
+            ):
+                self._active_navigation_operation = None
+                self._set_status(
+                    active_operation,
+                    'CANCELLED',
+                    'NAVIGATION_CANCELLED',
+                    'DRIVE',
+                )
+            self._manual_restore_status = dict(self._status)
             self._manual_generation += 1
             generation = self._manual_generation
             self._cancel_manual_timer()
             self.velocity.publish(linear_x, angular_z)
-            self._set_status(None, 'MANUAL', 'MANUAL_COMMAND_SENT')
+            self._set_status(
+                self._status['operation_id'],
+                'MANUAL',
+                'MANUAL_COMMAND_SENT',
+                self._manual_restore_status['state'],
+            )
             self._manual_timer = threading.Timer(
                 hold_ms / 1000,
                 self._expire_manual_command,
@@ -175,17 +215,18 @@ class VehicleCommandService:
         operation_id = str(uuid.uuid4())
 
         with self._lock:
-            previous_operation = self._active_navigation_operation
-        if previous_operation is not None:
-            self.navigation.cancel(previous_operation)
-
-        with self._lock:
+            if self._status['state'] not in {'IDLE', 'PICK_COMPLETE'}:
+                raise OperationConflictError('OPERATION_NOT_READY_FOR_DRIVE')
             self._cancel_manual_timer()
             self._manual_generation += 1
             self._active_navigation_operation = operation_id
-            self._manual_cancelled_operation = None
-            self._stopped_operation = None
-            self._set_status(operation_id, 'NAVIGATING', 'NAVIGATION_GOAL_ACCEPTED')
+            self._manual_restore_status = None
+            self._set_status(
+                operation_id,
+                'DRIVE',
+                'NAVIGATION_GOAL_ACCEPTED',
+                self._status['state'],
+            )
 
         try:
             response = self.navigation.submit_goal(operation_id, goal, self._on_navigation_terminal)
@@ -197,12 +238,12 @@ class VehicleCommandService:
             with self._lock:
                 if self._active_navigation_operation == operation_id:
                     self._active_navigation_operation = None
-                    self._set_status(None, 'FAILED', detail)
+                    self._set_status(operation_id, 'FAILED', detail, 'DRIVE')
             raise NavigationUnavailableError(detail)
 
         return {
             'operation_id': operation_id,
-            'state': 'NAVIGATING',
+            'state': 'DRIVE',
         }
 
     def navigation_cancel(self, payload):
@@ -221,17 +262,19 @@ class VehicleCommandService:
             raise NavigationCancelError(response.get('error', 'NAVIGATION_CANCEL_REJECTED'))
         with self._lock:
             if self._active_navigation_operation == operation_id:
-                self._set_status(operation_id, 'CANCELLING', 'NAVIGATION_CANCEL_REQUESTED')
+                self._active_navigation_operation = None
+                self._set_status(operation_id, 'CANCELLED', 'NAVIGATION_CANCELLED', 'DRIVE')
         return {
             'operation_id': operation_id,
-            'state': 'CANCELLING',
+            'state': 'CANCELLED',
         }
 
     def stop(self):
         with self._lock:
             self._manual_generation += 1
             self._cancel_manual_timer()
-            operation_id = self._active_navigation_operation or self._manual_cancelled_operation
+            operation_id = self._active_navigation_operation
+            status_before_stop = dict(self._status)
 
         self.velocity.publish(0.0, 0.0)
 
@@ -245,12 +288,32 @@ class VehicleCommandService:
 
         with self._lock:
             if operation_id == self._active_navigation_operation:
-                self._stopped_operation = operation_id
-            self._manual_cancelled_operation = None
-            self._set_status(operation_id, 'STOPPED', 'STOP_REQUESTED')
+                self._active_navigation_operation = None
+            self._manual_restore_status = None
+            if status_before_stop['operation_id'] is not None:
+                self._set_status(
+                    status_before_stop['operation_id'],
+                    'CANCELLED',
+                    'STOP_REQUESTED',
+                    status_before_stop['state'],
+                )
+            elif status_before_stop['state'] == 'MANUAL':
+                self._set_status(
+                    None,
+                    'INIT',
+                    'STOP_REQUESTED',
+                    'MANUAL',
+                )
+            else:
+                self._set_status(
+                    None,
+                    status_before_stop['state'],
+                    'STOP_REQUESTED',
+                    status_before_stop['previous_state'],
+                )
         return {
-            'operation_id': operation_id,
-            'state': 'STOPPED',
+            'operation_id': status_before_stop['operation_id'],
+            'state': self.operation_status()['state'],
             'cancel_requested': cancel_requested,
         }
 
@@ -258,34 +321,53 @@ class VehicleCommandService:
         self.stop()
 
     def _on_navigation_terminal(self, operation_id, terminal_state):
-        mapping = {
-            'COMPLETED': ('COMPLETED', 'NAVIGATION_SUCCEEDED'),
-            'CANCELLED': ('CANCELLED', 'NAVIGATION_CANCELLED'),
-            'FAILED': ('FAILED', 'NAVIGATION_FAILED'),
-        }
-        state, detail = mapping.get(terminal_state, ('FAILED', 'NAVIGATION_FAILED'))
         with self._lock:
             if operation_id != self._active_navigation_operation:
                 return
             self._active_navigation_operation = None
-            if operation_id == self._stopped_operation:
-                self._set_status(operation_id, 'STOPPED', 'STOP_REQUESTED')
+            if terminal_state == 'COMPLETED':
+                self._complete_to_idle('NAVIGATION_SUCCEEDED', 'DRIVE')
                 return
-            self._set_status(operation_id, state, detail)
+            if terminal_state == 'CANCELLED':
+                self._set_status(operation_id, 'CANCELLED', 'NAVIGATION_CANCELLED', 'DRIVE')
+                return
+            self._set_status(operation_id, 'FAILED', 'NAVIGATION_FAILED', 'DRIVE')
 
     def _expire_manual_command(self, generation):
         with self._lock:
             if generation != self._manual_generation:
                 return
             self._manual_timer = None
-            self._manual_cancelled_operation = None
             self.velocity.publish(0.0, 0.0)
-            self._set_status(None, 'IDLE', 'MANUAL_COMMAND_EXPIRED')
+            restored = self._manual_restore_status or {
+                'operation_id': None,
+                'previous_operation_id': self._status['previous_operation_id'],
+                'state': 'INIT',
+                'previous_state': 'MANUAL',
+                'detail': 'MANUAL_COMMAND_EXPIRED',
+            }
+            self._manual_restore_status = None
+            self._status = {
+                **restored,
+                'detail': 'MANUAL_COMMAND_EXPIRED',
+            }
 
-    def _set_status(self, operation_id, state, detail):
+    def _set_status(self, operation_id, state, detail, previous_state=None):
         self._status = {
             'operation_id': operation_id,
+            'previous_operation_id': self._status['previous_operation_id'],
             'state': state,
+            'previous_state': previous_state,
+            'detail': detail,
+        }
+
+    def _complete_to_idle(self, detail, previous_state):
+        operation_id = self._status['operation_id']
+        self._status = {
+            'operation_id': None,
+            'previous_operation_id': operation_id or self._status['previous_operation_id'],
+            'state': 'IDLE',
+            'previous_state': previous_state,
             'detail': detail,
         }
 
@@ -338,16 +420,20 @@ class VehicleCommandService:
 def openapi_document(service):
     operation_status_schema = {
         'type': 'object',
-        'required': ['operation_id', 'state', 'detail'],
+        'required': [
+            'operation_id', 'previous_operation_id', 'state', 'previous_state', 'detail',
+        ],
         'properties': {
             'operation_id': {'type': 'string', 'nullable': True, 'format': 'uuid'},
+            'previous_operation_id': {'type': 'string', 'nullable': True, 'format': 'uuid'},
             'state': {
                 'type': 'string',
                 'enum': [
-                    'IDLE', 'MANUAL', 'NAVIGATING', 'CANCELLING', 'CANCELLED',
-                    'COMPLETED', 'FAILED', 'STOPPED',
+                    'INIT', 'IDLE', 'DRIVE', 'PICKING', 'PICK_COMPLETE', 'PLACE',
+                    'PLACE_COMPLETE', 'FAILED', 'CANCELLED', 'MANUAL',
                 ],
             },
+            'previous_state': {'type': 'string', 'nullable': True},
             'detail': {'type': 'string'},
         },
     }
@@ -414,6 +500,24 @@ def openapi_document(service):
                             'description': 'Configured vehicle identity, battery and operation state',
                             'content': {'application/json': {'schema': vehicle_status_schema}},
                         },
+                    },
+                },
+            },
+            '/v1/operation/idle': {
+                'post': {
+                    'requestBody': {
+                        'required': True,
+                        'content': {'application/json': {'schema': {
+                            'type': 'object',
+                            'additionalProperties': False,
+                            'required': ['reason'],
+                            'properties': {'reason': {'type': 'string'}},
+                        }}},
+                    },
+                    'responses': {
+                        '200': {'description': 'Operator authorised a ready vehicle'},
+                        '409': {'description': 'Operation is active or cannot become idle'},
+                        '422': {'description': 'Invalid idle transition request'},
                     },
                 },
             },
@@ -537,6 +641,9 @@ def create_http_server(host, port, service):
                 if path == '/v1/navigation/goals':
                     self._write_json(202, service.navigation_goal(self._read_json()))
                     return
+                if path == '/v1/operation/idle':
+                    self._write_json(200, service.mark_idle(self._read_json()))
+                    return
                 if path == '/v1/navigation/cancel':
                     self._write_json(202, service.navigation_cancel(self._read_optional_json()))
                     return
@@ -557,6 +664,9 @@ def create_http_server(host, port, service):
                 self._write_json(409, {'error': str(error)})
                 return
             except InitialPoseMotionError as error:
+                self._write_json(409, {'error': str(error)})
+                return
+            except OperationConflictError as error:
                 self._write_json(409, {'error': str(error)})
                 return
             except json.JSONDecodeError:
