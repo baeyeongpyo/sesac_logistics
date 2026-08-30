@@ -1297,12 +1297,7 @@ class AutoDockNode(Node):
         self.backoff_command = (0.0, 0.0)
         self.backoff_direction = None
         self.backoff_attempt_count = 0
-        self.nearest_probe_start_position = None
-        self.nearest_probe_heading_yaw = None
-        self.nearest_probe_phase = 0
-        self.nearest_probe_best_entity_id = None
-        self.nearest_probe_best_distance_cm = math.inf
-        self.nearest_probe_complete = False
+        self.nearest_alignment_distance_cm = None
         self.was_docking_before_interrupt = False
 
         self.cmd_pub = self.create_publisher(
@@ -1594,12 +1589,7 @@ class AutoDockNode(Node):
         self.candidate_stop_due_at = None
         self.candidate_confirmation_started_at = None
         self.candidate_retry_not_before = 0.0
-        self.nearest_probe_start_position = None
-        self.nearest_probe_heading_yaw = None
-        self.nearest_probe_phase = 0
-        self.nearest_probe_best_entity_id = None
-        self.nearest_probe_best_distance_cm = math.inf
-        self.nearest_probe_complete = False
+        self.nearest_alignment_distance_cm = None
         self.latest_tape_guidance = None
         self.latest_tape_guidance_at = 0.0
         self.tape_initial_detection_complete = False
@@ -1711,12 +1701,7 @@ class AutoDockNode(Node):
         self.candidate_stop_due_at = None
         self.candidate_confirmation_started_at = None
         self.candidate_retry_not_before = 0.0
-        self.nearest_probe_start_position = None
-        self.nearest_probe_heading_yaw = None
-        self.nearest_probe_phase = 0
-        self.nearest_probe_best_entity_id = None
-        self.nearest_probe_best_distance_cm = math.inf
-        self.nearest_probe_complete = False
+        self.nearest_alignment_distance_cm = None
         self.scan_sweep_started_yaw = None
         self.scan_sweep_phase = 0
         self.scan_candidate_seen_at = None
@@ -1805,6 +1790,48 @@ class AutoDockNode(Node):
         self.pending_tape_guidance_count = 0
         return True
 
+    def warning_tape_pallet_minimum_y_ratio(self, detection, image_height):
+        """Require the floor tape to remain below visible pallet boxes."""
+        if not AutoDockNode.boolean(
+            self, "tape_require_below_pallet_enabled", True
+        ):
+            return None
+        if not isinstance(detection, dict) or image_height <= 0:
+            return None
+        boxes = []
+        for entity in detection.get("entities") or []:
+            box = entity.get("image_pallet_box") if isinstance(entity, dict) else None
+            if isinstance(box, list) and len(box) == 4:
+                boxes.append(box)
+        if not boxes:
+            minimum_confidence = self.number(
+                "tape_pallet_minimum_confidence", 0.50, 0.10, 1.0
+            )
+            for item in detection.get("detections") or []:
+                if (
+                    not isinstance(item, dict)
+                    or item.get("class") != "pallet"
+                    or float(item.get("confidence", 0.0)) < minimum_confidence
+                ):
+                    continue
+                box = item.get("box")
+                if isinstance(box, list) and len(box) == 4:
+                    boxes.append(box)
+        bottoms = []
+        for box in boxes:
+            try:
+                bottom = float(box[3])
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(bottom):
+                bottoms.append(bottom)
+        if not bottoms:
+            return None
+        margin = self.number(
+            "tape_below_pallet_margin_ratio", 0.02, 0.0, 0.20
+        )
+        return clamp(max(bottoms) / float(image_height) + margin, 0.0, 0.98)
+
     def on_slot_image(self, msg):
         zone = self.location.split("_", 1)[0]
         tape_due = (
@@ -1860,6 +1887,20 @@ class AutoDockNode(Node):
                         "tape_tracking_roi_margin_ratio", 0.12, 0.03, 0.30
                     ),
                 )
+            detection_for_tape = self.latest_detection or {}
+            if (
+                time.monotonic() - getattr(self, "latest_detection_at", 0.0)
+                <= self.number(
+                    "dock_inventory_detection_max_age_sec", 0.80, 0.20, 5.0
+                )
+            ):
+                pallet_minimum = AutoDockNode.warning_tape_pallet_minimum_y_ratio(
+                    self, detection_for_tape, frame.shape[0]
+                )
+                if pallet_minimum is not None:
+                    tracked_roi_minimum = max(
+                        tracked_roi_minimum or 0.0, pallet_minimum
+                    )
             observation = detect_warning_tape(
                 frame,
                 minimum_yellow_pixels=int(self.number(
@@ -2203,7 +2244,7 @@ class AutoDockNode(Node):
             return None, None
         return candidate, pnp
 
-    def nearest_product_candidate(self, detection):
+    def nearest_product_candidate(self, detection, respect_lock=True):
         """Return the closest visible candidate of the requested product."""
         candidates = []
         image_width = self.number("camera_image_width_px", 640.0, 100.0, 4000.0)
@@ -2228,7 +2269,11 @@ class AutoDockNode(Node):
                 continue
             entity_id = entity.get("entity_id")
             locked_entity_id = getattr(self, "target_entity_id", None)
-            if locked_entity_id is not None and entity_id != locked_entity_id:
+            if (
+                respect_lock
+                and locked_entity_id is not None
+                and entity_id != locked_entity_id
+            ):
                 continue
             if (
                 observed_entity_ids
@@ -2705,10 +2750,16 @@ class AutoDockNode(Node):
             elif entity_id != self.target_entity_id:
                 return False
         if getattr(self, "target_type", "SYMBOLS") == "NEAREST":
+            self.nearest_alignment_distance_cm = (
+                DockInventoryTracker.entity_distance_cm(candidate)
+            )
             matrix = candidate.get("matrix") or []
             if len(matrix) >= 2:
                 self.target_left, self.target_right = matrix[:2]
                 self.send_yolo_target()
+            self.target_world = None
+            self.enter_coarse_alignment("nearest_candidate_centering")
+            return True
         if pnp.get("depth_fallback"):
             if not self.update_world_target(candidate, pnp):
                 return False
@@ -2733,6 +2784,67 @@ class AutoDockNode(Node):
             "running", "edge_target_coarse_alignment",
             measurement_reason=reason,
         )
+
+    def maybe_switch_nearest_alignment_target(self):
+        """Switch centering to a stable, materially closer visible product."""
+        if getattr(self, "target_type", "SYMBOLS") != "NEAREST":
+            return False
+        detection = getattr(self, "latest_detection", None)
+        if (
+            not isinstance(detection, dict)
+            or time.monotonic() - getattr(self, "latest_detection_at", 0.0) > 0.8
+        ):
+            return False
+        candidate, _pnp = AutoDockNode.nearest_product_candidate(
+            self, detection, respect_lock=False
+        )
+        if not isinstance(candidate, dict):
+            return False
+        entity_id = candidate.get("entity_id")
+        if entity_id is None:
+            return False
+        required_frames = int(self.number(
+            "nearest_candidate_switch_frames", 2, 1, 10
+        ))
+        if int(candidate.get("streak", 0)) < required_frames:
+            return False
+        distance_cm = DockInventoryTracker.entity_distance_cm(candidate)
+        minimum_cm = self.number(
+            "nearest_candidate_switch_min_distance_cm", 15.0, 5.0, 100.0
+        )
+        if distance_cm is None or distance_cm < minimum_cm:
+            return False
+        current_id = getattr(self, "target_entity_id", None)
+        current_distance_cm = getattr(
+            self, "nearest_alignment_distance_cm", None
+        )
+        if entity_id == current_id:
+            self.nearest_alignment_distance_cm = distance_cm
+            return False
+        margin_cm = self.number(
+            "nearest_candidate_switch_margin_cm", 2.0, 0.0, 20.0
+        )
+        if (
+            current_distance_cm is not None
+            and distance_cm + margin_cm >= current_distance_cm
+        ):
+            return False
+        previous_id = current_id
+        self.target_entity_id = entity_id
+        self.nearest_alignment_distance_cm = distance_cm
+        self.target_world = None
+        matrix = candidate.get("matrix") or []
+        if len(matrix) >= 2:
+            self.target_left, self.target_right = matrix[:2]
+            self.send_yolo_target()
+        self.reset_coarse_alignment()
+        self.publish_status(
+            "running", "nearest_centering_target_switched",
+            previous_entity_id=previous_id,
+            entity_id=entity_id,
+            distance_cm=round(distance_cm, 1),
+        )
+        return True
 
     def update_world_target(self, candidate, pnp, blend_existing=False):
         if self.odom_position is None or self.odom_yaw is None:
@@ -3152,122 +3264,9 @@ class AutoDockNode(Node):
             standoff_cm=round(standoff * 100.0, 1),
         )
 
-    def remember_nearest_probe_candidate(self, candidate):
-        if not isinstance(candidate, dict):
-            return
-        entity_id = candidate.get("entity_id")
-        if entity_id is None:
-            return
-        distance_cm = DockInventoryTracker.entity_distance_cm(candidate)
-        if distance_cm is None:
-            return
-        if distance_cm < getattr(self, "nearest_probe_best_distance_cm", math.inf):
-            self.nearest_probe_best_distance_cm = distance_cm
-            self.nearest_probe_best_entity_id = entity_id
-
-    def tick_nearest_candidate_probe(self, candidate, _now, _lateral_speed):
-        """Yaw both ways before locking the closest NEAREST product."""
-        if self.nearest_probe_heading_yaw is None:
-            if candidate is None or candidate.get("entity_id") is None:
-                return False
-            if self.odom_yaw is None:
-                self.nearest_probe_complete = True
-                return False
-            self.nearest_probe_heading_yaw = self.odom_yaw
-            self.nearest_probe_phase = 0
-            self.nearest_probe_best_entity_id = None
-            self.nearest_probe_best_distance_cm = math.inf
-        AutoDockNode.remember_nearest_probe_candidate(self, candidate)
-        if self.odom_yaw is None:
-            self.stop_drive()
-            self.publish_status("waiting", "nearest_candidate_probe_odom_missing")
-            return True
-        angle = math.radians(self.number(
-            "nearest_candidate_probe_angle_deg", 20.0, 2.0, 45.0
-        ))
-        tolerance = math.radians(self.number(
-            "nearest_candidate_probe_yaw_tolerance_deg", 1.5, 0.5, 5.0
-        ))
-        search_direction = str(
-            self.config.get("search_lateral_direction", "left")
-        ).strip().lower()
-        first_sign = -1.0 if search_direction == "right" else 1.0
-        targets = (first_sign * angle, -first_sign * angle, 0.0)
-        phase = min(self.nearest_probe_phase, len(targets) - 1)
-        current_offset = normalize_angle(
-            self.odom_yaw - self.nearest_probe_heading_yaw
-        )
-        error = normalize_angle(targets[phase] - current_offset)
-        if abs(error) <= tolerance:
-            self.stop_drive()
-            self.nearest_probe_phase += 1
-            if self.nearest_probe_phase >= len(targets):
-                selected_entity_id = self.nearest_probe_best_entity_id
-                self.nearest_probe_start_position = None
-                self.nearest_probe_heading_yaw = None
-                self.nearest_probe_phase = 0
-                self.nearest_probe_complete = True
-                if selected_entity_id is not None:
-                    self.target_entity_id = selected_entity_id
-                self.publish_status(
-                    "running", "nearest_candidate_probe_complete",
-                    entity_id=selected_entity_id,
-                    distance_cm=(
-                        None if not math.isfinite(
-                            self.nearest_probe_best_distance_cm
-                        ) else round(self.nearest_probe_best_distance_cm, 1)
-                    ),
-                )
-                return True
-            self.publish_status(
-                "running", "nearest_candidate_probe_endpoint",
-                phase=self.nearest_probe_phase,
-                yaw_offset_deg=round(math.degrees(current_offset), 1),
-            )
-            return True
-        speed = self.number(
-            "nearest_candidate_probe_angular_speed_rad_s", 0.18, 0.05, 0.40
-        )
-        angular = math.copysign(min(speed, max(0.08, abs(error))), error)
-        self.publish_drive(0.0, 0.0, angular)
-        self.publish_status(
-            "running", "nearest_candidate_probing",
-            phase=phase,
-            target_yaw_offset_deg=round(math.degrees(targets[phase]), 1),
-            yaw_offset_deg=round(math.degrees(current_offset), 1),
-            best_entity_id=self.nearest_probe_best_entity_id,
-            best_distance_cm=(
-                None if not math.isfinite(self.nearest_probe_best_distance_cm)
-                else round(self.nearest_probe_best_distance_cm, 1)
-            ),
-        )
-        return True
-
     def tick_search(self):
         candidate, _pnp = self.selected_candidate()
         now = time.monotonic()
-        probe_requested = (
-            getattr(self, "target_type", "SYMBOLS") == "NEAREST"
-            and AutoDockNode.boolean(
-                self, "nearest_candidate_probe_enabled", False
-            )
-            and not getattr(self, "nearest_probe_complete", False)
-            and (
-                getattr(self, "nearest_probe_heading_yaw", None) is not None
-                or candidate is not None
-            )
-        )
-        if probe_requested:
-            fallback_speed = self.number(
-                "search_linear_speed_m_s", 0.03, 0.01, 0.30
-            )
-            probe_lateral_speed = self.number(
-                "search_lateral_speed_m_s", fallback_speed, 0.01, 0.30
-            )
-            if AutoDockNode.tick_nearest_candidate_probe(
-                self, candidate, now, probe_lateral_speed
-            ):
-                return
         if now < getattr(self, "candidate_retry_not_before", 0.0):
             candidate = None
         if candidate is not None and self.candidate_stop_due_at is None:
@@ -3884,6 +3883,8 @@ class AutoDockNode(Node):
 
     def tick_coarse_align(self):
         now = time.monotonic()
+        if getattr(self, "target_type", "SYMBOLS") == "NEAREST":
+            AutoDockNode.maybe_switch_nearest_alignment_target(self)
         candidate, _pnp, identity_reason = self.identity_measurement()
         partial_pnp = None
         if candidate is None:
@@ -3939,7 +3940,11 @@ class AutoDockNode(Node):
             self.publish_status("running", "coarse_alignment_continuing_locked_target")
 
         measured_candidate, measured_pnp, measurement_reason = self.valid_measurement()
-        if measured_candidate is not None and not measured_pnp.get("depth_fallback"):
+        if (
+            measured_candidate is not None
+            and not measured_pnp.get("depth_fallback")
+            and getattr(self, "target_type", "SYMBOLS") != "NEAREST"
+        ):
             if not self.enter_alignment(measured_candidate, measured_pnp):
                 self.cancel("odom_missing")
             return
@@ -3984,6 +3989,25 @@ class AutoDockNode(Node):
             return
 
         self.stop_drive()
+        if (
+            measured_candidate is not None
+            and not measured_pnp.get("depth_fallback")
+            and getattr(self, "target_type", "SYMBOLS") == "NEAREST"
+        ):
+            if not self.update_world_target(measured_candidate, measured_pnp):
+                self.cancel("odom_missing")
+                return
+            self.state = "docking"
+            self.reset_coarse_alignment()
+            self.publish_status(
+                "running", "nearest_centered_target_locked",
+                entity_id=self.target_entity_id,
+                distance_cm=(
+                    None if self.nearest_alignment_distance_cm is None
+                    else round(self.nearest_alignment_distance_cm, 1)
+                ),
+            )
+            return
         if measured_candidate is not None and measured_pnp.get("depth_fallback"):
             source_stamp = (self.latest_detection or {}).get("source_stamp_ns")
             if source_stamp != self.coarse_last_counted_stamp:

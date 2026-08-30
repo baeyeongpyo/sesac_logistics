@@ -2610,55 +2610,52 @@ def test_insertion_corrects_lateral_and_yaw_from_visible_target():
     assert commands == [(0.08, pytest.approx(0.01), pytest.approx(0.08))]
 
 
-def test_nearest_candidate_probe_yaws_both_sides_and_locks_closest():
+def test_nearest_centering_switches_to_stable_closer_visible_candidate(monkeypatch):
     fake = type("FakeDock", (), {})()
-    fake.config = {
-        "tape_guidance_enabled": False,
-        "tape_guidance_only": False,
-        "search_lateral_direction": "left",
-    }
+    fake.config = {}
     fake.number = lambda key, default, *_args: default
-    fake.odom_yaw = 0.0
-    fake.search_heading_yaw = 0.0
-    fake.search_heading_source = "odom"
-    fake.nearest_probe_start_position = None
-    fake.nearest_probe_heading_yaw = None
-    fake.nearest_probe_phase = 0
-    fake.nearest_probe_best_entity_id = None
-    fake.nearest_probe_best_distance_cm = math.inf
-    fake.nearest_probe_complete = False
-    fake.target_entity_id = None
-    commands = []
+    fake.target_type = "NEAREST"
+    fake.product_type = "NORMAL"
+    fake.target_entity_id = 113
+    fake.nearest_alignment_distance_cm = 28.0
+    fake.target_world = {"x": 1.0}
+    fake.latest_detection_at = 10.0
+    fake.latest_detection = {"entities": [{
+        "entity_id": 124,
+        "seen_count": 2,
+        "matrix": ["clover", "diamond", "clover", "diamond"],
+        "image_pallet_box": [300, 200, 450, 280],
+        "pnp": {
+            "forward_distance_cm": 20.0,
+            "lateral_ratio": 0.0,
+            "reprojection_error_px": 1.0,
+        },
+        "visibility_score": 8000,
+    }]}
     statuses = []
-    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
-    fake.stop_drive = lambda *_args: commands.append((0.0, 0.0, 0.0))
+    fake.send_yolo_target = lambda: None
+    fake.reset_coarse_alignment = lambda: None
     fake.publish_status = lambda *args, **kwargs: statuses.append((args, kwargs))
-    farther = {
-        "entity_id": 1,
-        "pnp": {"forward_distance_cm": 35.0},
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    assert AutoDockNode.maybe_switch_nearest_alignment_target(fake) is True
+    assert fake.target_entity_id == 124
+    assert fake.nearest_alignment_distance_cm == pytest.approx(20.0)
+    assert fake.target_world is None
+    assert statuses[-1][0] == ("running", "nearest_centering_target_switched")
+
+
+def test_warning_tape_must_be_below_visible_pallet_box():
+    fake = type("FakeDock", (), {})()
+    fake.config = {"tape_require_below_pallet_enabled": True}
+    fake.number = lambda key, default, *_args: fake.config.get(key, default)
+    detection = {
+        "entities": [{"image_pallet_box": [100, 120, 300, 300]}]
     }
-    closer = {
-        "entity_id": 2,
-        "pnp": {"forward_distance_cm": 24.0},
-    }
 
-    assert AutoDockNode.tick_nearest_candidate_probe(
-        fake, farther, 1.0, 0.12
-    ) is True
-    assert commands[-1] == (0.0, 0.0, 0.18)
+    minimum = AutoDockNode.warning_tape_pallet_minimum_y_ratio(
+        fake, detection, 480
+    )
 
-    fake.odom_yaw = math.radians(20.0)
-    AutoDockNode.tick_nearest_candidate_probe(fake, closer, 1.1, 0.12)
-    assert fake.nearest_probe_phase == 1
-
-    fake.odom_yaw = math.radians(-20.0)
-    AutoDockNode.tick_nearest_candidate_probe(fake, farther, 1.2, 0.12)
-    assert fake.nearest_probe_phase == 2
-
-    fake.odom_yaw = 0.0
-    AutoDockNode.tick_nearest_candidate_probe(fake, farther, 1.3, 0.12)
-
-    assert fake.nearest_probe_complete is True
-    assert fake.target_entity_id == 2
-    assert statuses[-1][0] == ("running", "nearest_candidate_probe_complete")
+    assert minimum == pytest.approx(300 / 480 + 0.02)
     pallet_product_type,
