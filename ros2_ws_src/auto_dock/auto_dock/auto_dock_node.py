@@ -78,13 +78,18 @@ def scan_direction(angle):
     return "left" if y >= 0.0 else "right"
 
 
-def detect_warning_tape(frame, minimum_yellow_pixels=600):
+def detect_warning_tape(
+    frame, minimum_yellow_pixels=600, minimum_center_y_ratio=None
+):
     """Detect a mostly horizontal yellow/black warning-tape band."""
     if frame is None or frame.size == 0:
         return None
     height, width = frame.shape[:2]
-    roi_top = 0
-    roi = frame
+    roi_top = 0 if minimum_center_y_ratio is None else int(round(
+        clamp(float(minimum_center_y_ratio), 0.0, 0.95) * height
+    ))
+    roi = frame[roi_top:, :]
+    roi_height = roi.shape[0]
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     yellow = cv2.inRange(
         hsv, np.asarray((15, 90, 70), dtype=np.uint8),
@@ -110,7 +115,7 @@ def detect_warning_tape(frame, minimum_yellow_pixels=600):
             continue
         side_width = max(8, int(round(component_width * 0.75)))
         y0 = max(0, y)
-        y1 = min(height, y + component_height)
+        y1 = min(roi_height, y + component_height)
         left_x0 = max(0, x - side_width)
         left_x1 = min(width, x + 2)
         right_x0 = max(0, x + component_width - 2)
@@ -1539,7 +1544,7 @@ class AutoDockNode(Node):
         return float(tape["center_y_ratio"]) >= target - tolerance
 
     def update_warning_tape_guidance(self, observation, now):
-        """Reject abrupt tape-pose jumps until the new pose repeats."""
+        """Accept only gradual tape-pose changes while the track is fresh."""
         if observation is None:
             return False
         previous = getattr(self, "latest_tape_guidance", None)
@@ -1563,25 +1568,7 @@ class AutoDockNode(Node):
                 "tape_max_center_jump_ratio", 0.10, 0.01, 0.50
             )
             if angle_jump > angle_limit or center_jump > center_limit:
-                pending = getattr(self, "pending_tape_guidance", None)
-                pending_matches = pending is not None and (
-                    abs(float(observation["angle_deg"]) - float(
-                        pending["angle_deg"]
-                    )) <= angle_limit
-                    and abs(float(observation["center_y_ratio"]) - float(
-                        pending["center_y_ratio"]
-                    )) <= center_limit
-                )
-                self.pending_tape_guidance_count = (
-                    getattr(self, "pending_tape_guidance_count", 0) + 1
-                    if pending_matches else 1
-                )
-                self.pending_tape_guidance = dict(observation)
-                required = int(self.number(
-                    "tape_outlier_confirm_frames", 3, 2, 10
-                ))
-                if self.pending_tape_guidance_count < required:
-                    return False
+                return False
         self.latest_tape_guidance = observation
         self.latest_tape_guidance_at = now
         self.pending_tape_guidance = None
@@ -1622,11 +1609,31 @@ class AutoDockNode(Node):
             inventory_due and self.dock_inventory_tracker.nearest_tape_only
         )
         if tape_due or tape_inventory_due:
+            previous_tape = getattr(self, "latest_tape_guidance", None)
+            previous_tape_age = (
+                time.monotonic()
+                - getattr(self, "latest_tape_guidance_at", 0.0)
+            )
+            tracked_roi_minimum = None
+            if (
+                previous_tape is not None
+                and previous_tape_age <= self.number(
+                    "tape_outlier_reset_age_sec", 0.75, 0.10, 3.0
+                )
+            ):
+                tracked_roi_minimum = max(
+                    0.0,
+                    float(previous_tape["center_y_ratio"])
+                    - self.number(
+                        "tape_tracking_roi_margin_ratio", 0.12, 0.03, 0.30
+                    ),
+                )
             observation = detect_warning_tape(
                 frame,
                 minimum_yellow_pixels=int(self.number(
                     "tape_min_yellow_pixels", 600, 100, 20000
                 )),
+                minimum_center_y_ratio=tracked_roi_minimum,
             )
             accepted = AutoDockNode.update_warning_tape_guidance(
                 self, observation, time.monotonic()

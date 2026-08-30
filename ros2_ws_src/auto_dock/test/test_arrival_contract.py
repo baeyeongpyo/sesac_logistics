@@ -129,7 +129,7 @@ def test_warning_tape_rejects_repeating_yellow_without_adjacent_black():
     assert detect_warning_tape(frame) is None
 
 
-def test_warning_tape_pose_jump_requires_three_matching_frames():
+def test_warning_tape_pose_jump_is_rejected_while_track_is_fresh():
     fake = type("FakeDock", (), {})()
     fake.config = {}
     fake.number = lambda key, default, *_args: fake.config.get(key, default)
@@ -142,8 +142,25 @@ def test_warning_tape_pose_jump_requires_three_matching_frames():
     assert AutoDockNode.update_warning_tape_guidance(fake, diagonal, 10.1) is False
     assert AutoDockNode.update_warning_tape_guidance(fake, diagonal, 10.2) is False
     assert fake.latest_tape_guidance["angle_deg"] == 0.0
-    assert AutoDockNode.update_warning_tape_guidance(fake, diagonal, 10.3) is True
-    assert fake.latest_tape_guidance["angle_deg"] == 22.0
+    assert AutoDockNode.update_warning_tape_guidance(fake, diagonal, 10.3) is False
+    assert fake.latest_tape_guidance["angle_deg"] == 0.0
+    gradual = {"angle_deg": 4.0, "center_y_ratio": 0.94}
+    assert AutoDockNode.update_warning_tape_guidance(fake, gradual, 10.4) is True
+    assert fake.latest_tape_guidance["angle_deg"] == 4.0
+
+
+def test_warning_tape_tracking_roi_ignores_everything_above_previous_band():
+    frame = np.full((480, 640, 3), 180, dtype=np.uint8)
+    for start_x in range(20, 600, 100):
+        cv2.rectangle(frame, (start_x, 100), (start_x + 58, 130),
+                      (0, 220, 220), -1)
+        cv2.rectangle(frame, (start_x + 58, 100), (start_x + 88, 130),
+                      (5, 5, 5), -1)
+
+    assert detect_warning_tape(frame) is not None
+    assert detect_warning_tape(
+        frame, minimum_center_y_ratio=0.50
+    ) is None
 
 
 def test_warning_tape_initial_approach_finishes_near_target_height():

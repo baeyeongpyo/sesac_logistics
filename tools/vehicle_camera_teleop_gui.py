@@ -92,11 +92,16 @@ from std_msgs.msg import Empty, String, UInt16
 VEHICLE_HOSTS = {1: "192.168.100.38", 2: "192.168.100.35"}
 
 
-def detect_warning_tape_debug(frame, minimum_yellow_pixels=600):
+def detect_warning_tape_debug(
+    frame, minimum_yellow_pixels=600, minimum_center_y_ratio=None
+):
     """Run the auto-dock tape detector and retain its rejection evidence."""
     height, width = frame.shape[:2]
-    roi_top = 0
-    roi = frame
+    roi_top = 0 if minimum_center_y_ratio is None else int(round(
+        max(0.0, min(0.95, float(minimum_center_y_ratio))) * height
+    ))
+    roi = frame[roi_top:, :]
+    roi_height = roi.shape[0]
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     raw_mask = cv2.inRange(
         hsv, np.asarray((15, 90, 70), dtype=np.uint8),
@@ -122,7 +127,7 @@ def detect_warning_tape_debug(frame, minimum_yellow_pixels=600):
             continue
         side_width = max(8, int(round(component_width * 0.75)))
         y0 = max(0, y)
-        y1 = min(height, y + component_height)
+        y1 = min(roi_height, y + component_height)
         left_x0 = max(0, x - side_width)
         left_x1 = min(width, x + 2)
         right_x0 = max(0, x + component_width - 2)
@@ -1034,6 +1039,8 @@ class TeleopWindow(QMainWindow):
         self.telemetry_session = None
         self.recorded_frames = 0
         self.warning_tape_debug = None
+        self.warning_tape_track = None
+        self.warning_tape_track_at = 0.0
         self.dock_grid_revision = None
         self.dock_grid_occupied = {}
         self.dock_grid_last_signature = None
@@ -5202,8 +5209,11 @@ class TeleopWindow(QMainWindow):
 
     def render_warning_tape_overlay(self, frame):
         """Show exactly which yellow pixels pass the auto-dock tape gates."""
-        tape_age = time.monotonic() - self.node.tape_frame_monotonic
+        now = time.monotonic()
+        tape_age = now - self.node.tape_frame_monotonic
         if self.node.tape_frame is None or tape_age > 0.75:
+            self.warning_tape_track = None
+            self.warning_tape_track_at = 0.0
             self.warning_tape_debug = {
                 "detected": False,
                 "reason": "raw_frame_stale",
@@ -5221,9 +5231,41 @@ class TeleopWindow(QMainWindow):
                 tape_frame, (frame.shape[1], frame.shape[0]),
                 interpolation=cv2.INTER_AREA,
             )
-        debug = detect_warning_tape_debug(tape_frame)
+        track_age = now - self.warning_tape_track_at
+        tracked_minimum = None
+        if self.warning_tape_track is not None and track_age <= 0.75:
+            tracked_minimum = max(
+                0.0, float(self.warning_tape_track["center_y_ratio"]) - 0.12
+            )
+        else:
+            self.warning_tape_track = None
+        debug = detect_warning_tape_debug(
+            tape_frame, minimum_center_y_ratio=tracked_minimum
+        )
         accepted = debug.pop("accepted_mask")
         line = debug.pop("line", None)
+        if debug["detected"] and self.warning_tape_track is not None:
+            angle_delta = math.degrees(math.atan2(
+                math.sin(math.radians(
+                    float(debug["angle_deg"])
+                    - float(self.warning_tape_track["angle_deg"])
+                )),
+                math.cos(math.radians(
+                    float(debug["angle_deg"])
+                    - float(self.warning_tape_track["angle_deg"])
+                )),
+            ))
+            center_delta = (
+                float(debug["center_y_ratio"])
+                - float(self.warning_tape_track["center_y_ratio"])
+            )
+            if abs(angle_delta) > 8.0 or abs(center_delta) > 0.10:
+                debug["detected"] = False
+                debug["reason"] = "tracked_pose_jump"
+                line = None
+        if debug["detected"]:
+            self.warning_tape_track = dict(debug)
+            self.warning_tape_track_at = now
         debug["source_age_sec"] = tape_age
         debug["source_topic"] = self.args.tape_image_topic
         self.warning_tape_debug = dict(debug)
