@@ -335,7 +335,7 @@
   "_comment_lidar_self_mask_front_half_angle_deg": "라이다 정면에서 차체 반사로 제외할 좌우 반각(도)",
   "lidar_self_mask_front_half_angle_deg": 20.0,
   "_comment_lidar_self_mask_front_max_range_m": "정면 차체 반사로 제외할 최대 거리(m)",
-  "lidar_self_mask_front_max_range_m": 0.18,
+  "lidar_self_mask_front_max_range_m": 0.2,
   "candidate_confirmation_timeout_sec": 0.8,
   "candidate_retry_cooldown_sec": 1.0,
   "max_frontal_error": 0.35,
