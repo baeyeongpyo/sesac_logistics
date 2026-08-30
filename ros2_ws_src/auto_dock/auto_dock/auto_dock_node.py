@@ -160,6 +160,17 @@ def detect_warning_tape(frame, minimum_yellow_pixels=600):
                 tolerance = max(14.0, min(30.0, candidate["height"] * 0.5))
                 if distance <= tolerance:
                     group.append(candidate)
+            ordered = sorted(group, key=lambda item: item["x0"])
+            widths = [item["x1"] - item["x0"] for item in ordered]
+            maximum_gap = max(
+                (right["x0"] - left["x1"] for left, right in zip(
+                    ordered, ordered[1:]
+                )),
+                default=0,
+            )
+            allowed_gap = max(100.0, float(np.median(widths)) * 1.5)
+            if maximum_gap > allowed_gap:
+                continue
             span = max(item["x1"] for item in group) - min(
                 item["x0"] for item in group
             )
@@ -1522,6 +1533,56 @@ class AutoDockNode(Node):
         )
         return float(tape["center_y_ratio"]) >= target - tolerance
 
+    def update_warning_tape_guidance(self, observation, now):
+        """Reject abrupt tape-pose jumps until the new pose repeats."""
+        if observation is None:
+            return False
+        previous = getattr(self, "latest_tape_guidance", None)
+        previous_age = now - getattr(self, "latest_tape_guidance_at", 0.0)
+        reset_age = self.number("tape_outlier_reset_age_sec", 0.75, 0.10, 3.0)
+        if previous is None or previous_age > reset_age:
+            self.pending_tape_guidance = None
+            self.pending_tape_guidance_count = 0
+        else:
+            angle_jump = abs(math.degrees(normalize_angle(math.radians(
+                float(observation["angle_deg"]) - float(previous["angle_deg"])
+            ))))
+            center_jump = abs(
+                float(observation["center_y_ratio"])
+                - float(previous["center_y_ratio"])
+            )
+            angle_limit = self.number(
+                "tape_max_angle_jump_deg", 8.0, 1.0, 30.0
+            )
+            center_limit = self.number(
+                "tape_max_center_jump_ratio", 0.10, 0.01, 0.50
+            )
+            if angle_jump > angle_limit or center_jump > center_limit:
+                pending = getattr(self, "pending_tape_guidance", None)
+                pending_matches = pending is not None and (
+                    abs(float(observation["angle_deg"]) - float(
+                        pending["angle_deg"]
+                    )) <= angle_limit
+                    and abs(float(observation["center_y_ratio"]) - float(
+                        pending["center_y_ratio"]
+                    )) <= center_limit
+                )
+                self.pending_tape_guidance_count = (
+                    getattr(self, "pending_tape_guidance_count", 0) + 1
+                    if pending_matches else 1
+                )
+                self.pending_tape_guidance = dict(observation)
+                required = int(self.number(
+                    "tape_outlier_confirm_frames", 3, 2, 10
+                ))
+                if self.pending_tape_guidance_count < required:
+                    return False
+        self.latest_tape_guidance = observation
+        self.latest_tape_guidance_at = now
+        self.pending_tape_guidance = None
+        self.pending_tape_guidance_count = 0
+        return True
+
     def on_slot_image(self, msg):
         zone = self.location.split("_", 1)[0]
         tape_due = (
@@ -1556,14 +1617,16 @@ class AutoDockNode(Node):
             inventory_due and self.dock_inventory_tracker.nearest_tape_only
         )
         if tape_due or tape_inventory_due:
-            self.latest_tape_guidance = detect_warning_tape(
+            observation = detect_warning_tape(
                 frame,
                 minimum_yellow_pixels=int(self.number(
                     "tape_min_yellow_pixels", 600, 100, 20000
                 )),
             )
-            self.latest_tape_guidance_at = time.monotonic()
-            if self.latest_tape_guidance is not None:
+            accepted = AutoDockNode.update_warning_tape_guidance(
+                self, observation, time.monotonic()
+            )
+            if accepted:
                 self.tape_initial_detection_complete = (
                     self.tape_initial_detection_complete
                     or AutoDockNode.warning_tape_initial_approach_complete(

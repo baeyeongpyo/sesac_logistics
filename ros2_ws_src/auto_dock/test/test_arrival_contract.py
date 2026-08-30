@@ -101,6 +101,23 @@ def test_warning_tape_groups_one_band_instead_of_fitting_yellow_clutter():
     assert tape["center_y_ratio"] > 0.75
 
 
+def test_warning_tape_rejects_a_distant_component_from_the_selected_band():
+    frame = np.full((480, 640, 3), 180, dtype=np.uint8)
+    cv2.rectangle(frame, (0, 250), (15, 265), (0, 220, 220), -1)
+    cv2.rectangle(frame, (16, 250), (30, 265), (5, 5, 5), -1)
+    for start_x in (320, 488):
+        cv2.rectangle(frame, (start_x, 465), (start_x + 82, 479),
+                      (0, 220, 220), -1)
+        cv2.rectangle(frame, (start_x + 82, 465), (start_x + 125, 479),
+                      (5, 5, 5), -1)
+
+    tape = detect_warning_tape(frame)
+
+    assert tape is not None
+    assert abs(tape["angle_deg"]) < 2.0
+    assert tape["center_y_ratio"] > 0.95
+
+
 def test_warning_tape_rejects_repeating_yellow_without_adjacent_black():
     frame = np.full((480, 640, 3), 90, dtype=np.uint8)
     for start_x in range(20, 600, 100):
@@ -110,6 +127,23 @@ def test_warning_tape_rejects_repeating_yellow_without_adjacent_black():
         )
 
     assert detect_warning_tape(frame) is None
+
+
+def test_warning_tape_pose_jump_requires_three_matching_frames():
+    fake = type("FakeDock", (), {})()
+    fake.config = {}
+    fake.number = lambda key, default, *_args: fake.config.get(key, default)
+    fake.latest_tape_guidance = {"angle_deg": 0.0, "center_y_ratio": 0.99}
+    fake.latest_tape_guidance_at = 10.0
+    fake.pending_tape_guidance = None
+    fake.pending_tape_guidance_count = 0
+    diagonal = {"angle_deg": 22.0, "center_y_ratio": 0.81}
+
+    assert AutoDockNode.update_warning_tape_guidance(fake, diagonal, 10.1) is False
+    assert AutoDockNode.update_warning_tape_guidance(fake, diagonal, 10.2) is False
+    assert fake.latest_tape_guidance["angle_deg"] == 0.0
+    assert AutoDockNode.update_warning_tape_guidance(fake, diagonal, 10.3) is True
+    assert fake.latest_tape_guidance["angle_deg"] == 22.0
 
 
 def test_warning_tape_initial_approach_finishes_near_target_height():

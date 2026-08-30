@@ -172,6 +172,17 @@ def detect_warning_tape_debug(frame, minimum_yellow_pixels=600):
                 tolerance = max(14.0, min(30.0, candidate["height"] * 0.5))
                 if distance <= tolerance:
                     group.append(candidate)
+            ordered = sorted(group, key=lambda item: item["x0"])
+            widths = [item["x1"] - item["x0"] for item in ordered]
+            maximum_gap = max(
+                (right["x0"] - left["x1"] for left, right in zip(
+                    ordered, ordered[1:]
+                )),
+                default=0,
+            )
+            allowed_gap = max(100.0, float(np.median(widths)) * 1.5)
+            if maximum_gap > allowed_gap:
+                continue
             span = max(item["x1"] for item in group) - min(
                 item["x0"] for item in group
             )
