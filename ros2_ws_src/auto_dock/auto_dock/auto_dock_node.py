@@ -1091,7 +1091,10 @@ class AutoDockNode(Node):
             self.on_dock_inventory_reset, 10,
         )
         image_qos = QoSProfile(depth=1)
-        image_qos.reliability = ReliabilityPolicy.RELIABLE
+        # Camera frames are live guidance, not a lossless event stream.  Match
+        # the control GUI's working subscription and always prefer the newest
+        # frame instead of allowing a RELIABLE image backlog to stall guidance.
+        image_qos.reliability = ReliabilityPolicy.BEST_EFFORT
         self.create_subscription(
             Image, str(self.get_parameter("slot_image_topic").value),
             self.on_slot_image, image_qos,
