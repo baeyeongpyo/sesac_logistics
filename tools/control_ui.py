@@ -86,6 +86,7 @@ AUTO_DOCK_REASON_TEXT = {
     "candidate_confirmation": "후보 유효성 확인 중",
     "candidate_lost_resume_search": "후보가 사라져 다시 탐색",
     "candidate_invalid_resume_search": "후보가 무효라 다시 탐색",
+    "nearest_target_lost_resume_search": "최근접 후보를 잃어 다시 탐색",
     "edge_target_coarse_alignment": "후보 잠금 후 1차 정렬 중",
     "coarse_centering": "화면 중심으로 횡·yaw 정렬 중",
     "coarse_locked_target_temporarily_lost": "잠근 후보 재검출 대기",

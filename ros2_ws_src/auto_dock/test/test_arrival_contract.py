@@ -1706,6 +1706,40 @@ def test_coarse_target_loss_continues_with_provisional_world_target():
     assert statuses[-1][1] == "coarse_target_lost_using_virtual_target"
 
 
+def test_nearest_coarse_target_loss_clears_lock_and_resumes_search():
+    fake = type("FakeDock", (), {})()
+    fake.target_type = "NEAREST"
+    fake.identity_measurement = lambda: (None, None, "no_selected_candidate")
+    fake.tracked_partial_measurement = lambda: (
+        None, None, "partial_entity_unavailable"
+    )
+    fake.target_world = {"x": 1.0, "y": 0.0, "yaw": 0.0}
+    fake.target_entity_id = 22
+    fake.candidate_stop_due_at = 10.0
+    fake.candidate_confirmation_started_at = 9.0
+    fake.candidate_retry_not_before = 12.0
+    fake.stop_drive = lambda *_args: None
+    resets = []
+    fake.reset_coarse_alignment = lambda: resets.append(True)
+    headings = []
+    fake.latch_search_heading = lambda: headings.append(True)
+    statuses = []
+    fake.publish_status = lambda state, reason, **extra: statuses.append(
+        (state, reason, extra)
+    )
+
+    AutoDockNode.tick_coarse_align(fake)
+
+    assert fake.state == "search"
+    assert fake.target_world is None
+    assert fake.target_entity_id is None
+    assert fake.candidate_retry_not_before == 0.0
+    assert resets == [True]
+    assert headings == [True]
+    assert statuses[-1][1] == "nearest_target_lost_resume_search"
+    assert statuses[-1][2]["lost_entity_id"] == 22
+
+
 def test_coarse_alignment_timeout_keeps_locked_target(monkeypatch):
     fake = type("FakeDock", (), {})()
     fake.state = "coarse_align"

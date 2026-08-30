@@ -3241,6 +3241,23 @@ class AutoDockNode(Node):
                     candidate, partial_pnp, top_pair_reason = top_pair_measurement()
                     partial_reason = top_pair_reason or partial_reason
             if candidate is None:
+                if getattr(self, "target_type", "SYMBOLS") == "NEAREST":
+                    lost_entity_id = self.target_entity_id
+                    self.stop_drive()
+                    self.target_world = None
+                    self.target_entity_id = None
+                    self.candidate_stop_due_at = None
+                    self.candidate_confirmation_started_at = None
+                    self.candidate_retry_not_before = 0.0
+                    self.state = "search"
+                    self.reset_coarse_alignment()
+                    self.latch_search_heading()
+                    self.publish_status(
+                        "running", "nearest_target_lost_resume_search",
+                        measurement_reason=partial_reason or identity_reason,
+                        lost_entity_id=lost_entity_id,
+                    )
+                    return
                 if self.target_world is not None:
                     self.state = "docking"
                     self.reset_coarse_alignment()
