@@ -148,7 +148,7 @@ TUNING_FIELDS = (
     ("lidar_body_rear_extent_m", "LiDAR→차체 후방(m)", 0.06, float, 0.01, 1.0),
     ("lidar_body_half_width_m", "LiDAR→바퀴 측면(m)", 0.06, float, 0.01, 0.50),
     ("lidar_loaded_front_extent_m", "LiDAR→적재물 앞끝(m)", 0.48, float, 0.10, 1.50),
-    ("lidar_loaded_half_width_m", "LiDAR→적재물 측면(m)", 0.085, float, 0.01, 0.50),
+    ("lidar_loaded_half_width_m", "LiDAR→적재물 측면(m)", 0.10, float, 0.01, 0.50),
     ("lidar_sensor_radius_m", "LiDAR 센서 반경(m)", 0.015, float, 0.005, 0.10),
     ("ready_right_turn_speed_rad_s", "Ready 우회전 속도(rad/s)", 0.20, float, 0.05, 0.50),
     ("ready_right_turn_tolerance_deg", "Ready 우회전 오차(°)", 3.0, float, 0.5, 15.0),

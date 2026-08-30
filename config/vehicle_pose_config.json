@@ -308,6 +308,8 @@
   "lidar_body_rear_extent_m": 0.05,
   "_comment_lidar_body_half_width_m": "LiDAR 중심에서 차체 좌우 끝까지 거리(m)",
   "lidar_body_half_width_m": 0.085,
+  "_comment_lidar_loaded_half_width_m": "LOADED 상태에서 적재물 반사로 제외할 좌우 반폭(m)",
+  "lidar_loaded_half_width_m": 0.1,
   "_comment_lidar_sensor_radius_m": "LiDAR 센서 반경(m)",
   "lidar_sensor_radius_m": 0.015,
   "_comment_slot_confirmation_frames": "보관 슬롯의 FREE/OCCUPIED 상태를 확정할 연속 프레임 수",

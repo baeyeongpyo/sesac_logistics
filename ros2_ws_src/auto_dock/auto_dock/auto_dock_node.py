@@ -2026,7 +2026,7 @@ class AutoDockNode(Node):
                 "lidar_loaded_front_extent_m", 0.48, 0.10, 1.50
             )
             loaded_half_width = self.number(
-                "lidar_loaded_half_width_m", 0.085, 0.01, 0.50
+                "lidar_loaded_half_width_m", 0.10, 0.01, 0.50
             )
             point_x = distance * math.cos(angle)
             point_y = distance * math.sin(angle)

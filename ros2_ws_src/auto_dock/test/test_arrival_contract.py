@@ -720,6 +720,16 @@ def test_known_front_chassis_return_is_self_masked():
     ) is False
 
 
+def test_loaded_pallet_edge_return_is_self_masked_with_width_margin():
+    fake = type("FakeDock", (), {})()
+    fake.load_state = "LOADED"
+    fake.number = lambda key, default, *_args: default
+    distance = math.hypot(0.208, 0.085)
+    angle = math.atan2(0.085, 0.208)
+
+    assert AutoDockNode.is_lidar_self_return(fake, angle, distance) is True
+
+
 def test_fixed_angle_chassis_return_is_masked_without_widening_front_mask():
     fake = type("FakeDock", (), {})()
     values = {
