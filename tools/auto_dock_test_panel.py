@@ -244,24 +244,7 @@ class TestPanelNode(Node):
         self.yolo_callback(message.data)
 
     def received_lidar(self, message):
-        nearest = {
-            direction: math.inf
-            for direction in ("front", "rear", "left", "right")
-        }
-        for index, distance in enumerate(message.ranges):
-            if not math.isfinite(distance) or distance < max(message.range_min, 0.03):
-                continue
-            angle = message.angle_min + index * message.angle_increment
-            angle = math.atan2(math.sin(angle), math.cos(angle))
-            if abs(angle) <= math.radians(20.0) and distance <= 0.20:
-                continue
-            x, y = math.cos(angle), math.sin(angle)
-            if abs(x) >= abs(y):
-                direction = "front" if x >= 0.0 else "rear"
-            else:
-                direction = "left" if y >= 0.0 else "right"
-            nearest[direction] = min(nearest[direction], float(distance))
-        self.lidar_callback(message, nearest)
+        self.lidar_callback(message)
 
     def received_odom(self, message):
         q = message.pose.pose.orientation
@@ -1378,14 +1361,67 @@ class TestPanel:
             "angular_z_rad_s": round(float(angular_z), 4),
         })
 
-    def update_lidar_ranges(self, message, nearest):
-        def shown(direction):
+    def lidar_nearest_by_direction(self, message, apply_self_mask):
+        def setting(key, default):
+            try:
+                return float(self.tuning_vars[key].get())
+            except (KeyError, TypeError, ValueError):
+                return default
+
+        nearest = {
+            direction: math.inf
+            for direction in ("front", "rear", "left", "right")
+        }
+        minimum = max(float(message.range_min), 0.03)
+        front_half_angle = math.radians(setting(
+            "lidar_self_mask_front_half_angle_deg", 20.0
+        ))
+        front_max_range = setting("lidar_self_mask_front_max_range_m", 0.20)
+        fixed_center = math.radians(setting(
+            "lidar_self_mask_fixed_angle_deg", -1.43
+        ))
+        fixed_half_width = math.radians(setting(
+            "lidar_self_mask_fixed_half_width_deg", 1.0
+        ))
+        for index, raw_distance in enumerate(message.ranges):
+            distance = float(raw_distance)
+            if (
+                not math.isfinite(distance)
+                or distance < minimum
+                or distance > float(message.range_max)
+            ):
+                continue
+            angle = float(message.angle_min) + index * float(message.angle_increment)
+            angle = math.atan2(math.sin(angle), math.cos(angle))
+            if apply_self_mask:
+                fixed_error = math.atan2(
+                    math.sin(angle - fixed_center), math.cos(angle - fixed_center)
+                )
+                if fixed_half_width > 0.0 and abs(fixed_error) <= fixed_half_width:
+                    continue
+                if abs(angle) <= front_half_angle and distance <= front_max_range:
+                    continue
+            x, y = math.cos(angle), math.sin(angle)
+            if abs(x) >= abs(y):
+                direction = "front" if x >= 0.0 else "rear"
+            else:
+                direction = "left" if y >= 0.0 else "right"
+            nearest[direction] = min(nearest[direction], distance)
+        return nearest
+
+    def update_lidar_ranges(self, message):
+        raw_nearest = self.lidar_nearest_by_direction(message, False)
+        filtered_nearest = self.lidar_nearest_by_direction(message, True)
+
+        def shown(nearest, direction):
             distance = nearest.get(direction, math.inf)
             return "---" if not math.isfinite(distance) else f"{distance * 100.0:.1f}cm"
 
         text = (
-            f"LiDAR  전 {shown('front')}  후 {shown('rear')}  "
-            f"좌 {shown('left')}  우 {shown('right')}"
+            f"원본  전 {shown(raw_nearest, 'front')}  후 {shown(raw_nearest, 'rear')}  "
+            f"좌 {shown(raw_nearest, 'left')}  우 {shown(raw_nearest, 'right')}\n"
+            f"필터  전 {shown(filtered_nearest, 'front')}  후 {shown(filtered_nearest, 'rear')}  "
+            f"좌 {shown(filtered_nearest, 'left')}  우 {shown(filtered_nearest, 'right')}"
         )
         self.lidar_ranges.set(text)
         now = time.monotonic()
@@ -1411,12 +1447,19 @@ class TestPanel:
                 "ros_stamp_sec": int(message.header.stamp.sec),
                 "ros_stamp_nanosec": int(message.header.stamp.nanosec),
                 "frame_id": message.header.frame_id,
-                "nearest_cm": {
+                "raw_nearest_cm": {
                     direction: (
                         None if not math.isfinite(distance)
                         else round(float(distance) * 100.0, 2)
                     )
-                    for direction, distance in nearest.items()
+                    for direction, distance in raw_nearest.items()
+                },
+                "filtered_nearest_cm": {
+                    direction: (
+                        None if not math.isfinite(distance)
+                        else round(float(distance) * 100.0, 2)
+                    )
+                    for direction, distance in filtered_nearest.items()
                 },
                 "points_within_30cm": points,
             })
