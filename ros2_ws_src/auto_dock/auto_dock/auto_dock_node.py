@@ -2799,7 +2799,16 @@ class AutoDockNode(Node):
         default_clearance = self.number("lidar_stop_distance_m", 0.35, 0.05, 2.0)
         violations = []
         if self.state in {"search", "scan_forward_search"}:
-            monitored = ("front", "rear", "left", "right")
+            selected_target_visible = False
+            selector = getattr(self, "selected_candidate", None)
+            if callable(selector):
+                candidate, _pnp = selector()
+                selected_target_visible = candidate is not None
+            monitored = (
+                ("rear", "left", "right")
+                if selected_target_visible
+                else ("front", "rear", "left", "right")
+            )
         elif self.state in {
             "scan_approach", "coarse_align", "docking", "inserting"
         }:

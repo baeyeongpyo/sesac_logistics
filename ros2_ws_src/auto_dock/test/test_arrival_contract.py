@@ -804,6 +804,44 @@ def test_disabled_lidar_safety_does_not_interrupt_driving():
     assert AutoDockNode.interrupt_for_lidar(fake) is False
 
 
+def test_search_visible_target_is_not_treated_as_front_obstacle():
+    fake = type("FakeDock", (), {})()
+    fake.state = "search"
+    fake.config = {"lidar_safety_enabled": True}
+    fake.number = lambda key, default, *_args: default
+    fake.selected_candidate = lambda: ({"entity_id": 7}, {})
+    fake.nearest_by_direction = {
+        "front": (0.20, 0.0, 0.36),
+        "rear": (math.inf, None, 0.20),
+        "left": (math.inf, None, 0.20),
+        "right": (math.inf, None, 0.20),
+    }
+
+    assert AutoDockNode.interrupt_for_lidar(fake) is False
+
+
+def test_search_without_visible_target_still_monitors_front_lidar():
+    fake = type("FakeDock", (), {})()
+    fake.state = "search"
+    fake.config = {
+        "lidar_safety_enabled": True,
+        "lidar_backoff_enabled": False,
+    }
+    fake.number = lambda key, default, *_args: default
+    fake.selected_candidate = lambda: (None, None)
+    fake.nearest_by_direction = {
+        "front": (0.20, 0.0, 0.36),
+        "rear": (math.inf, None, 0.20),
+        "left": (math.inf, None, 0.20),
+        "right": (math.inf, None, 0.20),
+    }
+    cancelled = []
+    fake.cancel = lambda reason: cancelled.append(reason)
+
+    assert AutoDockNode.interrupt_for_lidar(fake) is True
+    assert cancelled == ["lidar_front_blocked"]
+
+
 def test_persistent_lidar_obstacle_retries_until_configured_limit(monkeypatch):
     fake = type("FakeDock", (), {})()
     fake.backoff_until = 10.0
