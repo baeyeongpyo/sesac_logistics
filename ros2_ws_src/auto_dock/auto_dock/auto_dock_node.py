@@ -175,9 +175,14 @@ def detect_warning_tape(frame, minimum_yellow_pixels=600):
                 item["x0"] for item in group
             )
             area = sum(item["area"] for item in group)
-            score = span * (1.0 + 0.25 * max(0, len(group) - 2)) + min(
-                area, 5000
-            ) * 0.01
+            center_y = float(np.median([
+                item["center_y"] for item in group
+            ]))
+            score = (
+                span * (1.0 + 0.25 * max(0, len(group) - 2))
+                + min(area, 5000) * 0.01
+                + center_y * 3.0
+            )
             if score > best_score:
                 best_score = score
                 best_group = group
