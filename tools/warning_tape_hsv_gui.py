@@ -51,6 +51,18 @@ DEFAULTS = {
     "min_component_pixels": 200,
 }
 
+DOCK_END_DEFAULTS = {
+    **DEFAULTS,
+    # H min > H max intentionally means hue wrap:
+    # 168..179 OR 0..12, the two OpenCV red ranges.
+    "h_min": 168,
+    "h_max": 12,
+    "s_min": 120,
+    "v_min": 65,
+    "open_kernel": 1,
+    "min_component_pixels": 30,
+}
+
 
 def filtered_mask(frame, values):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -63,7 +75,21 @@ def filtered_mask(frame, values):
         (values["h_max"], values["s_max"], values["v_max"]),
         dtype=np.uint8,
     )
-    hsv_mask = cv2.inRange(hsv, lower, upper)
+    if values["h_min"] <= values["h_max"]:
+        hsv_mask = cv2.inRange(hsv, lower, upper)
+    else:
+        hsv_mask = cv2.bitwise_or(
+            cv2.inRange(
+                hsv,
+                np.asarray((0, values["s_min"], values["v_min"]), np.uint8),
+                np.asarray((values["h_max"], values["s_max"], values["v_max"]), np.uint8),
+            ),
+            cv2.inRange(
+                hsv,
+                np.asarray((values["h_min"], values["s_min"], values["v_min"]), np.uint8),
+                np.asarray((179, values["s_max"], values["v_max"]), np.uint8),
+            ),
+        )
     rgb_mask = cv2.inRange(
         rgb,
         np.asarray(
@@ -182,6 +208,9 @@ class HsvTuner(QMainWindow):
         super().__init__()
         self.node = node
         self.args = args
+        self.defaults = (
+            DOCK_END_DEFAULTS if args.target == "dock-end" else DEFAULTS
+        )
         self.config_path = Path(args.config).expanduser()
         self.latest_frame = None
         self.controls = {}
@@ -189,7 +218,8 @@ class HsvTuner(QMainWindow):
         self.drive_was_active = False
         self.setFocusPolicy(Qt.StrongFocus)
         QApplication.instance().installEventFilter(self)
-        self.setWindowTitle(f"Vehicle {args.vehicle} warning-tape HSV tuner")
+        target_title = "DOCK END" if args.target == "dock-end" else "WARNING TAPE"
+        self.setWindowTitle(f"Vehicle {args.vehicle} {target_title} colour tuner")
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -260,11 +290,14 @@ class HsvTuner(QMainWindow):
         self.filter_mode.currentIndexChanged.connect(self.render)
         save = QPushButton("Save HSV JSON")
         load = QPushButton("Load HSV JSON")
-        reset = QPushButton("Reset yellow defaults")
+        reset = QPushButton(
+            "Reset red defaults" if args.target == "dock-end"
+            else "Reset yellow defaults"
+        )
         shot = QPushButton("Save raw + mask")
         save.clicked.connect(self.save_config)
         load.clicked.connect(self.load_config)
-        reset.clicked.connect(lambda: self.set_values(DEFAULTS))
+        reset.clicked.connect(lambda: self.set_values(self.defaults))
         shot.clicked.connect(self.save_snapshot)
         buttons.addWidget(self.status)
         buttons.addWidget(QLabel("Mask mode"))
@@ -281,7 +314,7 @@ class HsvTuner(QMainWindow):
         controls_row.addLayout(buttons, 1)
         layout.addLayout(controls_row)
         self.setCentralWidget(root)
-        self.set_values(DEFAULTS)
+        self.set_values(self.defaults)
         if self.config_path.exists():
             self.load_config()
 
@@ -303,7 +336,7 @@ class HsvTuner(QMainWindow):
         }
 
     def set_values(self, values):
-        for key, default in DEFAULTS.items():
+        for key, default in self.defaults.items():
             self.controls[key][1].setValue(int(values.get(key, default)))
         mode = str(values.get("filter_mode", "HSV"))
         mode_index = self.filter_mode.findData(mode)
@@ -377,14 +410,15 @@ class HsvTuner(QMainWindow):
             return
         values = self.values()
         if (
-            values["h_min"] > values["h_max"]
-            or values["s_min"] > values["s_max"]
+            values["s_min"] > values["s_max"]
             or values["v_min"] > values["v_max"]
             or values["r_min"] > values["r_max"]
             or values["g_min"] > values["g_max"]
             or values["b_min"] > values["b_max"]
         ):
-            self.status.setText("Invalid range: each min must be <= max")
+            self.status.setText(
+                "Invalid range (H may wrap; other min values must be <= max)"
+            )
             return
         hsv, mask = filtered_mask(self.latest_frame, values)
         masked = cv2.bitwise_and(self.latest_frame, self.latest_frame, mask=mask)
@@ -436,7 +470,10 @@ class HsvTuner(QMainWindow):
         _hsv, mask = filtered_mask(self.latest_frame, self.values())
         output = Path(self.args.output_dir).expanduser()
         output.mkdir(parents=True, exist_ok=True)
-        stem = time.strftime("warning_tape_hsv_%Y%m%d_%H%M%S")
+        stem = time.strftime(
+            ("dock_end_hsv_" if self.args.target == "dock-end" else
+             "warning_tape_hsv_") + "%Y%m%d_%H%M%S"
+        )
         raw_path = output / f"{stem}_raw.jpg"
         mask_path = output / f"{stem}_mask.png"
         cv2.imwrite(str(raw_path), self.latest_frame)
@@ -456,6 +493,10 @@ class HsvTuner(QMainWindow):
 
 def parse_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--target", choices=("warning-tape", "dock-end"),
+        default="warning-tape",
+    )
     parser.add_argument("--vehicle", type=int, choices=(1, 2), default=2)
     parser.add_argument(
         "--topic", default="/ascamera/camera_publisher/rgb0/image"
@@ -463,13 +504,20 @@ def parse_args():
     parser.add_argument("--cmd-vel-topic", default="/controller/cmd_vel")
     parser.add_argument("--linear-speed", type=float, default=0.12)
     parser.add_argument("--angular-speed", type=float, default=0.35)
-    parser.add_argument(
-        "--config", default="~/warning_tape_hsv.json"
-    )
-    parser.add_argument(
-        "--output-dir", default="~/warning_tape_hsv_captures"
-    )
-    return parser.parse_args()
+    parser.add_argument("--config")
+    parser.add_argument("--output-dir")
+    args = parser.parse_args()
+    if args.config is None:
+        args.config = (
+            "~/dock_end_hsv.json" if args.target == "dock-end"
+            else "~/warning_tape_hsv.json"
+        )
+    if args.output_dir is None:
+        args.output_dir = (
+            "~/dock_end_hsv_captures" if args.target == "dock-end"
+            else "~/warning_tape_hsv_captures"
+        )
+    return args
 
 
 def main():

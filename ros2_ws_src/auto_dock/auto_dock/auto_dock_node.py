@@ -261,7 +261,8 @@ def detect_warning_tape(
 
 
 def detect_dock_end_markers(
-    frame, minimum_red_pixels=180, warning_tape_filter_config=None
+    frame, minimum_red_pixels=180, warning_tape_filter_config=None,
+    dock_end_filter_config=None,
 ):
     """Return repeating red DOCK end bands that meet the warning tape."""
     if frame is None or frame.size == 0:
@@ -272,15 +273,67 @@ def detect_dock_end_markers(
     )
     if tape is None:
         return {}
+    values = dock_end_filter_config if isinstance(
+        dock_end_filter_config, dict
+    ) else {}
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    red = cv2.bitwise_or(
-        cv2.inRange(hsv, (0, 120, 65), (12, 255, 255)),
-        cv2.inRange(hsv, (168, 120, 65), (179, 255, 255)),
+    h_min = int(values.get("h_min", 168))
+    h_max = int(values.get("h_max", 12))
+    s_min = int(values.get("s_min", 120))
+    s_max = int(values.get("s_max", 255))
+    v_min = int(values.get("v_min", 65))
+    v_max = int(values.get("v_max", 255))
+    if h_min <= h_max:
+        hsv_mask = cv2.inRange(
+            hsv, (h_min, s_min, v_min), (h_max, s_max, v_max)
+        )
+    else:
+        # Hue wraps at red: e.g. H=168..179 OR H=0..12.
+        hsv_mask = cv2.bitwise_or(
+            cv2.inRange(hsv, (0, s_min, v_min), (h_max, s_max, v_max)),
+            cv2.inRange(hsv, (h_min, s_min, v_min), (179, s_max, v_max)),
+        )
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    rgb_mask = cv2.inRange(
+        rgb,
+        np.asarray((
+            int(values.get("r_min", 0)), int(values.get("g_min", 0)),
+            int(values.get("b_min", 0)),
+        ), dtype=np.uint8),
+        np.asarray((
+            int(values.get("r_max", 255)), int(values.get("g_max", 255)),
+            int(values.get("b_max", 255)),
+        ), dtype=np.uint8),
     )
+    mode = str(values.get("filter_mode", "HSV"))
+    if mode == "RGB":
+        red = rgb_mask
+    elif mode == "HSV_AND_RGB":
+        red = cv2.bitwise_and(hsv_mask, rgb_mask)
+    elif mode == "HSV_OR_RGB":
+        red = cv2.bitwise_or(hsv_mask, rgb_mask)
+    else:
+        red = hsv_mask
+    for operation, key, default in (
+        (cv2.MORPH_OPEN, "open_kernel", 1),
+        (cv2.MORPH_CLOSE, "close_kernel", 1),
+    ):
+        kernel_size = int(values.get(key, default))
+        if kernel_size > 1:
+            if kernel_size % 2 == 0:
+                kernel_size += 1
+            red = cv2.morphologyEx(
+                red, operation,
+                np.ones((kernel_size, kernel_size), dtype=np.uint8),
+            )
     count, _labels, stats, centroids = cv2.connectedComponentsWithStats(
         red, connectivity=8
     )
-    minimum_segment_area = max(30, int(minimum_red_pixels * 0.15))
+    minimum_segment_area = max(
+        30,
+        int(minimum_red_pixels * 0.15),
+        int(values.get("min_component_pixels", 0)),
+    )
     components = []
     for label in range(1, count):
         x, y, component_width, component_height, area = stats[label]
@@ -990,6 +1043,9 @@ class AutoDockNode(Node):
         self.declare_parameter(
             "warning_tape_hsv_config", "/home/ubuntu/warning_tape_hsv.json"
         )
+        self.declare_parameter(
+            "dock_end_hsv_config", "/home/ubuntu/dock_end_hsv.json"
+        )
         self.declare_parameter("config_overrides", "{}")
         self.declare_parameter("search_linear_speed_m_s", 0.0)
         self.declare_parameter("trigger_topic", "")
@@ -1033,6 +1089,11 @@ class AutoDockNode(Node):
         ))
         self.warning_tape_hsv_cache = None
         self.warning_tape_hsv_cache_mtime_ns = None
+        self.dock_end_hsv_path = Path(str(
+            self.get_parameter("dock_end_hsv_config").value
+        ))
+        self.dock_end_hsv_cache = None
+        self.dock_end_hsv_cache_mtime_ns = None
         self.config_overrides = self.parse_overrides(
             str(self.get_parameter("config_overrides").value)
         )
@@ -1311,6 +1372,39 @@ class AutoDockNode(Node):
             f"min_component={payload['min_component_pixels']}"
         )
         return self.warning_tape_hsv_cache
+
+    def dock_end_filter_values(self):
+        """Reload the GUI-authored dock-end colour mask when it changes."""
+        path = Path(str(self.config.get(
+            "dock_end_hsv_config_path", self.dock_end_hsv_path
+        ))).expanduser()
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            return None
+        if (
+            self.dock_end_hsv_cache is not None
+            and self.dock_end_hsv_cache_mtime_ns == mtime_ns
+        ):
+            return self.dock_end_hsv_cache
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("root must be an object")
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            self.get_logger().warning(f"dock end HSV config read failed: {exc}")
+            return None
+        payload.setdefault("min_component_pixels", 30)
+        self.dock_end_hsv_cache = payload
+        self.dock_end_hsv_cache_mtime_ns = mtime_ns
+        self.get_logger().info(
+            "dock end HSV config loaded: "
+            f"H={payload.get('h_min', 168)}->{payload.get('h_max', 12)} "
+            f"S={payload.get('s_min', 120)}-{payload.get('s_max', 255)} "
+            f"V={payload.get('v_min', 65)}-{payload.get('v_max', 255)} "
+            f"min_component={payload['min_component_pixels']}"
+        )
+        return self.dock_end_hsv_cache
 
     def number(self, key, default, minimum=None, maximum=None):
         try:
@@ -1725,12 +1819,14 @@ class AutoDockNode(Node):
                 self.tape_recovery_done = False
         if inventory_due:
             self.last_dock_inventory_scan_at = time.monotonic()
+            dock_end_filter = self.dock_end_filter_values()
             markers = detect_dock_end_markers(
                 frame,
                 minimum_red_pixels=int(self.number(
                     "dock_inventory_minimum_red_pixels", 180, 50, 5000
                 )),
                 warning_tape_filter_config=warning_tape_filter,
+                dock_end_filter_config=dock_end_filter,
             )
             detection = self.latest_detection or {}
             detection_age = time.monotonic() - self.latest_detection_at
@@ -2034,6 +2130,7 @@ class AutoDockNode(Node):
         """Return the closest visible candidate of the requested product."""
         candidates = []
         image_width = self.number("camera_image_width_px", 640.0, 100.0, 4000.0)
+        image_height = self.number("camera_image_height_px", 480.0, 100.0, 4000.0)
         tracker = getattr(self, "dock_inventory_tracker", None)
         inventory = tracker.snapshot() if tracker is not None else {}
         visible_inventory = inventory.get("visible_nearest") or []
@@ -2111,27 +2208,32 @@ class AutoDockNode(Node):
                     continue
                 star_box = star.get("box")
                 depth = star.get("depth")
-                if (
-                    not isinstance(star_box, list) or len(star_box) != 4
-                    or not isinstance(depth, dict)
-                ):
+                if not isinstance(star_box, list) or len(star_box) != 4:
                     continue
                 try:
-                    distance_cm = float(depth["forward_distance_cm"])
-                    bearing_deg = float(depth["bearing_deg"])
                     star_center_x = 0.5 * (
                         float(star_box[0]) + float(star_box[2])
                     )
-                except (KeyError, TypeError, ValueError):
+                except (TypeError, ValueError):
                     continue
-                if (
-                    not math.isfinite(distance_cm)
-                    or not 5.0 <= distance_cm
-                    <= maximum_single_star_distance_cm
-                    or not math.isfinite(bearing_deg)
-                    or abs(bearing_deg) > 45.0
-                ):
-                    continue
+                distance_cm = None
+                bearing_deg = None
+                if isinstance(depth, dict):
+                    try:
+                        measured_distance_cm = float(depth["forward_distance_cm"])
+                        measured_bearing_deg = float(depth["bearing_deg"])
+                    except (KeyError, TypeError, ValueError):
+                        pass
+                    else:
+                        if (
+                            math.isfinite(measured_distance_cm)
+                            and 5.0 <= measured_distance_cm
+                            <= maximum_single_star_distance_cm
+                            and math.isfinite(measured_bearing_deg)
+                            and abs(measured_bearing_deg) <= 45.0
+                        ):
+                            distance_cm = measured_distance_cm
+                            bearing_deg = measured_bearing_deg
                 matches = []
                 for pallet in pallets:
                     box = [float(value) for value in pallet["box"]]
@@ -2170,28 +2272,41 @@ class AutoDockNode(Node):
                     "top_row_error": 0.0,
                     "bottom_row_error": 0.0,
                     "pallet_box": [int(round(value)) for value in box],
-                    "pnp": {
+                    "pnp": None,
+                    "depth_yaw": None,
+                    "fresh_single_star": True,
+                    "fresh_pose_pending": distance_cm is None,
+                    "star_confidence": float(star.get("confidence", 0.0)),
+                }
+                if distance_cm is not None:
+                    candidate["pnp"] = {
                         "reprojection_error_px": 999.0,
                         "lateral_ratio": math.tan(math.radians(bearing_deg)),
                         "depth_fallback": True,
                         "distance_source": "depth",
-                    },
-                    "depth_yaw": {
+                    }
+                    candidate["depth_yaw"] = {
                         "forward_distance_cm": distance_cm,
                         "yaw_deg": 0.0,
-                    },
-                    "fresh_single_star": True,
-                    "star_confidence": float(star.get("confidence", 0.0)),
-                }
+                    }
+                # A pallet lower in the image is normally closer.  Use that
+                # only to rank depth-less visual candidates; actual depth
+                # candidates always win and forward motion still requires depth.
+                distance_rank = (
+                    distance_cm if distance_cm is not None else
+                    maximum_single_star_distance_cm + clamp(
+                        (image_height - box[3]) / image_height, 0.0, 1.0
+                    )
+                )
                 candidates.append((
-                    distance_cm, abs(candidate["center_error"]), candidate
+                    distance_rank, abs(candidate["center_error"]), candidate
                 ))
         if not candidates:
             return None, None
         _distance, _center_error, candidate = min(
             candidates, key=lambda item: (item[0], item[1])
         )
-        return candidate, candidate["pnp"]
+        return candidate, candidate.get("pnp")
 
     @staticmethod
     def box_iou(left, right):
@@ -2958,6 +3073,19 @@ class AutoDockNode(Node):
             self.publish_status(
                 "running", "candidate_stop_scheduled", delay_sec=delay
             )
+        if (
+            candidate is not None
+            and self.candidate_stop_due_at is not None
+            and now < self.candidate_stop_due_at
+        ):
+            # Once a requested product is visible, tape guidance must not move
+            # the base away from it during the short identity confirmation.
+            self.stop_drive()
+            self.publish_status(
+                "running", "candidate_stationary_confirmation",
+                pose_pending=bool(candidate.get("fresh_pose_pending", False)),
+            )
+            return
         if self.candidate_stop_due_at is not None and now >= self.candidate_stop_due_at:
             self.candidate_stop_due_at = None
             self.stop_drive(5)
@@ -2994,10 +3122,14 @@ class AutoDockNode(Node):
                 now, lateral_speed, direction_sign
             ):
                 return
-            AutoDockNode.tick_missing_tape_recovery(
-                self, now, preferred_direction="rear"
-            )
-            return
+            if not getattr(self, "tape_recovery_done", False):
+                AutoDockNode.tick_missing_tape_recovery(
+                    self, now, preferred_direction="front"
+                )
+                return
+            # Tape is an auxiliary distance/yaw reference.  Losing it after
+            # one safe forward nudge must not permanently end product search;
+            # continue below with heading-held lateral search.
         front_guidance_enabled = AutoDockNode.boolean(
             self, "tag_guided_lateral_search_enabled", False
         )

@@ -275,6 +275,34 @@ def test_dock_end_marker_detects_repeating_red_band_at_right_edge():
     assert "left" not in markers
 
 
+def test_dock_end_marker_uses_gui_authored_hsv_range():
+    frame = np.full((480, 640, 3), 100, dtype=np.uint8)
+    blue = cv2.cvtColor(
+        np.asarray([[[115, 230, 230]]], dtype=np.uint8), cv2.COLOR_HSV2BGR
+    )[0, 0]
+    for top in (120, 190, 260):
+        cv2.rectangle(
+            frame, (595, top), (628, top + 34),
+            tuple(int(value) for value in blue), -1,
+        )
+    for left in (80, 190, 300, 410, 550):
+        cv2.rectangle(frame, (left, 302), (left + 70, 330), (0, 230, 230), -1)
+        cv2.rectangle(frame, (left + 70, 302), (left + 100, 330), (5, 5, 5), -1)
+
+    assert detect_dock_end_markers(frame) == {}
+    markers = detect_dock_end_markers(
+        frame,
+        dock_end_filter_config={
+            "h_min": 105, "h_max": 125,
+            "s_min": 120, "s_max": 255,
+            "v_min": 65, "v_max": 255,
+            "min_component_pixels": 30,
+        },
+    )
+
+    assert "right" in markers
+
+
 def test_dock_end_marker_rejects_repeating_red_band_without_yellow_tape():
     frame = np.full((480, 640, 3), 100, dtype=np.uint8)
     for top in (120, 190, 260):
@@ -821,6 +849,33 @@ def test_nearest_fresh_accepts_one_star_attached_to_a_pallet_face():
     assert AutoDockNode.candidate_matches_best_entity(fake, candidate) == (True, None)
 
 
+def test_nearest_fresh_keeps_visual_candidate_while_star_depth_is_missing():
+    fake = type("FakeDock", (), {})()
+    fake.product_type = "FRESH"
+    fake.number = lambda _key, default, _minimum, _maximum: default
+    detection = {
+        "entities": [],
+        "detections": [
+            {
+                "class": "star", "confidence": 0.78,
+                "box": [228, 162, 308, 238],
+            },
+            {
+                "class": "pallet", "confidence": 0.52,
+                "box": [149, 234, 328, 280],
+            },
+        ],
+    }
+
+    candidate, pnp = AutoDockNode.nearest_product_candidate(fake, detection)
+
+    assert candidate["fresh_single_star"] is True
+    assert candidate["fresh_pose_pending"] is True
+    assert candidate["pallet_box"] == [149, 234, 328, 280]
+    assert candidate["depth_yaw"] is None
+    assert pnp is None
+
+
 @pytest.mark.parametrize("star_box", [
     [215, 170, 295, 250],
     [345, 170, 425, 250],
@@ -1268,13 +1323,16 @@ def test_first_matching_frame_schedules_stop_after_point_two_seconds(monkeypatch
     fake.search_heading_yaw = None
     fake.odom_yaw = 0.0
     commands = []
+    stops = []
+    fake.stop_drive = lambda *_args: stops.append(True)
     fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
     monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
 
     AutoDockNode.tick_search(fake)
 
     assert fake.candidate_stop_due_at == pytest.approx(10.2)
-    assert commands == [(pytest.approx(0.02), 0.12, 0.0)]
+    assert stops == [True]
+    assert commands == []
 
 
 def test_experimental_scan_locks_valid_target_before_approach(monkeypatch):
@@ -1728,6 +1786,20 @@ def test_tape_only_search_does_not_reverse_when_tape_is_already_close(monkeypatc
     assert fake.commands == [(0.0, 0.12, 0.0)]
     assert fake.statuses[-1][1] == "warning_tape_pose_held_lateral_search"
     assert fake.statuses[-1][2]["close_tape_reverse_suppressed"] is True
+
+
+def test_tape_only_search_resumes_lateral_search_after_missing_tape_nudge(monkeypatch):
+    fake = tape_search_fake(angle_deg=0.0)
+    fake.config["tape_guidance_only"] = True
+    fake.latest_tape_guidance = None
+    fake.tape_recovery_done = True
+    fake.stop_drive = lambda *_args: None
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_search(fake)
+
+    assert fake.commands == [(pytest.approx(0.02), 0.12, 0.0)]
+    assert fake.statuses[-1][1] == "lateral_target_search"
 
 
 def missing_tape_recovery_fake(front_margin, rear_margin):
