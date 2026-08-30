@@ -16,6 +16,7 @@ from PyQt5.QtCore import QEvent, Qt, QTimer
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
+    QComboBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -39,6 +40,12 @@ DEFAULTS = {
     "s_max": 255,
     "v_min": 70,
     "v_max": 255,
+    "r_min": 0,
+    "r_max": 255,
+    "g_min": 0,
+    "g_max": 255,
+    "b_min": 0,
+    "b_max": 255,
     "open_kernel": 3,
     "close_kernel": 1,
 }
@@ -46,6 +53,7 @@ DEFAULTS = {
 
 def filtered_mask(frame, values):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     lower = np.asarray(
         (values["h_min"], values["s_min"], values["v_min"]),
         dtype=np.uint8,
@@ -54,7 +62,27 @@ def filtered_mask(frame, values):
         (values["h_max"], values["s_max"], values["v_max"]),
         dtype=np.uint8,
     )
-    mask = cv2.inRange(hsv, lower, upper)
+    hsv_mask = cv2.inRange(hsv, lower, upper)
+    rgb_mask = cv2.inRange(
+        rgb,
+        np.asarray(
+            (values["r_min"], values["g_min"], values["b_min"]),
+            dtype=np.uint8,
+        ),
+        np.asarray(
+            (values["r_max"], values["g_max"], values["b_max"]),
+            dtype=np.uint8,
+        ),
+    )
+    mode = values.get("filter_mode", "HSV")
+    if mode == "RGB":
+        mask = rgb_mask
+    elif mode == "HSV_AND_RGB":
+        mask = cv2.bitwise_and(hsv_mask, rgb_mask)
+    elif mode == "HSV_OR_RGB":
+        mask = cv2.bitwise_or(hsv_mask, rgb_mask)
+    else:
+        mask = hsv_mask
     for operation, key in (
         (cv2.MORPH_OPEN, "open_kernel"),
         (cv2.MORPH_CLOSE, "close_kernel"),
@@ -172,6 +200,12 @@ class HsvTuner(QMainWindow):
             ("s_max", "S max", 0, 255),
             ("v_min", "V min", 0, 255),
             ("v_max", "V max", 0, 255),
+            ("r_min", "R min", 0, 255),
+            ("r_max", "R max", 0, 255),
+            ("g_min", "G min", 0, 255),
+            ("g_max", "G max", 0, 255),
+            ("b_min", "B min", 0, 255),
+            ("b_max", "B max", 0, 255),
             ("open_kernel", "Open kernel", 1, 21),
             ("close_kernel", "Close kernel", 1, 21),
         )
@@ -206,6 +240,12 @@ class HsvTuner(QMainWindow):
         self.angular_speed.setSingleStep(0.05)
         self.angular_speed.setValue(args.angular_speed)
         self.angular_speed.setSuffix(" rad/s")
+        self.filter_mode = QComboBox()
+        self.filter_mode.addItem("HSV only", "HSV")
+        self.filter_mode.addItem("RGB only", "RGB")
+        self.filter_mode.addItem("HSV AND RGB", "HSV_AND_RGB")
+        self.filter_mode.addItem("HSV OR RGB", "HSV_OR_RGB")
+        self.filter_mode.currentIndexChanged.connect(self.render)
         save = QPushButton("Save HSV JSON")
         load = QPushButton("Load HSV JSON")
         reset = QPushButton("Reset yellow defaults")
@@ -215,6 +255,8 @@ class HsvTuner(QMainWindow):
         reset.clicked.connect(lambda: self.set_values(DEFAULTS))
         shot.clicked.connect(self.save_snapshot)
         buttons.addWidget(self.status)
+        buttons.addWidget(QLabel("Mask mode"))
+        buttons.addWidget(self.filter_mode)
         buttons.addWidget(QLabel("Linear speed"))
         buttons.addWidget(self.linear_speed)
         buttons.addWidget(QLabel("Angular speed"))
@@ -243,11 +285,17 @@ class HsvTuner(QMainWindow):
         self.resize(1400, 720)
 
     def values(self):
-        return {key: pair[1].value() for key, pair in self.controls.items()}
+        return {
+            **{key: pair[1].value() for key, pair in self.controls.items()},
+            "filter_mode": self.filter_mode.currentData(),
+        }
 
     def set_values(self, values):
         for key, default in DEFAULTS.items():
             self.controls[key][1].setValue(int(values.get(key, default)))
+        mode = str(values.get("filter_mode", "HSV"))
+        mode_index = self.filter_mode.findData(mode)
+        self.filter_mode.setCurrentIndex(max(0, mode_index))
         self.render()
 
     def poll_ros(self):
@@ -320,6 +368,9 @@ class HsvTuner(QMainWindow):
             values["h_min"] > values["h_max"]
             or values["s_min"] > values["s_max"]
             or values["v_min"] > values["v_max"]
+            or values["r_min"] > values["r_max"]
+            or values["g_min"] > values["g_max"]
+            or values["b_min"] > values["b_max"]
         ):
             self.status.setText("Invalid range: each min must be <= max")
             return
@@ -331,11 +382,17 @@ class HsvTuner(QMainWindow):
         selected = cv2.countNonZero(mask)
         total = max(mask.size, 1)
         center_hsv = hsv[hsv.shape[0] // 2, hsv.shape[1] // 2].tolist()
+        center_bgr = self.latest_frame[
+            self.latest_frame.shape[0] // 2,
+            self.latest_frame.shape[1] // 2,
+        ].tolist()
+        center_rgb = center_bgr[::-1]
         age = time.monotonic() - self.node.frame_stamp
         self.status.setText(
             f"topic: {self.args.topic}\n"
             f"selected: {selected:,} px ({100.0 * selected / total:.2f}%)\n"
-            f"center HSV: {center_hsv}\nframe age: {age:.3f}s\n"
+            f"center HSV: {center_hsv} · RGB: {center_rgb}\n"
+            f"mode: {values['filter_mode']} · frame age: {age:.3f}s\n"
             f"config: {self.config_path}"
         )
 
