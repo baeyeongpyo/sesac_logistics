@@ -69,6 +69,46 @@ class ServerComposeContractTest(unittest.TestCase):
         )
         self.assertTrue(config_mount['read_only'])
 
+    def test_fleet_manager_publishes_the_central_map_directly(self):
+        services = compose_config('docker-compose.server.yaml')['services']
+        environment = environment_values()
+        map_publisher = services['map-publisher']
+
+        self.assertNotIn('map-server', services)
+        self.assertNotIn('central-topic-republisher', services)
+        self.assertEqual(map_publisher['network_mode'], 'host')
+        self.assertEqual(map_publisher['ipc'], 'host')
+        self.assertEqual(map_publisher['environment'], {
+            'FASTDDS_BUILTIN_TRANSPORTS': 'DEFAULT',
+            'MAP_USE_SIM_TIME': 'false',
+            'MAP_YAML': '/maps/map_0825.yaml',
+            'RMW_IMPLEMENTATION': 'rmw_fastrtps_cpp',
+            'ROS_DOMAIN_ID': '225',
+            'ROS_LOCALHOST_ONLY': '1',
+        })
+        self.assertEqual(
+            map_publisher['command'],
+            [
+                'ros2', 'run', 'foxglove_ros_worker', 'fleet_map_publisher',
+                '--ros-args', '-p', 'use_sim_time:=false',
+            ],
+        )
+        self.assertEqual(
+            map_publisher['build']['context'],
+            str(BUNDLE),
+        )
+        self.assertEqual(map_publisher['build']['dockerfile'], 'server/Dockerfile')
+        self.assertEqual(map_publisher['image'], environment['SERVER_IMAGE'])
+        map_mount = next(
+            mount for mount in map_publisher['volumes']
+            if mount['target'] == '/maps'
+        )
+        self.assertEqual(
+            map_mount['source'],
+            str(BUNDLE / 'maps'),
+        )
+        self.assertTrue(map_mount['read_only'])
+
     def test_command_api_publishes_configured_port_without_host_network(self):
         api = compose_config('docker-compose.server.yaml')['services']['command-api']
         environment = environment_values()
@@ -109,29 +149,6 @@ class ServerComposeContractTest(unittest.TestCase):
         services = compose_config('docker-compose.server.yaml')['services']
 
         self.assertNotIn('rosbag-recorder', services)
-
-    def test_central_topic_republisher_replays_map_on_server_domain(self):
-        relay = compose_config('docker-compose.server.yaml')['services'][
-            'central-topic-republisher'
-        ]
-
-        self.assertEqual(relay['network_mode'], 'host')
-        self.assertEqual(relay['ipc'], 'host')
-        self.assertEqual(relay['environment']['ROS_DOMAIN_ID'], '225')
-        self.assertEqual(
-            relay['command'],
-            [
-                'ros2',
-                'run',
-                'foxglove_ros_worker',
-                'fleet_central_topic_republisher',
-            ],
-        )
-        config_mount = next(
-            mount for mount in relay['volumes']
-            if mount['target'] == '/config/central_topics.yaml'
-        )
-        self.assertTrue(config_mount['read_only'])
 
 
 if __name__ == '__main__':

@@ -5,11 +5,12 @@ from pathlib import Path
 import re
 from typing import Sequence
 
-from fleet_bridge_config import load_central_topics, load_telemetry
+from fleet_bridge_config import load_telemetry
 
 
 ROBOT_ID_PATTERN = re.compile(r'^[A-Za-z][A-Za-z0-9_]*$')
 SESSION_ID_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]*$')
+CENTRAL_RECORD_TOPICS = ('/map',)
 
 
 def parse_robot_ids(value: str) -> tuple[str, ...]:
@@ -26,7 +27,6 @@ def parse_robot_ids(value: str) -> tuple[str, ...]:
 
 def record_topics(
     telemetry_path: Path | str,
-    central_topics_path: Path | str,
     robot_ids: Sequence[str],
 ) -> tuple[str, ...]:
     topics = []
@@ -37,11 +37,7 @@ def record_topics(
             if topic.enabled
         )
         topics.append(f'/{robot_id}/fleet_bridge/status')
-    topics.extend(
-        topic.target
-        for topic in load_central_topics(central_topics_path)
-        if topic.enabled
-    )
+    topics.extend(CENTRAL_RECORD_TOPICS)
     return tuple(dict.fromkeys(topics))
 
 
@@ -83,13 +79,6 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         '--telemetry-config',
         default=os.environ.get('TELEMETRY_CONFIG', '/config/telemetry.yaml'),
     )
-    parser.add_argument(
-        '--central-topics-config',
-        default=os.environ.get(
-            'CENTRAL_TOPICS_CONFIG',
-            '/config/central_topics.yaml',
-        ),
-    )
     return parser.parse_args(argv)
 
 
@@ -98,7 +87,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     robot_ids = parse_robot_ids(arguments.robot_ids)
     topics = record_topics(
         arguments.telemetry_config,
-        arguments.central_topics_config,
         robot_ids,
     )
     root = Path(arguments.rosbag_root)

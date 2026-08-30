@@ -102,7 +102,7 @@ services:
       - --params-file
       - /config/server_foxglove.yaml
 
-  central-topic-republisher:
+  map-publisher:
     image: ${SERVER_IMAGE:-mentorpi-fleet-bridge-server:humble}
     build:
       context: .
@@ -117,15 +117,20 @@ services:
       ROS_LOCALHOST_ONLY: "1"
       RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
       FASTDDS_BUILTIN_TRANSPORTS: ${FASTDDS_BUILTIN_TRANSPORTS:-DEFAULT}
-      CENTRAL_TOPICS_CONFIG: /config/central_topics.yaml
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MAP_YAML: ${MAP_YAML:-/maps/map_0825.yaml}
+      MAP_USE_SIM_TIME: ${MAP_USE_SIM_TIME:-false}
     volumes:
       - type: bind
-        source: ./config/central_topics.yaml
-        target: /config/central_topics.yaml
+        source: ${MAP_DIRECTORY:-./maps}
+        target: /maps
         read_only: true
+        bind:
+          create_host_path: false
     command:
       - ros2
       - run
       - foxglove_ros_worker
-      - fleet_central_topic_republisher
+      - fleet_map_publisher
+      - --ros-args
+      - -p
+      - "use_sim_time:=${MAP_USE_SIM_TIME:-false}"

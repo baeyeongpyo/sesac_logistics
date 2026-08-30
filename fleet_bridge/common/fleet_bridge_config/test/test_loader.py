@@ -533,7 +533,6 @@ class ConfigLoaderTest(unittest.TestCase):
             },
         )
         topics = load_telemetry(BUNDLE / 'config/telemetry.yaml', 'robot_1')
-        central_topics = load_central_topics(BUNDLE / 'config/central_topics.yaml')
 
         self.assertEqual([vehicle.id for vehicle in fleet.vehicles], ['robot_1', 'robot_2'])
         self.assertEqual(
@@ -572,26 +571,6 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertEqual(depth_camera_info.replay_rate_hz, 1.0)
         self.assertEqual(rgb_camera_info.qos.durability, 'transient_local')
         self.assertEqual(depth_camera_info.qos.durability, 'transient_local')
-        self.assertEqual(
-            [
-                (
-                    topic.source,
-                    topic.target,
-                    topic.message_type,
-                    topic.replay_rate_hz,
-                )
-                for topic in central_topics
-                if topic.enabled
-            ],
-            [
-                (
-                    '/controller_server/map',
-                    '/map',
-                    'nav_msgs/msg/OccupancyGrid',
-                    None,
-                ),
-            ],
-        )
         vehicle_map = next(topic for topic in topics if topic.id == 'map')
         self.assertEqual(vehicle_map.source, '/map')
         self.assertEqual(vehicle_map.target, '/robot_1/map')

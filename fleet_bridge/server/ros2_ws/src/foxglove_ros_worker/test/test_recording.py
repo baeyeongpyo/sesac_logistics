@@ -75,44 +75,6 @@ class RecordingTest(unittest.TestCase):
                 ),
             ],
         })
-        self.central_path = self.write_yaml('central.yaml', {
-            'version': 1,
-            'topics': [
-                {
-                    'id': 'controller_map',
-                    'enabled': True,
-                    'source': '/controller_server/map',
-                    'target': '/fleet/map',
-                    'type': 'nav_msgs/msg/OccupancyGrid',
-                    'replay_rate_hz': 1.0,
-                    'qos': {
-                        'reliability': 'reliable',
-                        'durability': 'transient_local',
-                        'history': 'keep_last',
-                        'depth': 1,
-                    },
-                },
-            ],
-        })
-        self.central_with_disabled_path = self.write_yaml('disabled-central.yaml', {
-            'version': 1,
-            'topics': [
-                {
-                    'id': 'controller_map',
-                    'enabled': False,
-                    'source': '/controller_server/map',
-                    'target': '/fleet/map',
-                    'type': 'nav_msgs/msg/OccupancyGrid',
-                    'replay_rate_hz': 1.0,
-                    'qos': {
-                        'reliability': 'reliable',
-                        'durability': 'transient_local',
-                        'history': 'keep_last',
-                        'depth': 1,
-                    },
-                },
-            ],
-        })
 
     def tearDown(self):
         self.temporary_directory.cleanup()
@@ -122,11 +84,10 @@ class RecordingTest(unittest.TestCase):
         path.write_text(yaml.safe_dump(value, sort_keys=False), encoding='utf-8')
         return path
 
-    def test_record_topics_expands_targets_status_and_map(self):
+    def test_record_topics_expands_targets_status_and_the_direct_central_map(self):
         self.assertEqual(
             record_topics(
                 self.telemetry_path,
-                self.central_path,
                 ('robot_1', 'robot_2'),
             ),
             (
@@ -136,7 +97,7 @@ class RecordingTest(unittest.TestCase):
                 '/robot_2/odom',
                 '/robot_2/depth/image_raw',
                 '/robot_2/fleet_bridge/status',
-                '/fleet/map',
+                '/map',
             ),
         )
 
@@ -144,10 +105,9 @@ class RecordingTest(unittest.TestCase):
         self.assertEqual(
             record_topics(
                 self.telemetry_with_disabled_path,
-                self.central_with_disabled_path,
                 ('robot_1',),
             ),
-            ('/robot_1/odom', '/robot_1/fleet_bridge/status'),
+            ('/robot_1/odom', '/robot_1/fleet_bridge/status', '/map'),
         )
 
     def test_new_session_path_preserves_existing_directory(self):

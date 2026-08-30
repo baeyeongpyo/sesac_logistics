@@ -169,8 +169,8 @@ test('navigation returns a clear input error when the start cell is blocked', ()
 });
 
 test('project P5 map produces all plan layers without a ROS runtime', () => {
-  const pgm = parsePgm(readFileSync(new URL('../../../../map_server/maps/map_0825.pgm', import.meta.url)));
-  const metadata = parseMapYaml(readFileSync(new URL('../../../../map_server/maps/map_0825.yaml', import.meta.url), 'utf8'));
+  const pgm = parsePgm(readFileSync(new URL('../../../maps/map_0825.pgm', import.meta.url)));
+  const metadata = parseMapYaml(readFileSync(new URL('../../../maps/map_0825.yaml', import.meta.url), 'utf8'));
   const result = computeNavigation({
     map: createOccupancyMap(pgm, metadata),
     start: { x: -4, y: -3, yaw: 0 },
