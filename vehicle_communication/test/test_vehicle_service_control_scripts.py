@@ -17,7 +17,8 @@ class VehicleCommunicationScriptTest(unittest.TestCase):
     def setUp(self):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.temporary_path = Path(self.temporary_directory.name)
-        self.package = self.temporary_path / 'vehicle_communication'
+        self.workspace = self.temporary_path / 'ros2_ws'
+        self.package = self.workspace / 'src' / 'vehicle_communication'
         shutil.copytree(PACKAGE, self.package, ignore=shutil.ignore_patterns('__pycache__'))
         self.log_file = self.temporary_path / 'invocations.log'
 
@@ -45,7 +46,12 @@ class VehicleCommunicationScriptTest(unittest.TestCase):
         }
 
     def tearDown(self):
-        for name in ('vehicle_communication_stop.sh', 'foxglove_stop.sh', 'command_api_stop.sh'):
+        for name in (
+            'vehicle_communication_stop.sh',
+            'foxglove_stop.sh',
+            'command_ros_stop.sh',
+            'command_api_stop.sh',
+        ):
             script = self.package / 'tools' / name
             if script.is_file():
                 subprocess.run(
@@ -92,6 +98,10 @@ class VehicleCommunicationScriptTest(unittest.TestCase):
     @property
     def command_api_process(self):
         return (f'python3 {self.package / "vehicle_command_api.py"} --host',)
+
+    @property
+    def command_ros_process(self):
+        return ('ros2 run vehicle_command_api vehicle_command_api --host',)
 
     def start_other_process(self, command):
         process = subprocess.Popen(command, env=self.environment)
@@ -183,19 +193,60 @@ class VehicleCommunicationScriptTest(unittest.TestCase):
         self.wait_for_no_processes(self.command_api_process)
         self.assertFalse((Path(self.environment['HOME']) / 'log' / 'vehicle_command_api_pid').exists())
 
+    def test_command_ros_start_inherits_ros_environment_and_ros_stop_ends_only_it(self):
+        """ROS runner must preserve the caller's sourced ROS environment."""
+        other_api = self.start_other_process((
+            str(self.fake_bin / 'ros2'),
+            'run',
+            'vehicle_command_api',
+            'vehicle_command_api',
+            '--port',
+            '180820',
+        ))
+        self.wait_for_processes(
+            ('ros2 run vehicle_command_api vehicle_command_api --port 180820',),
+        )
+        self.log_file.write_text('', encoding='utf-8')
+
+        started = self.command('command_ros_start.sh')
+        self.assertEqual(started.returncode, 0, started.stderr)
+        original_process_ids = self.wait_for_processes(self.command_ros_process)
+        invocation = self.wait_for_invocation()
+        self.assertIn('ros2_setup=from_zshrc', invocation)
+        self.assertIn('ros2_arg=run', invocation)
+        self.assertIn('ros2_arg=vehicle_command_api', invocation)
+        self.assertIn('ros2_arg=--port', invocation)
+        self.assertIn('ros2_arg=18082', invocation)
+        self.assertIn('ros2_arg=--robot-id', invocation)
+        self.assertIn('ros2_arg=test_vehicle', invocation)
+
+        repeated_start = self.command('command_ros_start.sh')
+        self.assertEqual(repeated_start.returncode, 0, repeated_start.stderr)
+        self.assertEqual(self.matching_process_ids(self.command_ros_process), original_process_ids)
+
+        stopped = self.command('command_ros_stop.sh')
+        self.assertEqual(stopped.returncode, 0, stopped.stderr)
+        self.wait_for_no_processes(self.command_ros_process)
+        self.assertIsNone(other_api.poll())
+
     def test_combined_start_and_stop_delegate_to_the_independent_scripts(self):
         started = self.command('vehicle_communication_start.sh')
         self.assertEqual(started.returncode, 0, started.stderr)
         self.wait_for_processes(self.foxglove_process)
-        self.wait_for_processes(self.command_api_process)
+        self.wait_for_processes(self.command_ros_process)
 
         stopped = self.command('vehicle_communication_stop.sh')
         self.assertEqual(stopped.returncode, 0, stopped.stderr)
         self.wait_for_no_processes(self.foxglove_process)
-        self.wait_for_no_processes(self.command_api_process)
+        self.wait_for_no_processes(self.command_ros_process)
 
     def test_stop_scripts_succeed_when_their_service_is_not_running(self):
-        for name in ('foxglove_stop.sh', 'command_api_stop.sh', 'vehicle_communication_stop.sh'):
+        for name in (
+            'foxglove_stop.sh',
+            'command_api_stop.sh',
+            'command_ros_stop.sh',
+            'vehicle_communication_stop.sh',
+        ):
             stopped = self.command(name)
             self.assertEqual(stopped.returncode, 0, stopped.stderr)
 

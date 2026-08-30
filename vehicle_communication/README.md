@@ -21,8 +21,8 @@ API를 검증하기 위해 실행하지 않는다.
 
 ## 실행
 
-차량에는 이 디렉터리 전체를 `/opt/vehicle_communication`으로 배포한다. 차량별 설정은
-`runtime.env`에서만 바꾼다.
+기본 실행 방식은 이 디렉터리를 차량 ROS 2 workspace의 `src` 아래에 둔 뒤
+`ros2 run`으로 실행하는 것이다. 차량별 설정은 `runtime.env`에서만 바꾼다.
 
 ```dotenv
 VEHICLE_ROBOT_ID=robot_2
@@ -63,29 +63,34 @@ curl -i -X POST http://127.0.0.1:8082/v1/cmd-vel \
 
 성공 기준은 HTTP `202`, 비영(非零) `Twist` 한 건, 500 ms 뒤의 0속도 `Twist` 한 건이다.
 
-실행 스크립트는 ROS 2 setup 파일을 직접 `source`하지 않는다. 실행 전 사용하는
-셸에서 `.zshrc`를 통해 ROS 2 환경을 준비해야 한다.
+`command_ros_start.sh`는 호출한 셸의 ROS 2 환경을 그대로 상속해
+`ros2 run vehicle_command_api vehicle_command_api`를 백그라운드 실행한다. 실행 전에
+`.zshrc` 등에서 ROS 2 underlay와 해당 workspace의 `install/setup.*`을 source해야 한다.
 
 ```bash
-cd /opt/vehicle_communication
+cd /home/ubuntu/ros2_ws/src/vehicle_communication
 chmod +x tools/*.sh
 
 # 각각 독립 실행 및 정지
 ./tools/foxglove_start.sh
 ./tools/foxglove_stop.sh
-./tools/command_api_start.sh
-./tools/command_api_stop.sh
+./tools/command_ros_start.sh
+./tools/command_ros_stop.sh
 
 # 두 서비스를 함께 실행 및 정지
 ./tools/vehicle_communication_start.sh
 ./tools/vehicle_communication_stop.sh
+
+# 레거시: 패키지 설치 없이 Python 파일을 직접 실행할 때만 사용
+./tools/command_api_start.sh
+./tools/command_api_stop.sh
 ```
 
 각 start 스크립트는 `ps` 명령으로 자기 서비스의 실제 명령행을 조회한다. Foxglove는
-launch 명령과 `FOXGLOVE_PORT`, Command API는 이 번들의 절대 파일 경로를 함께
-비교한다. 이미 실행 중이면 새 프로세스를 만들지 않고 종료한다. stop 스크립트도
-같은 기준으로 찾아 `SIGTERM`을 전송한다. 통합 정지 스크립트는 API를 먼저 종료한
-뒤 Bridge를 종료한다.
+launch 명령과 `FOXGLOVE_PORT`, ROS Command API는 `ros2 run` 명령·로봇 ID·API port를
+함께 비교한다. 이미 실행 중이면 새 프로세스를 만들지 않고 종료한다. stop 스크립트도
+같은 기준으로 찾아 `SIGTERM`을 전송한다. 통합 시작·종료 스크립트는 ROS Command API를
+기본으로 사용하며, 종료 시 API를 먼저 종료한 뒤 Bridge를 종료한다.
 
 Foxglove Bridge의 허용 topic, QoS, 서비스/파라미터 차단, 압축 설정은
 `tools/foxglove_start.sh`에 고정되어 있다. 변경이 필요하면 해당 스크립트를
@@ -95,6 +100,7 @@ Foxglove Bridge의 허용 topic, QoS, 서비스/파라미터 차단, 압축 설�
 
 ```text
 ~/log/foxglove_bridge
+~/log/vehicle_command_ros
 ~/log/vehicle_command_api
 ```
 
