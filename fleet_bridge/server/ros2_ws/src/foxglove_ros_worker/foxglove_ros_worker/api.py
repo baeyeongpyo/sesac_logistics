@@ -200,7 +200,9 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
                     'application/json': {
                         'example': {
                             'operation_id': '1c3e8b56-7c4d-4d9e-98ac-ced38f8c8a58',
-                            'state': 'NAVIGATING',
+                            'previous_operation_id': '73d5b9af-5a12-4f34-a96c-5de116df1e8e',
+                            'state': 'DRIVE',
+                            'previous_state': 'IDLE',
                             'detail': 'NAVIGATION_GOAL_ACCEPTED',
                         },
                     },
@@ -231,8 +233,10 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
                             },
                             'operation': {
                                 'operation_id': None,
+                                'previous_operation_id': '73d5b9af-5a12-4f34-a96c-5de116df1e8e',
                                 'state': 'IDLE',
-                                'detail': 'READY',
+                                'previous_state': 'CANCELLED',
+                                'detail': 'OPERATOR_READY',
                             },
                         },
                     },
@@ -243,6 +247,49 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
     )
     async def vehicle_status(robot_id: RobotId) -> JSONResponse:
         return await relay_vehicle_command(robot_id, 'GET', '/v1/vehicle-status')
+
+    @app.post(
+        '/api/v1/vehicle-command/{robot_id}/operation/idle',
+        tags=['vehicle-command relay'],
+        summary='차량 작업 가능 상태 전환 전달',
+        description=(
+            '초기 위치와 안전 상태를 확인한 뒤 차량을 `INIT`, `CANCELLED`, 또는 `FAILED`에서 '
+            '`IDLE`로 전환하는 명시적 운영자 확인 요청을 전달합니다.'
+        ),
+        responses={
+            200: {
+                'description': '차량이 작업 가능 상태로 전환되었습니다.',
+                'content': {
+                    'application/json': {
+                        'example': {
+                            'operation_id': None,
+                            'previous_operation_id': '73d5b9af-5a12-4f34-a96c-5de116df1e8e',
+                            'state': 'IDLE',
+                            'previous_state': 'FAILED',
+                            'detail': 'OPERATOR_READY',
+                        },
+                    },
+                },
+            },
+            409: {'description': '차량이 활성 작업 중이거나 적재 상태여서 IDLE 전환을 거부했습니다.'},
+            422: {'description': '차량이 운영자 확인 요청 형식을 거부했습니다.'},
+            **_relay_error_responses(),
+        },
+    )
+    async def vehicle_operation_idle(
+        robot_id: RobotId,
+        payload: Any = Body(
+            default=None,
+            description='차량-native 작업 가능 상태 전환 요청입니다.',
+            openapi_examples={
+                'sample': {
+                    'summary': '운영자 작업 허가',
+                    'value': {'reason': 'OPERATOR_CONFIRMED'},
+                },
+            },
+        ),
+    ) -> JSONResponse:
+        return await relay_vehicle_command(robot_id, 'POST', '/v1/operation/idle', payload)
 
     @app.post(
         '/api/v1/vehicle-command/{robot_id}/cmd-vel',
@@ -295,8 +342,8 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
         tags=['vehicle-command relay'],
         summary='Nav2 목표 주행 요청 전달',
         description=(
-            '선택한 차량의 Nav2에 map 좌표계 목표를 전달합니다. 차량이 생성한 '
-            '`operation_id`로 이후 취소 또는 상태 조회 대상을 지정할 수 있습니다.'
+            '선택한 차량의 Nav2에 map 좌표계 목표를 전달합니다. 물류 작업은 Inventory 또는 '
+            '중앙 서버가 만든 `operation_id`를 함께 보내며, 차량은 이를 내부 Nav2 attempt와 분리합니다.'
         ),
         responses={
             202: {
@@ -305,7 +352,8 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
                     'application/json': {
                         'example': {
                             'operation_id': '1c3e8b56-7c4d-4d9e-98ac-ced38f8c8a58',
-                            'state': 'NAVIGATING',
+                            'attempt_id': '4a01a8cf-ea1f-4b83-bceb-1f7f42d769be',
+                            'state': 'DRIVE',
                         },
                     },
                 },
@@ -324,6 +372,7 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
                 'sample': {
                     'summary': 'map 좌표계 목표 주행',
                     'value': {
+                        'operation_id': '73d5b9af-5a12-4f34-a96c-5de116df1e8e',
                         'frame_id': 'map',
                         'x': 1.5,
                         'y': 0.0,
@@ -341,6 +390,52 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
         )
 
     @app.post(
+        '/api/v1/vehicle-command/{robot_id}/auto-dock',
+        tags=['vehicle-command relay'],
+        summary='차량 Auto Dock Pick·Place 요청 전달',
+        description=(
+            'Nav2 주행 완료 뒤 차량의 Auto Dock arrival topic으로 Pick 또는 Place 명령을 전달합니다. '
+            'Fleet Manager는 차량-native payload를 변경하지 않으며, 완료는 차량의 drive_ready 상태를 기준으로 합니다.'
+        ),
+        responses={
+            202: {
+                'description': '차량이 Auto Dock 명령을 수락했습니다.',
+                'content': {
+                    'application/json': {
+                        'example': {
+                            'operation_id': '73d5b9af-5a12-4f34-a96c-5de116df1e8e',
+                            'state': 'PICKING',
+                        },
+                    },
+                },
+            },
+            409: {'description': '차량 상태가 요청한 Pick 또는 Place 작업을 수락할 수 없습니다.'},
+            422: {'description': '차량이 Auto Dock 요청 형식을 거부했습니다.'},
+            **_relay_error_responses(),
+        },
+    )
+    async def vehicle_auto_dock(
+        robot_id: RobotId,
+        payload: Any = Body(
+            default=None,
+            description='차량-native Auto Dock arrival 요청입니다.',
+            openapi_examples={
+                'sample': {
+                    'summary': 'Pick 작업 시작',
+                    'value': {
+                        'operation_id': '73d5b9af-5a12-4f34-a96c-5de116df1e8e',
+                        'operation': 'PICK',
+                        'product_type': 'NORMAL',
+                        'location': 'DOCK_1',
+                        'target': {'type': 'NEAREST'},
+                    },
+                },
+            },
+        ),
+    ) -> JSONResponse:
+        return await relay_vehicle_command(robot_id, 'POST', '/v1/auto-dock', payload)
+
+    @app.post(
         '/api/v1/vehicle-command/{robot_id}/navigation/cancel',
         tags=['vehicle-command relay'],
         summary='Nav2 주행 취소 요청 전달',
@@ -355,7 +450,7 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
                     'application/json': {
                         'example': {
                             'operation_id': '1c3e8b56-7c4d-4d9e-98ac-ced38f8c8a58',
-                            'state': 'CANCELLING',
+                            'state': 'CANCELLED',
                         },
                     },
                 },
@@ -394,7 +489,8 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
         summary='AMCL 초기 위치 설정 전달',
         description=(
             '선택한 차량의 AMCL 초기 위치를 설정합니다. 차량이 Nav2 또는 수동 주행 중이면 '
-            '차량이 409로 거부하므로, 호출자가 먼저 별도 stop을 성공시켜야 합니다.'
+            '차량이 409로 거부하므로, 호출자가 먼저 별도 stop을 성공시켜야 합니다. 초기 위치 발행만으로 '
+            '차량 상태는 IDLE이 되지 않으며 별도 operation/idle 요청이 필요합니다.'
         ),
         responses={
             202: {
@@ -448,7 +544,7 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
         summary='즉시 정지 요청 전달',
         description=(
             '선택한 차량에 요청 본문 없이 즉시 정지를 전달합니다. 차량은 속도 0을 우선 적용하고 '
-            '활성 Nav2 작업이 있으면 취소를 함께 요청하며 자동 재개하지 않습니다.'
+            '활성 Nav2 또는 Auto Dock 작업이 있으면 취소를 함께 요청하며 자동 재개하지 않습니다.'
         ),
         responses={
             200: {
@@ -457,7 +553,7 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
                     'application/json': {
                         'example': {
                             'operation_id': '1c3e8b56-7c4d-4d9e-98ac-ced38f8c8a58',
-                            'state': 'STOPPED',
+                            'state': 'CANCELLED',
                             'cancel_requested': True,
                         },
                     },

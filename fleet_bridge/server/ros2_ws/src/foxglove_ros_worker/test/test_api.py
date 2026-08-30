@@ -76,16 +76,27 @@ class CommandApiTest(unittest.TestCase):
             ('GET', '/openapi.json', None, '/openapi.json'),
             ('GET', '/operation-status', None, '/v1/operation-status'),
             ('GET', '/vehicle-status', None, '/v1/vehicle-status'),
+            ('POST', '/operation/idle', {
+                'reason': 'OPERATOR_CONFIRMED',
+            }, '/v1/operation/idle'),
             ('POST', '/cmd-vel', {
                 'linear_x': 0.1,
                 'angular_z': 0.0,
                 'hold_ms': 300,
             }, '/v1/cmd-vel'),
             ('POST', '/navigation/goals', {
+                'operation_id': '73d5b9af-5a12-4f34-a96c-5de116df1e8e',
                 'x': 1.5,
                 'y': 0.0,
                 'yaw': 0.0,
             }, '/v1/navigation/goals'),
+            ('POST', '/auto-dock', {
+                'operation_id': '73d5b9af-5a12-4f34-a96c-5de116df1e8e',
+                'operation': 'PICK',
+                'product_type': 'NORMAL',
+                'location': 'DOCK_1',
+                'target': {'type': 'NEAREST'},
+            }, '/v1/auto-dock'),
             ('POST', '/navigation/cancel', {
                 'operation_id': 'vehicle-generated',
             }, '/v1/navigation/cancel'),
@@ -194,8 +205,10 @@ class CommandApiTest(unittest.TestCase):
         self.assertIn('/api/v1/vehicle-command/{robot_id}/openapi.json', schema['paths'])
         self.assertIn('/api/v1/vehicle-command/{robot_id}/operation-status', schema['paths'])
         self.assertIn('/api/v1/vehicle-command/{robot_id}/vehicle-status', schema['paths'])
+        self.assertIn('/api/v1/vehicle-command/{robot_id}/operation/idle', schema['paths'])
         self.assertIn('/api/v1/vehicle-command/{robot_id}/cmd-vel', schema['paths'])
         self.assertIn('/api/v1/vehicle-command/{robot_id}/navigation/goals', schema['paths'])
+        self.assertIn('/api/v1/vehicle-command/{robot_id}/auto-dock', schema['paths'])
         self.assertIn('/api/v1/vehicle-command/{robot_id}/navigation/cancel', schema['paths'])
         self.assertIn('/api/v1/vehicle-command/{robot_id}/localization/initial-pose', schema['paths'])
         self.assertIn('/api/v1/vehicle-command/{robot_id}/stop', schema['paths'])
@@ -226,10 +239,21 @@ class CommandApiTest(unittest.TestCase):
                 'hold_ms': 500,
             },
             '/navigation/goals': {
+                'operation_id': '73d5b9af-5a12-4f34-a96c-5de116df1e8e',
                 'frame_id': 'map',
                 'x': 1.5,
                 'y': 0.0,
                 'yaw': 0.0,
+            },
+            '/operation/idle': {
+                'reason': 'OPERATOR_CONFIRMED',
+            },
+            '/auto-dock': {
+                'operation_id': '73d5b9af-5a12-4f34-a96c-5de116df1e8e',
+                'operation': 'PICK',
+                'product_type': 'NORMAL',
+                'location': 'DOCK_1',
+                'target': {'type': 'NEAREST'},
             },
             '/navigation/cancel': {
                 'operation_id': '1c3e8b56-7c4d-4d9e-98ac-ced38f8c8a58',
@@ -259,7 +283,7 @@ class CommandApiTest(unittest.TestCase):
             stop['responses']['200']['content']['application/json']['example'],
             {
                 'operation_id': '1c3e8b56-7c4d-4d9e-98ac-ced38f8c8a58',
-                'state': 'STOPPED',
+                'state': 'CANCELLED',
                 'cancel_requested': True,
             },
         )
@@ -269,7 +293,9 @@ class CommandApiTest(unittest.TestCase):
             operation_status['responses']['200']['content']['application/json']['example'],
             {
                 'operation_id': '1c3e8b56-7c4d-4d9e-98ac-ced38f8c8a58',
-                'state': 'NAVIGATING',
+                'previous_operation_id': '73d5b9af-5a12-4f34-a96c-5de116df1e8e',
+                'state': 'DRIVE',
+                'previous_state': 'IDLE',
                 'detail': 'NAVIGATION_GOAL_ACCEPTED',
             },
         )
