@@ -16,6 +16,7 @@ import uuid
 
 PACKAGE = Path(__file__).resolve().parents[1]
 SCRIPT = PACKAGE / 'vehicle_command_api.py'
+INVENTORY_OPERATION_ID = '73d5b9af-5a12-4f34-a96c-5de116df1e8e'
 
 
 def load_server_module():
@@ -82,6 +83,18 @@ class RecordingInitialPose:
         self.messages.append((pose, position_variance, yaw_variance))
 
 
+class RecordingAutoDock:
+    def __init__(self):
+        self.arrival_messages = []
+        self.stop_requests = 0
+
+    def publish_arrival(self, payload):
+        self.arrival_messages.append(payload)
+
+    def stop(self):
+        self.stop_requests += 1
+
+
 class ClosingFakeAdapter(FakeNavigation, RecordingVelocity):
     def __init__(self):
         FakeNavigation.__init__(self)
@@ -130,10 +143,12 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         self.velocity = RecordingVelocity()
         self.navigation = FakeNavigation()
         self.initial_pose_publisher = RecordingInitialPose()
+        self.auto_dock = RecordingAutoDock()
         self.service = self.module.VehicleCommandService(
             velocity=self.velocity,
             navigation=self.navigation,
             initial_pose=self.initial_pose_publisher,
+            auto_dock=self.auto_dock,
             max_linear_x=0.10,
             max_angular_z=0.50,
             max_hold_ms=1000,
@@ -157,15 +172,18 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         with urlopen(f'{self.base_url}{path}', timeout=2) as response:
             return response.status, json.load(response)
 
-    def navigation_goal(self):
+    def navigation_goal(self, operation_id=None):
         _, operation = self.get_json('/v1/operation-status')
         if operation['state'] == 'INIT':
             idle_status, idle = self.mark_idle()
             self.assertEqual(idle_status, 200)
             self.assertEqual(idle['state'], 'IDLE')
+        payload = {'frame_id': 'map', 'x': 1.50, 'y': 0.0, 'yaw': 0.0}
+        if operation_id is not None:
+            payload['operation_id'] = operation_id
         return post_json(
             f'{self.base_url}/v1/navigation/goals',
-            {'frame_id': 'map', 'x': 1.50, 'y': 0.0, 'yaw': 0.0},
+            payload,
         )
 
     def initial_pose(self):
@@ -178,6 +196,18 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         return post_json(
             f'{self.base_url}/v1/operation/idle',
             {'reason': 'OPERATOR_CONFIRMED'},
+        )
+
+    def auto_dock_command(self, operation, operation_id=INVENTORY_OPERATION_ID):
+        return post_json(
+            f'{self.base_url}/v1/auto-dock',
+            {
+                'operation_id': operation_id,
+                'operation': operation,
+                'product_type': 'NORMAL',
+                'location': 'DOCK_1',
+                'target': {'type': 'NEAREST'},
+            },
         )
 
     def test_startup_stays_init_until_operator_marks_idle(self):
@@ -202,7 +232,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
     def test_failed_operation_keeps_current_id_until_idle_is_explicit(self):
         """Failure must retain the server operation ID until an operator clears it."""
         _, goal = self.navigation_goal()
-        self.navigation.complete(goal['operation_id'], 'FAILED')
+        self.navigation.complete(goal['attempt_id'], 'FAILED')
 
         _, failed = self.get_json('/v1/operation-status')
         idle_status, idle = self.mark_idle()
@@ -221,6 +251,109 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             'state': 'IDLE',
             'previous_state': 'FAILED',
             'detail': 'OPERATOR_READY',
+        })
+
+    def test_inventory_operation_id_uses_a_distinct_nav2_attempt(self):
+        """One Inventory workflow ID may be retried through different Nav2 attempts."""
+        _, drive = self.navigation_goal(INVENTORY_OPERATION_ID)
+
+        self.assertEqual(drive, {
+            'operation_id': INVENTORY_OPERATION_ID,
+            'attempt_id': drive['attempt_id'],
+            'state': 'DRIVE',
+        })
+        self.assertNotEqual(drive['attempt_id'], INVENTORY_OPERATION_ID)
+        self.assertIsInstance(uuid.UUID(drive['attempt_id']), uuid.UUID)
+        self.assertEqual(self.navigation.goals, [(
+            drive['attempt_id'],
+            {'frame_id': 'map', 'x': 1.5, 'y': 0.0, 'yaw': 0.0},
+        )])
+        self.navigation.complete(drive['attempt_id'], 'COMPLETED')
+        _, operation_status = self.get_json('/v1/operation-status')
+        self.assertEqual(operation_status['previous_operation_id'], INVENTORY_OPERATION_ID)
+
+    def test_auto_dock_uses_drive_ready_not_ready_status_for_pick_completion(self):
+        """Auto Dock READY is not complete until its drive_ready event arrives."""
+        self.mark_idle()
+        status, response = self.auto_dock_command('PICK')
+
+        self.assertEqual(status, 202)
+        self.assertEqual(response, {
+            'operation_id': INVENTORY_OPERATION_ID,
+            'state': 'PICKING',
+        })
+        self.assertEqual(self.auto_dock.arrival_messages, [{
+            'status': 'SUCCEEDED',
+            'location': 'DOCK_1',
+            'operation': 'PICK',
+            'product_type': 'NORMAL',
+            'target': {'type': 'NEAREST'},
+        }])
+        self.service.on_auto_dock_status({'state': 'READY', 'operation': 'PICK'})
+        self.assertEqual(self.service.operation_status()['state'], 'PICKING')
+        self.service.on_auto_dock_drive_ready()
+        self.assertEqual(self.service.operation_status(), {
+            'operation_id': INVENTORY_OPERATION_ID,
+            'previous_operation_id': None,
+            'state': 'PICK_COMPLETE',
+            'previous_state': 'PICKING',
+            'detail': 'AUTO_DOCK_PICK_COMPLETED',
+        })
+
+    def test_auto_dock_place_completion_returns_to_idle(self):
+        """Place completion is reported before the snapshot is cleared to IDLE."""
+        self.mark_idle()
+        self.auto_dock_command('PICK')
+        self.service.on_auto_dock_drive_ready()
+        self.auto_dock_command('PLACE')
+        self.service.on_auto_dock_drive_ready()
+
+        self.assertEqual(self.service.operation_status(), {
+            'operation_id': None,
+            'previous_operation_id': INVENTORY_OPERATION_ID,
+            'state': 'IDLE',
+            'previous_state': 'PLACE_COMPLETE',
+            'detail': 'AUTO_DOCK_PLACE_COMPLETED',
+        })
+
+    def test_auto_dock_error_keeps_operation_for_operator_recovery(self):
+        """Dock errors must retain the Inventory operation until explicit recovery."""
+        self.mark_idle()
+        self.auto_dock_command('PICK')
+        self.service.on_auto_dock_status({
+            'state': 'ERROR',
+            'reason': 'fork_failed',
+            'operation': 'PICK',
+        })
+
+        self.assertEqual(self.service.operation_status(), {
+            'operation_id': INVENTORY_OPERATION_ID,
+            'previous_operation_id': None,
+            'state': 'FAILED',
+            'previous_state': 'PICKING',
+            'detail': 'AUTO_DOCK_ERROR:fork_failed',
+        })
+
+    def test_stop_cancels_auto_dock_through_its_stop_topic(self):
+        """A stop command must signal the running Auto Dock FSM before cancellation."""
+        self.mark_idle()
+        self.auto_dock_command('PICK')
+
+        status, response = post_json(f'{self.base_url}/v1/stop', {})
+
+        self.assertEqual(status, 200)
+        self.assertEqual(self.auto_dock.stop_requests, 1)
+        self.assertEqual(response, {
+            'operation_id': INVENTORY_OPERATION_ID,
+            'state': 'CANCELLED',
+            'cancel_requested': True,
+        })
+        self.assertEqual(self.service.operation_status(), {
+            'operation_id': INVENTORY_OPERATION_ID,
+            'previous_operation_id': None,
+            'state': 'CANCELLED',
+            'previous_state': 'PICKING',
+            'detail': 'STOP_REQUESTED',
         })
 
     def test_health_openapi_and_operation_status_are_discoverable(self):
@@ -243,6 +376,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
                 '/v1/operation/idle',
                 '/v1/cmd-vel',
                 '/v1/navigation/goals',
+                '/v1/auto-dock',
                 '/v1/navigation/cancel',
                 '/v1/localization/initial-pose',
                 '/v1/stop',
@@ -350,8 +484,10 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         self.assertEqual(body['state'], 'DRIVE')
         operation_id = body['operation_id']
         self.assertIsInstance(uuid.UUID(operation_id), uuid.UUID)
+        self.assertIsInstance(uuid.UUID(body['attempt_id']), uuid.UUID)
+        self.assertNotEqual(body['attempt_id'], operation_id)
         self.assertEqual(self.navigation.goals, [(
-            operation_id,
+            body['attempt_id'],
             {'frame_id': 'map', 'x': 1.5, 'y': 0.0, 'yaw': 0.0},
         )])
         _, operation_status = self.get_json('/v1/operation-status')
@@ -366,7 +502,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
     def test_navigation_terminal_result_updates_the_current_operation_status(self):
         """Dropping Nav2 terminal callbacks must fail status monitoring."""
         _, body = self.navigation_goal()
-        self.navigation.complete(body['operation_id'], 'COMPLETED')
+        self.navigation.complete(body['attempt_id'], 'COMPLETED')
 
         status, operation_status = self.get_json('/v1/operation-status')
 
@@ -393,7 +529,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             'operation_id': body['operation_id'],
             'state': 'CANCELLED',
         })
-        self.assertEqual(self.navigation.cancel_requests, [body['operation_id']])
+        self.assertEqual(self.navigation.cancel_requests, [body['attempt_id']])
         self.assertEqual(operation_status, {
             'operation_id': body['operation_id'],
             'previous_operation_id': None,
@@ -419,7 +555,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             'cancel_requested': False,
         })
         self.assertEqual(self.velocity.messages[-1], (0.0, 0.0))
-        self.assertEqual(self.navigation.cancel_requests, [body['operation_id']])
+        self.assertEqual(self.navigation.cancel_requests, [body['attempt_id']])
         _, operation_status = self.get_json('/v1/operation-status')
         self.assertEqual(operation_status, {
             'operation_id': body['operation_id'],
@@ -541,7 +677,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
 
         self.assertEqual(status, 202)
         self.assertEqual(response['state'], 'MANUAL')
-        self.assertEqual(self.navigation.cancel_requests, [body['operation_id']])
+        self.assertEqual(self.navigation.cancel_requests, [body['attempt_id']])
         _, operation_status = self.get_json('/v1/operation-status')
         self.assertEqual(operation_status, {
             'operation_id': body['operation_id'],
@@ -571,6 +707,8 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             '--battery-topic', '--battery-stale-sec',
             '--initial-pose-topic', '--initial-pose-position-variance',
             '--initial-pose-yaw-variance',
+            '--auto-dock-arrival-topic', '--auto-dock-status-topic',
+            '--auto-dock-stop-topic', '--auto-dock-drive-ready-topic',
             '--max-linear-x', '--max-angular-z', '--max-hold-ms',
             '--action-server-timeout-sec', '--goal-response-timeout-sec',
             '--cancel-response-timeout-sec',
@@ -596,6 +734,10 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             initial_pose_topic='/initialpose',
             initial_pose_position_variance=0.25,
             initial_pose_yaw_variance=0.0685,
+            auto_dock_arrival_topic=None,
+            auto_dock_status_topic=None,
+            auto_dock_stop_topic=None,
+            auto_dock_drive_ready_topic=None,
             max_linear_x=0.10,
             max_angular_z=0.50,
             max_hold_ms=1000,
@@ -635,6 +777,10 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             initial_pose_topic='/initialpose',
             initial_pose_position_variance=0.25,
             initial_pose_yaw_variance=0.0685,
+            auto_dock_arrival_topic=None,
+            auto_dock_status_topic=None,
+            auto_dock_stop_topic=None,
+            auto_dock_drive_ready_topic=None,
             max_linear_x=0.10,
             max_angular_z=0.50,
             max_hold_ms=1000,
@@ -679,6 +825,10 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             initial_pose_topic='/initialpose',
             initial_pose_position_variance=0.25,
             initial_pose_yaw_variance=0.0685,
+            auto_dock_arrival_topic=None,
+            auto_dock_status_topic=None,
+            auto_dock_stop_topic=None,
+            auto_dock_drive_ready_topic=None,
             max_linear_x=0.10,
             max_angular_z=0.50,
             max_hold_ms=1000,
@@ -689,18 +839,28 @@ class VehicleCommandApiCliTest(unittest.TestCase):
         captured = {}
 
         def construct_adapter(
+            robot_id,
             cmd_vel_topic,
             action_name,
             action_server_timeout_sec,
             goal_response_timeout_sec,
             cancel_response_timeout_sec,
+            auto_dock_arrival_topic,
+            auto_dock_status_topic,
+            auto_dock_stop_topic,
+            auto_dock_drive_ready_topic,
         ):
             captured.update({
+                'robot_id': robot_id,
                 'cmd_vel_topic': cmd_vel_topic,
                 'action_name': action_name,
                 'action_server_timeout_sec': action_server_timeout_sec,
                 'goal_response_timeout_sec': goal_response_timeout_sec,
                 'cancel_response_timeout_sec': cancel_response_timeout_sec,
+                'auto_dock_arrival_topic': auto_dock_arrival_topic,
+                'auto_dock_status_topic': auto_dock_status_topic,
+                'auto_dock_stop_topic': auto_dock_stop_topic,
+                'auto_dock_drive_ready_topic': auto_dock_drive_ready_topic,
             })
             return adapter
 
@@ -717,11 +877,16 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             self.module.RosVehicleAdapter = original_adapter
 
         self.assertEqual(captured, {
+            'robot_id': 'robot_2',
             'cmd_vel_topic': '/cmd_vel',
             'action_name': '/navigate_to_pose',
             'action_server_timeout_sec': 1.0,
             'goal_response_timeout_sec': 3.0,
             'cancel_response_timeout_sec': 3.0,
+            'auto_dock_arrival_topic': None,
+            'auto_dock_status_topic': None,
+            'auto_dock_stop_topic': None,
+            'auto_dock_drive_ready_topic': None,
         })
 
 

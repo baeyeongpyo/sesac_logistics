@@ -87,6 +87,7 @@ class VehicleCommandService:
         max_angular_z,
         max_hold_ms,
         initial_pose=None,
+        auto_dock=None,
         initial_pose_position_variance=0.25,
         initial_pose_yaw_variance=0.0685,
         vehicle_status=None,
@@ -99,6 +100,7 @@ class VehicleCommandService:
         if initial_pose_position_variance <= 0 or initial_pose_yaw_variance <= 0:
             raise ValueError('initial pose covariance variances must be greater than zero')
         self._initial_pose_publisher = initial_pose
+        self._auto_dock = auto_dock
         self._initial_pose_position_variance = initial_pose_position_variance
         self._initial_pose_yaw_variance = initial_pose_yaw_variance
         self._vehicle_status = vehicle_status or VehicleStatus('unknown', 3.0)
@@ -106,8 +108,11 @@ class VehicleCommandService:
         self._manual_timer = None
         self._manual_generation = 0
         self._active_navigation_operation = None
+        self._active_navigation_attempt = None
+        self._navigation_origin_state = None
         self._manual_restore_status = None
         self._auto_dock_active = False
+        self._auto_dock_operation = None
         self._status = {
             'operation_id': None,
             'previous_operation_id': None,
@@ -167,8 +172,11 @@ class VehicleCommandService:
 
         with self._lock:
             active_operation = self._active_navigation_operation
+            active_attempt = self._active_navigation_attempt
+            if self._auto_dock_active:
+                raise OperationConflictError('AUTO_DOCK_ACTIVE')
         if active_operation is not None:
-            response = self.navigation.cancel(active_operation)
+            response = self.navigation.cancel(active_attempt)
             if not response.get('accepted'):
                 raise NavigationCancelError(response.get('error', 'NAVIGATION_CANCEL_REJECTED'))
 
@@ -178,6 +186,8 @@ class VehicleCommandService:
                 and active_operation == self._active_navigation_operation
             ):
                 self._active_navigation_operation = None
+                self._active_navigation_attempt = None
+                self._navigation_origin_state = None
                 self._set_status(
                     active_operation,
                     'CANCELLED',
@@ -211,40 +221,143 @@ class VehicleCommandService:
         }
 
     def navigation_goal(self, payload):
-        goal = self._goal(payload)
-        operation_id = str(uuid.uuid4())
+        goal = self._goal(payload, {'operation_id'})
+        operation_id = self._operation_id(payload.get('operation_id'))
+        attempt_id = str(uuid.uuid4())
 
         with self._lock:
-            if self._status['state'] not in {'IDLE', 'PICK_COMPLETE'}:
+            origin_state = self._status['state']
+            if origin_state not in {'IDLE', 'PICK_COMPLETE'}:
                 raise OperationConflictError('OPERATION_NOT_READY_FOR_DRIVE')
+            if (
+                origin_state == 'PICK_COMPLETE'
+                and operation_id != self._status['operation_id']
+            ):
+                raise OperationConflictError('OPERATION_ID_MISMATCH')
             self._cancel_manual_timer()
             self._manual_generation += 1
             self._active_navigation_operation = operation_id
+            self._active_navigation_attempt = attempt_id
+            self._navigation_origin_state = origin_state
             self._manual_restore_status = None
             self._set_status(
                 operation_id,
                 'DRIVE',
                 'NAVIGATION_GOAL_ACCEPTED',
-                self._status['state'],
+                origin_state,
             )
 
         try:
-            response = self.navigation.submit_goal(operation_id, goal, self._on_navigation_terminal)
+            response = self.navigation.submit_goal(attempt_id, goal, self._on_navigation_terminal)
         except NavigationUnavailableError:
             response = {'accepted': False, 'error': 'NAVIGATION_SERVER_UNAVAILABLE'}
 
         if not response.get('accepted'):
             detail = response.get('error', 'NAVIGATION_GOAL_REJECTED')
             with self._lock:
-                if self._active_navigation_operation == operation_id:
+                if self._active_navigation_attempt == attempt_id:
                     self._active_navigation_operation = None
+                    self._active_navigation_attempt = None
+                    self._navigation_origin_state = None
                     self._set_status(operation_id, 'FAILED', detail, 'DRIVE')
             raise NavigationUnavailableError(detail)
 
         return {
             'operation_id': operation_id,
+            'attempt_id': attempt_id,
             'state': 'DRIVE',
         }
+
+    def auto_dock_command(self, payload):
+        command = self._auto_dock_payload(payload)
+        with self._lock:
+            state = self._status['state']
+            expected_state = 'IDLE' if command['operation'] == 'PICK' else 'PICK_COMPLETE'
+            if state != expected_state:
+                raise OperationConflictError('OPERATION_NOT_READY_FOR_AUTO_DOCK')
+            if (
+                command['operation'] == 'PLACE'
+                and command['operation_id'] != self._status['operation_id']
+            ):
+                raise OperationConflictError('OPERATION_ID_MISMATCH')
+            if self._auto_dock is None:
+                raise NavigationUnavailableError('AUTO_DOCK_PUBLISHER_UNAVAILABLE')
+            self._auto_dock.publish_arrival({
+                'status': 'SUCCEEDED',
+                'location': command['location'],
+                'operation': command['operation'],
+                'product_type': command['product_type'],
+                'target': command['target'],
+            })
+            self._auto_dock_active = True
+            self._auto_dock_operation = command['operation']
+            self._set_status(
+                command['operation_id'],
+                'PICKING' if command['operation'] == 'PICK' else 'PLACE',
+                'AUTO_DOCK_COMMAND_ACCEPTED',
+                state,
+            )
+        return {
+            'operation_id': command['operation_id'],
+            'state': 'PICKING' if command['operation'] == 'PICK' else 'PLACE',
+        }
+
+    def on_auto_dock_status(self, payload):
+        if not isinstance(payload, dict):
+            return
+        raw_state = str(payload.get('state', '')).strip().upper()
+        reason = str(payload.get('reason', '')).strip()
+        with self._lock:
+            if not self._auto_dock_active:
+                return
+            if raw_state == 'ERROR' or self._auto_dock_rejected(raw_state, reason):
+                operation_id = self._status['operation_id']
+                previous_state = self._status['state']
+                self._auto_dock_active = False
+                self._auto_dock_operation = None
+                detail = 'AUTO_DOCK_ERROR'
+                if reason:
+                    detail = f'{detail}:{reason}'
+                self._set_status(operation_id, 'FAILED', detail, previous_state)
+                return
+            if raw_state in {
+                'SEARCHING', 'ALIGNING', 'INSERTING', 'WAIT_UP_COMPLETE',
+                'WAIT_DOWN_COMPLETE', 'REVERSING', 'TURNING',
+            }:
+                detail = f'AUTO_DOCK_{raw_state}'
+                if reason:
+                    detail = f'{detail}:{reason}'
+                self._set_status(
+                    self._status['operation_id'],
+                    self._status['state'],
+                    detail,
+                    self._status['previous_state'],
+                )
+
+    def on_auto_dock_drive_ready(self):
+        with self._lock:
+            if not self._auto_dock_active:
+                return
+            operation_id = self._status['operation_id']
+            operation = self._auto_dock_operation
+            previous_state = self._status['state']
+            self._auto_dock_active = False
+            self._auto_dock_operation = None
+            if operation == 'PICK':
+                self._set_status(
+                    operation_id,
+                    'PICK_COMPLETE',
+                    'AUTO_DOCK_PICK_COMPLETED',
+                    previous_state,
+                )
+                return
+            self._set_status(
+                operation_id,
+                'PLACE_COMPLETE',
+                'AUTO_DOCK_PLACE_COMPLETED',
+                previous_state,
+            )
+            self._complete_to_idle('AUTO_DOCK_PLACE_COMPLETED', 'PLACE_COMPLETE')
 
     def navigation_cancel(self, payload):
         self._validate_fields(payload, {'operation_id'})
@@ -253,16 +366,19 @@ class VehicleCommandService:
             raise CommandValidationError('operation_id must be a string')
         with self._lock:
             active_operation = self._active_navigation_operation
+            active_attempt = self._active_navigation_attempt
         operation_id = requested_operation or active_operation
         if operation_id is None or operation_id != active_operation:
             raise NavigationCancelError('NAVIGATION_OPERATION_NOT_ACTIVE')
 
-        response = self.navigation.cancel(operation_id)
+        response = self.navigation.cancel(active_attempt)
         if not response.get('accepted'):
             raise NavigationCancelError(response.get('error', 'NAVIGATION_CANCEL_REJECTED'))
         with self._lock:
             if self._active_navigation_operation == operation_id:
                 self._active_navigation_operation = None
+                self._active_navigation_attempt = None
+                self._navigation_origin_state = None
                 self._set_status(operation_id, 'CANCELLED', 'NAVIGATION_CANCELLED', 'DRIVE')
         return {
             'operation_id': operation_id,
@@ -273,22 +389,34 @@ class VehicleCommandService:
         with self._lock:
             self._manual_generation += 1
             self._cancel_manual_timer()
-            operation_id = self._active_navigation_operation
+            navigation_attempt = self._active_navigation_attempt
+            auto_dock_active = self._auto_dock_active
             status_before_stop = dict(self._status)
 
         self.velocity.publish(0.0, 0.0)
 
         cancel_requested = False
-        if operation_id is not None:
+        if navigation_attempt is not None:
             try:
-                response = self.navigation.cancel(operation_id)
+                response = self.navigation.cancel(navigation_attempt)
                 cancel_requested = bool(response.get('accepted'))
+            except Exception:
+                cancel_requested = False
+        if auto_dock_active:
+            try:
+                self._auto_dock.stop()
+                cancel_requested = True
             except Exception:
                 cancel_requested = False
 
         with self._lock:
-            if operation_id == self._active_navigation_operation:
+            if navigation_attempt == self._active_navigation_attempt:
                 self._active_navigation_operation = None
+                self._active_navigation_attempt = None
+                self._navigation_origin_state = None
+            if auto_dock_active:
+                self._auto_dock_active = False
+                self._auto_dock_operation = None
             self._manual_restore_status = None
             if status_before_stop['operation_id'] is not None:
                 self._set_status(
@@ -320,12 +448,24 @@ class VehicleCommandService:
     def close(self):
         self.stop()
 
-    def _on_navigation_terminal(self, operation_id, terminal_state):
+    def _on_navigation_terminal(self, attempt_id, terminal_state):
         with self._lock:
-            if operation_id != self._active_navigation_operation:
+            if attempt_id != self._active_navigation_attempt:
                 return
+            operation_id = self._active_navigation_operation
+            origin_state = self._navigation_origin_state
             self._active_navigation_operation = None
+            self._active_navigation_attempt = None
+            self._navigation_origin_state = None
             if terminal_state == 'COMPLETED':
+                if origin_state == 'PICK_COMPLETE':
+                    self._set_status(
+                        operation_id,
+                        'PICK_COMPLETE',
+                        'NAVIGATION_SUCCEEDED',
+                        'DRIVE',
+                    )
+                    return
                 self._complete_to_idle('NAVIGATION_SUCCEEDED', 'DRIVE')
                 return
             if terminal_state == 'CANCELLED':
@@ -376,8 +516,11 @@ class VehicleCommandService:
             self._manual_timer.cancel()
             self._manual_timer = None
 
-    def _goal(self, payload):
-        self._validate_fields(payload, {'frame_id', 'x', 'y', 'yaw'})
+    def _goal(self, payload, extra_fields=None):
+        allowed_fields = {'frame_id', 'x', 'y', 'yaw'}
+        if extra_fields:
+            allowed_fields.update(extra_fields)
+        self._validate_fields(payload, allowed_fields)
         frame_id = payload.get('frame_id', 'map')
         if frame_id != 'map':
             raise CommandValidationError('frame_id must be map')
@@ -387,6 +530,56 @@ class VehicleCommandService:
             'y': self._finite_number(payload, 'y'),
             'yaw': self._finite_number(payload, 'yaw'),
         }
+
+    def _auto_dock_payload(self, payload):
+        self._validate_fields(
+            payload,
+            {'operation_id', 'operation', 'product_type', 'location', 'target'},
+        )
+        operation = self._required_uppercase(payload, 'operation', {'PICK', 'PLACE'})
+        product_type = self._required_uppercase(payload, 'product_type', {'NORMAL', 'FRESH'})
+        location = payload.get('location')
+        if not isinstance(location, str) or not location.strip():
+            raise CommandValidationError('location must be a non-empty string')
+        target = payload.get('target')
+        if not isinstance(target, dict):
+            raise CommandValidationError('target must be an object')
+        return {
+            'operation_id': self._operation_id(payload.get('operation_id'), required=True),
+            'operation': operation,
+            'product_type': product_type,
+            'location': location.strip().upper(),
+            'target': target,
+        }
+
+    @staticmethod
+    def _auto_dock_rejected(raw_state, reason):
+        return (
+            raw_state == 'REJECTED'
+            or reason.startswith('arrival_')
+            or reason.startswith('pick_requires_')
+            or reason.startswith('place_requires_')
+        )
+
+    def _operation_id(self, value, required=False):
+        if value is None and not required:
+            return str(uuid.uuid4())
+        if not isinstance(value, str) or not value:
+            raise CommandValidationError('operation_id must be a non-empty string')
+        try:
+            return str(uuid.UUID(value))
+        except (ValueError, AttributeError) as error:
+            raise CommandValidationError('operation_id must be a UUID') from error
+
+    def _required_uppercase(self, payload, field, allowed_values):
+        value = payload.get(field)
+        if not isinstance(value, str):
+            raise CommandValidationError(f'{field} must be a string')
+        value = value.strip().upper()
+        if value not in allowed_values:
+            allowed = ', '.join(sorted(allowed_values))
+            raise CommandValidationError(f'{field} must be one of {allowed}')
+        return value
 
     def _validate_fields(self, payload, allowed_fields):
         unknown_fields = sorted(set(payload) - allowed_fields)
@@ -563,6 +756,7 @@ def openapi_document(service):
                             'additionalProperties': False,
                             'required': ['x', 'y', 'yaw'],
                             'properties': {
+                                'operation_id': {'type': 'string', 'format': 'uuid'},
                                 'frame_id': {'type': 'string', 'default': 'map'},
                                 'x': {'type': 'number'},
                                 'y': {'type': 'number'},
@@ -574,6 +768,33 @@ def openapi_document(service):
                         '202': {'description': 'Navigation goal accepted'},
                         '422': {'description': 'Invalid goal'},
                         '503': {'description': 'Navigation unavailable'},
+                    },
+                },
+            },
+            '/v1/auto-dock': {
+                'post': {
+                    'requestBody': {
+                        'required': True,
+                        'content': {'application/json': {'schema': {
+                            'type': 'object',
+                            'additionalProperties': False,
+                            'required': [
+                                'operation_id', 'operation', 'product_type', 'location', 'target',
+                            ],
+                            'properties': {
+                                'operation_id': {'type': 'string', 'format': 'uuid'},
+                                'operation': {'type': 'string', 'enum': ['PICK', 'PLACE']},
+                                'product_type': {'type': 'string', 'enum': ['NORMAL', 'FRESH']},
+                                'location': {'type': 'string'},
+                                'target': {'type': 'object'},
+                            },
+                        }}},
+                    },
+                    'responses': {
+                        '202': {'description': 'Auto Dock command published'},
+                        '409': {'description': 'Vehicle state cannot accept this dock operation'},
+                        '422': {'description': 'Invalid Auto Dock command'},
+                        '503': {'description': 'Auto Dock topic publisher unavailable'},
                     },
                 },
             },
@@ -640,6 +861,9 @@ def create_http_server(host, port, service):
                     return
                 if path == '/v1/navigation/goals':
                     self._write_json(202, service.navigation_goal(self._read_json()))
+                    return
+                if path == '/v1/auto-dock':
+                    self._write_json(202, service.auto_dock_command(self._read_json()))
                     return
                 if path == '/v1/operation/idle':
                     self._write_json(200, service.mark_idle(self._read_json()))
@@ -717,11 +941,16 @@ class RosVehicleAdapter:
 
     def __init__(
         self,
+        robot_id,
         cmd_vel_topic,
         action_name,
         action_server_timeout_sec,
         goal_response_timeout_sec,
         cancel_response_timeout_sec,
+        auto_dock_arrival_topic=None,
+        auto_dock_status_topic=None,
+        auto_dock_stop_topic=None,
+        auto_dock_drive_ready_topic=None,
     ):
         try:
             import rclpy
@@ -731,8 +960,13 @@ class RosVehicleAdapter:
             from rclpy.action import ActionClient
             from rclpy.context import Context
             from rclpy.executors import SingleThreadedExecutor
-            from rclpy.qos import qos_profile_sensor_data
-            from std_msgs.msg import UInt16
+            from rclpy.qos import (
+                DurabilityPolicy,
+                QoSProfile,
+                ReliabilityPolicy,
+                qos_profile_sensor_data,
+            )
+            from std_msgs.msg import Empty, String, UInt16
         except ImportError as error:
             raise RuntimeError(
                 'ROS 2 Python packages are unavailable. Source the ROS 2 environment first.',
@@ -746,7 +980,14 @@ class RosVehicleAdapter:
         self._navigate_to_pose_type = NavigateToPose
         self._action_client_type = ActionClient
         self._uint16_type = UInt16
+        self._string_type = String
+        self._empty_type = Empty
         self._battery_qos = qos_profile_sensor_data
+        self._auto_dock_status_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
         self._action_server_timeout_sec = action_server_timeout_sec
         self._goal_response_timeout_sec = goal_response_timeout_sec
         self._cancel_response_timeout_sec = cancel_response_timeout_sec
@@ -755,11 +996,39 @@ class RosVehicleAdapter:
         self._closed = False
         self._battery_subscription = None
         self._initial_pose_publisher = None
+        self._auto_dock_status_subscription = None
+        self._auto_dock_drive_ready_subscription = None
+
+        robot_name = robot_id.strip('/')
+        if not robot_name:
+            raise ValueError('robot_id must be a non-empty string')
+        self._auto_dock_arrival_topic = (
+            auto_dock_arrival_topic or f'/{robot_name}/nav2/arrival'
+        )
+        self._auto_dock_status_topic = (
+            auto_dock_status_topic or f'/{robot_name}/auto_dock/status'
+        )
+        self._auto_dock_stop_topic = (
+            auto_dock_stop_topic or f'/{robot_name}/auto_dock/stop'
+        )
+        self._auto_dock_drive_ready_topic = (
+            auto_dock_drive_ready_topic or f'/{robot_name}/auto_dock/drive_ready'
+        )
 
         self._context = Context()
         self._rclpy.init(args=None, context=self._context)
         self._node = self._rclpy.create_node('vehicle_command_api', context=self._context)
         self._publisher = self._node.create_publisher(self._twist_type, cmd_vel_topic, 10)
+        self._auto_dock_arrival_publisher = self._node.create_publisher(
+            self._string_type,
+            self._auto_dock_arrival_topic,
+            10,
+        )
+        self._auto_dock_stop_publisher = self._node.create_publisher(
+            self._empty_type,
+            self._auto_dock_stop_topic,
+            10,
+        )
         self._goal_client = self._action_client_type(
             self._node,
             self._navigate_to_pose_type,
@@ -789,6 +1058,31 @@ class RosVehicleAdapter:
             10,
         )
 
+    def configure_auto_dock(self, on_status, on_drive_ready):
+        if self._auto_dock_status_subscription is not None:
+            raise RuntimeError('auto dock subscriptions are already configured')
+
+        def status_callback(message):
+            try:
+                payload = json.loads(message.data)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return
+            if isinstance(payload, dict):
+                on_status(payload)
+
+        self._auto_dock_status_subscription = self._node.create_subscription(
+            self._string_type,
+            self._auto_dock_status_topic,
+            status_callback,
+            self._auto_dock_status_qos,
+        )
+        self._auto_dock_drive_ready_subscription = self._node.create_subscription(
+            self._empty_type,
+            self._auto_dock_drive_ready_topic,
+            lambda _message: on_drive_ready(),
+            10,
+        )
+
     def publish_initial_pose(self, pose, position_variance, yaw_variance):
         if self._initial_pose_publisher is None:
             raise NavigationUnavailableError('INITIAL_POSE_PUBLISHER_UNAVAILABLE')
@@ -809,6 +1103,14 @@ class RosVehicleAdapter:
         message.linear.x = linear_x
         message.angular.z = angular_z
         self._publisher.publish(message)
+
+    def publish_arrival(self, payload):
+        message = self._string_type()
+        message.data = json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
+        self._auto_dock_arrival_publisher.publish(message)
+
+    def stop(self):
+        self._auto_dock_stop_publisher.publish(self._empty_type())
 
     def submit_goal(self, operation_id, goal, on_terminal):
         if not self._goal_client.wait_for_server(timeout_sec=self._action_server_timeout_sec):
@@ -918,6 +1220,10 @@ def parse_args(argv=None):
     parser.add_argument('--initial-pose-topic', default='/initialpose')
     parser.add_argument('--initial-pose-position-variance', type=float, default=0.25)
     parser.add_argument('--initial-pose-yaw-variance', type=float, default=0.0685)
+    parser.add_argument('--auto-dock-arrival-topic')
+    parser.add_argument('--auto-dock-status-topic')
+    parser.add_argument('--auto-dock-stop-topic')
+    parser.add_argument('--auto-dock-drive-ready-topic')
     parser.add_argument('--max-linear-x', type=float, default=0.10)
     parser.add_argument('--max-angular-z', type=float, default=0.50)
     parser.add_argument('--max-hold-ms', type=int, default=1000)
@@ -929,11 +1235,16 @@ def parse_args(argv=None):
 
 def create_ros_vehicle_adapter(arguments):
     return RosVehicleAdapter(
+        robot_id=arguments.robot_id,
         cmd_vel_topic=arguments.cmd_vel_topic,
         action_name=arguments.action_name,
         action_server_timeout_sec=arguments.action_server_timeout_sec,
         goal_response_timeout_sec=arguments.goal_response_timeout_sec,
         cancel_response_timeout_sec=arguments.cancel_response_timeout_sec,
+        auto_dock_arrival_topic=arguments.auto_dock_arrival_topic,
+        auto_dock_status_topic=arguments.auto_dock_status_topic,
+        auto_dock_stop_topic=arguments.auto_dock_stop_topic,
+        auto_dock_drive_ready_topic=arguments.auto_dock_drive_ready_topic,
     )
 
 
@@ -951,6 +1262,7 @@ def run_server(arguments, adapter_factory=None, http_server_factory=create_http_
         velocity=adapter,
         navigation=adapter,
         initial_pose=adapter,
+        auto_dock=adapter,
         max_linear_x=arguments.max_linear_x,
         max_angular_z=arguments.max_angular_z,
         max_hold_ms=arguments.max_hold_ms,
@@ -958,6 +1270,11 @@ def run_server(arguments, adapter_factory=None, http_server_factory=create_http_
         initial_pose_yaw_variance=arguments.initial_pose_yaw_variance,
         vehicle_status=vehicle_status,
     )
+    if hasattr(adapter, 'configure_auto_dock'):
+        adapter.configure_auto_dock(
+            service.on_auto_dock_status,
+            service.on_auto_dock_drive_ready,
+        )
     http_server = http_server_factory(arguments.host, arguments.port, service)
     previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
 
