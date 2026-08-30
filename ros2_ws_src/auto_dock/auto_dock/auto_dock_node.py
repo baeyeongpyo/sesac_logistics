@@ -1955,7 +1955,7 @@ class AutoDockNode(Node):
         return candidate, pnp
 
     def nearest_product_candidate(self, detection):
-        """Return the closest accessible C1 entity of the requested product."""
+        """Return the closest visible candidate of the requested product."""
         candidates = []
         image_width = self.number("camera_image_width_px", 640.0, 100.0, 4000.0)
         tracker = getattr(self, "dock_inventory_tracker", None)
@@ -2016,6 +2016,96 @@ class AutoDockNode(Node):
                 "depth_yaw": depth_yaw,
             }
             candidates.append((distance_cm, abs(candidate["center_error"]), candidate))
+        if self.product_type == "FRESH":
+            detections = [
+                item for item in (detection.get("detections") or [])
+                if isinstance(item, dict)
+            ]
+            pallets = [
+                item for item in detections
+                if item.get("class") == "pallet"
+                and isinstance(item.get("box"), list)
+                and len(item["box"]) == 4
+            ]
+            for star in detections:
+                if star.get("class") != "star":
+                    continue
+                star_box = star.get("box")
+                depth = star.get("depth")
+                if (
+                    not isinstance(star_box, list) or len(star_box) != 4
+                    or not isinstance(depth, dict)
+                ):
+                    continue
+                try:
+                    distance_cm = float(depth["forward_distance_cm"])
+                    bearing_deg = float(depth["bearing_deg"])
+                    star_center_x = 0.5 * (
+                        float(star_box[0]) + float(star_box[2])
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if (
+                    not math.isfinite(distance_cm)
+                    or not 5.0 <= distance_cm <= 100.0
+                    or not math.isfinite(bearing_deg)
+                    or abs(bearing_deg) > 45.0
+                ):
+                    continue
+                matches = []
+                for pallet in pallets:
+                    box = [float(value) for value in pallet["box"]]
+                    pallet_width = max(box[2] - box[0], 1.0)
+                    horizontal_margin = pallet_width * 0.15
+                    vertical_gap = box[1] - float(star_box[3])
+                    if (
+                        not box[0] - horizontal_margin
+                        <= star_center_x <= box[2] + horizontal_margin
+                        or vertical_gap < -pallet_width * 0.25
+                        or vertical_gap > pallet_width * 1.25
+                    ):
+                        continue
+                    pallet_center_x = 0.5 * (box[0] + box[2])
+                    score = (
+                        abs(star_center_x - pallet_center_x) / pallet_width
+                        + max(vertical_gap, 0.0) / pallet_width
+                        - 0.10 * float(pallet.get("confidence", 0.0))
+                    )
+                    matches.append((score, pallet, box, pallet_center_x))
+                if not matches:
+                    continue
+                _score, pallet, box, pallet_center_x = min(
+                    matches, key=lambda item: item[0]
+                )
+                candidate = {
+                    "entity_id": None,
+                    "matrix": ["star"],
+                    "streak": int(self.number(
+                        "stable_detection_frames", 2, 1, 30
+                    )),
+                    "center_error": (
+                        pallet_center_x - image_width * 0.5
+                    ) / max(image_width * 0.5, 1.0),
+                    "frontal_error": 0.0,
+                    "top_row_error": 0.0,
+                    "bottom_row_error": 0.0,
+                    "pallet_box": [int(round(value)) for value in box],
+                    "pnp": {
+                        "reprojection_error_px": 999.0,
+                        "lateral_ratio": math.tan(math.radians(bearing_deg)),
+                        "depth_fallback": True,
+                        "distance_source": "depth",
+                    },
+                    "depth_yaw": {
+                        "forward_distance_cm": distance_cm,
+                        "yaw_deg": 0.0,
+                    },
+                    "fresh_single_star": True,
+                    "star_confidence": float(star.get("confidence", 0.0)),
+                }
+                candidates.append((
+                    distance_cm, abs(candidate["center_error"]), candidate
+                ))
         if not candidates:
             return None, None
         _distance, _center_error, candidate = min(
@@ -2045,6 +2135,10 @@ class AutoDockNode(Node):
         return intersection / union if union > 0.0 else 0.0
 
     def candidate_matches_best_entity(self, candidate):
+        if candidate.get("fresh_single_star"):
+            if getattr(self, "product_type", None) == "FRESH":
+                return True, None
+            return False, "single_star_requires_fresh_product"
         detection = self.latest_detection or {}
         entities = detection.get("entities") or []
         candidate_box = candidate.get("pallet_box")
