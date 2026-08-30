@@ -738,7 +738,7 @@ def test_left_diagonal_lidar_backoff_is_pure_right_strafe(monkeypatch):
 
     assert AutoDockNode.interrupt_for_lidar(fake) is True
     assert fake.backoff_direction == "left"
-    assert fake.backoff_command == (0.0, -0.12)
+    assert fake.backoff_command == (0.0, -0.08)
 
 
 def test_disabled_lidar_backoff_stops_without_recovery_motion():
@@ -775,16 +775,34 @@ def test_disabled_lidar_safety_does_not_interrupt_driving():
     assert AutoDockNode.interrupt_for_lidar(fake) is False
 
 
-def test_persistent_lidar_obstacle_stops_after_one_backoff(monkeypatch):
+def test_persistent_lidar_obstacle_retries_until_configured_limit(monkeypatch):
     fake = type("FakeDock", (), {})()
     fake.backoff_until = 10.0
     fake.backoff_direction = "left"
+    fake.backoff_attempt_count = 1
+    fake.backoff_command = (0.0, -0.08)
+    fake.number = lambda key, default, *_args: {
+        "lidar_backoff_max_attempts": 5,
+        "lidar_backoff_duration_sec": 0.3,
+    }.get(key, default)
     fake.nearest_by_direction = {"left": (0.12, math.pi / 2.0, 0.20)}
     fake.stop_drive = lambda *_args: None
+    statuses = []
+    fake.publish_status = lambda *args, **kwargs: statuses.append((args, kwargs))
     cancelled = []
     fake.cancel = lambda reason: cancelled.append(reason)
     monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
 
+    AutoDockNode.tick_backoff(fake)
+
+    assert cancelled == []
+    assert fake.backoff_attempt_count == 2
+    assert fake.backoff_direction == "left"
+    assert fake.backoff_until == pytest.approx(10.4)
+    assert statuses[-1][0] == ("recovering", "lidar_backoff_retry")
+
+    fake.backoff_until = 10.0
+    fake.backoff_attempt_count = 5
     AutoDockNode.tick_backoff(fake)
 
     assert cancelled == ["lidar_left_blocked_after_backoff"]

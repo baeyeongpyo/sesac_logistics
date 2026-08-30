@@ -1296,6 +1296,7 @@ class AutoDockNode(Node):
         self.backoff_until = None
         self.backoff_command = (0.0, 0.0)
         self.backoff_direction = None
+        self.backoff_attempt_count = 0
         self.was_docking_before_interrupt = False
 
         self.cmd_pub = self.create_publisher(
@@ -1580,6 +1581,7 @@ class AutoDockNode(Node):
         self.post_lift_opening_heading_yaw = None
         self.post_lift_opening_heading_source = None
         self.state_before_lidar_interrupt = None
+        self.backoff_attempt_count = 0
         self.completed_insertion_distance_m = None
         self.right_turn_target_yaw = None
         self.right_turn_clearance_wait_started_at = None
@@ -1693,6 +1695,7 @@ class AutoDockNode(Node):
         self.reason = reason
         self.backoff_until = None
         self.backoff_direction = None
+        self.backoff_attempt_count = 0
         self.candidate_stop_due_at = None
         self.candidate_confirmation_started_at = None
         self.candidate_retry_not_before = 0.0
@@ -2814,7 +2817,7 @@ class AutoDockNode(Node):
         self.state_before_lidar_interrupt = self.state
         self.candidate_stop_due_at = None
         self.candidate_confirmation_started_at = None
-        backoff_speed = self.number("lidar_backoff_speed_m_s", 0.12, 0.05, 0.30)
+        backoff_speed = self.number("lidar_backoff_speed_m_s", 0.08, 0.05, 0.30)
         self.backoff_command = {
             "front": (-backoff_speed, 0.0),
             "rear": (backoff_speed, 0.0),
@@ -2822,8 +2825,9 @@ class AutoDockNode(Node):
             "right": (0.0, backoff_speed),
         }[direction]
         self.backoff_direction = direction
+        self.backoff_attempt_count = 1
         self.backoff_until = time.monotonic() + self.number(
-            "lidar_backoff_duration_sec", 0.7, 0.1, 2.0
+            "lidar_backoff_duration_sec", 0.3, 0.1, 2.0
         )
         self.state = "safety_backoff"
         self.publish_status(
@@ -4374,8 +4378,28 @@ class AutoDockNode(Node):
         if direction in self.nearest_by_direction:
             distance, _angle, clearance = self.nearest_by_direction[direction]
             if distance < clearance:
+                max_attempts = int(self.number(
+                    "lidar_backoff_max_attempts", 5, 1, 20
+                ))
+                attempt = getattr(self, "backoff_attempt_count", 1)
+                if attempt < max_attempts:
+                    self.backoff_attempt_count = attempt + 1
+                    self.backoff_direction = direction
+                    self.backoff_until = time.monotonic() + self.number(
+                        "lidar_backoff_duration_sec", 0.3, 0.1, 2.0
+                    )
+                    self.publish_status(
+                        "recovering", "lidar_backoff_retry",
+                        direction=direction,
+                        attempt=self.backoff_attempt_count,
+                        max_attempts=max_attempts,
+                        range_m=round(distance, 3),
+                        clearance_m=round(clearance, 3),
+                    )
+                    return
                 self.cancel(f"lidar_{direction}_blocked_after_backoff")
                 return
+        self.backoff_attempt_count = 0
         interrupted_state = getattr(self, "state_before_lidar_interrupt", None)
         self.state_before_lidar_interrupt = None
         if interrupted_state == "post_lift_opening_search":
