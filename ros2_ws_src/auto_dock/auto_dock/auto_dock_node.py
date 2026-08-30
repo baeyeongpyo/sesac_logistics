@@ -1984,6 +1984,17 @@ class AutoDockNode(Node):
 
     def is_lidar_self_return(self, angle, distance):
         """Mask stable returns from the vehicle body and a carried pallet."""
+        fixed_half_angle = math.radians(self.number(
+            "lidar_self_mask_fixed_half_width_deg", 0.0, 0.0, 10.0
+        ))
+        fixed_center = math.radians(self.number(
+            "lidar_self_mask_fixed_angle_deg", -1.43, -180.0, 180.0
+        ))
+        if (
+            fixed_half_angle > 0.0
+            and abs(normalize_angle(angle - fixed_center)) <= fixed_half_angle
+        ):
+            return True
         half_angle = math.radians(self.number(
             "lidar_self_mask_front_half_angle_deg", 20.0, 0.0, 90.0
         ))

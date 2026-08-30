@@ -720,6 +720,25 @@ def test_known_front_chassis_return_is_self_masked():
     ) is False
 
 
+def test_fixed_angle_chassis_return_is_masked_without_widening_front_mask():
+    fake = type("FakeDock", (), {})()
+    values = {
+        "lidar_self_mask_fixed_angle_deg": -1.43,
+        "lidar_self_mask_fixed_half_width_deg": 1.0,
+    }
+    fake.number = lambda key, default, *_args: values.get(key, default)
+
+    assert AutoDockNode.is_lidar_self_return(
+        fake, math.radians(-1.43), 0.232
+    ) is True
+    assert AutoDockNode.is_lidar_self_return(
+        fake, math.radians(-0.72), 0.229
+    ) is True
+    assert AutoDockNode.is_lidar_self_return(
+        fake, math.radians(-4.0), 0.232
+    ) is False
+
+
 def test_left_diagonal_lidar_backoff_is_pure_right_strafe(monkeypatch):
     fake = type("FakeDock", (), {})()
     fake.state = "search"
