@@ -93,14 +93,38 @@ def detect_warning_tape(frame, minimum_yellow_pixels=600):
     yellow = cv2.morphologyEx(
         yellow, cv2.MORPH_OPEN, np.ones((3, 3), dtype=np.uint8)
     )
+    black = cv2.inRange(
+        hsv, np.asarray((0, 0, 0), dtype=np.uint8),
+        np.asarray((179, 255, 75), dtype=np.uint8),
+    )
+    black = cv2.morphologyEx(
+        black, cv2.MORPH_OPEN, np.ones((3, 3), dtype=np.uint8)
+    )
     component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
         yellow, connectivity=8
     )
     accepted = np.zeros_like(yellow)
     accepted_components = 0
     for label in range(1, component_count):
-        _x, _y, component_width, _component_height, area = stats[label]
+        x, y, component_width, component_height, area = stats[label]
         if area < 80 or component_width < 12:
+            continue
+        side_width = max(8, int(round(component_width * 0.75)))
+        y0 = max(0, y)
+        y1 = min(height, y + component_height)
+        left_x0 = max(0, x - side_width)
+        left_x1 = min(width, x + 2)
+        right_x0 = max(0, x + component_width - 2)
+        right_x1 = min(width, x + component_width + side_width)
+        side_areas = []
+        for x0, x1 in ((left_x0, left_x1), (right_x0, right_x1)):
+            if x1 <= x0 or y1 <= y0:
+                continue
+            region = black[y0:y1, x0:x1]
+            side_areas.append(
+                cv2.countNonZero(region) / max(float(region.size), 1.0)
+            )
+        if not side_areas or max(side_areas) < 0.15:
             continue
         accepted[labels == label] = 255
         accepted_components += 1
@@ -136,6 +160,7 @@ def detect_warning_tape(frame, minimum_yellow_pixels=600):
         "angle_deg": float(angle_deg),
         "yellow_pixels": int(len(xs)),
         "component_count": int(accepted_components),
+        "black_adjacent_components": int(accepted_components),
         "band_width_px": round(band_width_px, 1),
     }
 

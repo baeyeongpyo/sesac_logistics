@@ -32,6 +32,12 @@ def test_warning_tape_detector_fits_repeating_yellow_band():
             (end_x, top_right + 42), (start_x, top_left + 42),
         ], dtype=np.int32)
         cv2.fillConvexPoly(frame, polygon, (0, 220, 220))
+        black_end = min(end_x + 30, 639)
+        black_top_right = int(325 + 0.10 * black_end)
+        cv2.fillConvexPoly(frame, np.asarray([
+            (end_x, top_right), (black_end, black_top_right),
+            (black_end, black_top_right + 42), (end_x, top_right + 42),
+        ], dtype=np.int32), (5, 5, 5))
 
     tape = detect_warning_tape(frame)
 
@@ -53,8 +59,23 @@ def test_warning_tape_first_detection_can_use_the_full_frame():
             frame, (start_x, 90), (min(start_x + 58, 639), 120),
             (0, 220, 220), -1,
         )
+        cv2.rectangle(
+            frame, (min(start_x + 58, 639), 90),
+            (min(start_x + 88, 639), 120), (5, 5, 5), -1,
+        )
 
     assert detect_warning_tape(frame) is not None
+
+
+def test_warning_tape_rejects_repeating_yellow_without_adjacent_black():
+    frame = np.full((480, 640, 3), 90, dtype=np.uint8)
+    for start_x in range(20, 600, 100):
+        cv2.rectangle(
+            frame, (start_x, 300), (min(start_x + 58, 639), 335),
+            (0, 220, 220), -1,
+        )
+
+    assert detect_warning_tape(frame) is None
 
 
 def test_warning_tape_initial_approach_finishes_near_target_height():
@@ -131,6 +152,7 @@ def test_dock_end_marker_detects_repeating_red_band_at_right_edge():
         cv2.rectangle(frame, (595, top), (628, top + 34), (0, 0, 230), -1)
     for left in (80, 190, 300, 410, 550):
         cv2.rectangle(frame, (left, 302), (left + 70, 330), (0, 230, 230), -1)
+        cv2.rectangle(frame, (left + 70, 302), (left + 100, 330), (5, 5, 5), -1)
     # A red object away from the edge is not a DOCK endpoint.
     cv2.rectangle(frame, (390, 100), (480, 260), (0, 0, 230), -1)
 
@@ -155,6 +177,7 @@ def test_dock_end_marker_rejects_red_band_far_above_warning_tape():
         cv2.rectangle(frame, (595, top), (628, top + 34), (0, 0, 230), -1)
     for left in (80, 190, 300, 410, 550):
         cv2.rectangle(frame, (left, 410), (left + 70, 438), (0, 230, 230), -1)
+        cv2.rectangle(frame, (left + 70, 410), (left + 100, 438), (5, 5, 5), -1)
 
     assert detect_dock_end_markers(frame) == {}
 
