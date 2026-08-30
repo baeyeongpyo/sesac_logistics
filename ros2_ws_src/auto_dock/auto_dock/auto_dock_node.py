@@ -2017,6 +2017,9 @@ class AutoDockNode(Node):
             }
             candidates.append((distance_cm, abs(candidate["center_error"]), candidate))
         if self.product_type == "FRESH":
+            maximum_single_star_distance_cm = self.number(
+                "single_star_fresh_max_distance_cm", 300.0, 20.0, 500.0
+            )
             detections = [
                 item for item in (detection.get("detections") or [])
                 if isinstance(item, dict)
@@ -2047,7 +2050,8 @@ class AutoDockNode(Node):
                     continue
                 if (
                     not math.isfinite(distance_cm)
-                    or not 5.0 <= distance_cm <= 100.0
+                    or not 5.0 <= distance_cm
+                    <= maximum_single_star_distance_cm
                     or not math.isfinite(bearing_deg)
                     or abs(bearing_deg) > 45.0
                 ):

@@ -794,6 +794,40 @@ def test_nearest_fresh_accepts_one_star_attached_to_a_pallet_face():
     assert AutoDockNode.candidate_matches_best_entity(fake, candidate) == (True, None)
 
 
+@pytest.mark.parametrize("star_box", [
+    [215, 170, 295, 250],
+    [345, 170, 425, 250],
+    [215, 285, 295, 365],
+    [345, 285, 425, 365],
+])
+def test_nearest_fresh_accepts_one_star_in_any_face_quadrant(star_box):
+    fake = type("FakeDock", (), {})()
+    fake.product_type = "FRESH"
+    fake.number = lambda _key, default, _minimum, _maximum: default
+    detection = {
+        "entities": [],
+        "detections": [
+            {
+                "class": "star", "confidence": 0.80,
+                "box": star_box,
+                "depth": {
+                    "forward_distance_cm": 180.0,
+                    "bearing_deg": 0.0,
+                },
+            },
+            {
+                "class": "pallet", "confidence": 0.65,
+                "box": [200, 380, 440, 410],
+            },
+        ],
+    }
+
+    candidate, _pnp = AutoDockNode.nearest_product_candidate(fake, detection)
+
+    assert candidate["fresh_single_star"] is True
+    assert candidate["depth_yaw"]["forward_distance_cm"] == pytest.approx(180.0)
+
+
 def test_tape_pose_hold_never_reverses_when_tape_is_already_close():
     fake = type("FakeDock", (), {})()
     fake.config = {
