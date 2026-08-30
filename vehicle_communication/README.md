@@ -29,6 +29,39 @@ VEHICLE_COMMAND_API_PORT=8082
 FOXGLOVE_PORT=8765
 ```
 
+### ROS 2 패키지 빌드와 독립 실행
+
+이 디렉터리는 ROS 2 패키지 이름 `vehicle_command_api`로도 설치할 수 있다.
+차량 workspace의 `src` 아래에 배치한 뒤, Nav2를 다시 시작하지 않고 HTTP API만
+독립 실행한다.
+
+```bash
+cd /home/ubuntu/ros2_ws
+source /opt/ros/humble/setup.bash
+colcon build --packages-select vehicle_command_api
+source install/setup.bash
+
+ros2 run vehicle_command_api vehicle_command_api \
+  --robot-id robot_2 \
+  --cmd-vel-topic /cmd_vel
+```
+
+`ros2 run` 프로세스는 기존 전역 ROS graph의 `/cmd_vel` publisher에만 연결한다.
+따라서 이 명령은 Nav2 launch를 다시 실행하지 않는다. 소스를 변경한 경우에는
+`colcon build`와 `source install/setup.bash`를 다시 실행한다.
+
+별도 터미널에서 다음으로 cmd_vel HTTP API를 검증한다.
+
+```bash
+ros2 topic echo /cmd_vel
+
+curl -i -X POST http://127.0.0.1:8082/v1/cmd-vel \
+  -H 'Content-Type: application/json' \
+  --data '{"linear_x":0.05,"angular_z":0.0,"hold_ms":500}'
+```
+
+성공 기준은 HTTP `202`, 비영(非零) `Twist` 한 건, 500 ms 뒤의 0속도 `Twist` 한 건이다.
+
 실행 스크립트는 ROS 2 setup 파일을 직접 `source`하지 않는다. 실행 전 사용하는
 셸에서 `.zshrc`를 통해 ROS 2 환경을 준비해야 한다.
 
