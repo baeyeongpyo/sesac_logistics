@@ -68,6 +68,8 @@ TUNING_FIELDS = (
     ("dock_inventory_depth_c3_max_cm", "DOCK C3 최대 depth(cm)", 50.0, float, 5.0, 200.0),
     ("dock_inventory_max_age_sec", "DOCK 관측 유효시간(초)", 3.0, float, 0.5, 30.0),
     ("tape_target_center_y_ratio", "주의선 목표 화면높이 비율", 0.65, float, 0.10, 0.90),
+    ("tape_min_forward_speed_m_s", "주의선 전후 최소속도(m/s)", 0.10, float, 0.10, 0.20),
+    ("tape_max_forward_speed_m_s", "주의선 전후 최대속도(m/s)", 0.10, float, 0.10, 0.20),
     ("rear_lateral_gain", "뒤 바퀴 횡이동 배율", 1.20, float, 0.50, 2.00),
     ("post_lift_opening_lateral_speed_m_s", "후방개구 우측 횡속도(m/s)", 0.12, float, 0.05, 0.20),
     ("post_lift_opening_jump_cm", "후방개구 급증 판정(cm)", 15.0, float, 5.0, 100.0),

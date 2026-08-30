@@ -94,7 +94,7 @@ def test_first_tape_detection_commands_forward_toward_target_height():
 
     assert correcting is True
     assert fake.tape_reference["center_y_ratio"] == pytest.approx(0.65)
-    assert commands == [(pytest.approx(0.022), 0.0, 0.0)]
+    assert commands == [(0.10, 0.0, 0.0)]
 
 
 @pytest.mark.parametrize(("distance_cm", "accepted"), [
@@ -1525,7 +1525,7 @@ def test_tape_only_search_corrects_distance_before_lateral(monkeypatch):
 
     AutoDockNode.tick_search(fake)
 
-    assert fake.commands == [(-0.01, 0.0, 0.0)]
+    assert fake.commands == [(-0.10, 0.0, 0.0)]
     assert fake.statuses[-1][1] == (
         "warning_tape_distance_correction_before_lateral"
     )

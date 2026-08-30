@@ -3009,10 +3009,10 @@ class AutoDockNode(Node):
         )
         if abs(vertical_error) > vertical_tolerance:
             minimum_speed = self.number(
-                "tape_min_forward_speed_m_s", 0.01, 0.005, 0.05
+                "tape_min_forward_speed_m_s", 0.10, 0.10, 0.20
             )
             maximum_speed = max(minimum_speed, self.number(
-                "tape_max_forward_speed_m_s", 0.03, 0.005, 0.10
+                "tape_max_forward_speed_m_s", 0.10, 0.10, 0.20
             ))
             speed = clamp(
                 abs(vertical_error)
