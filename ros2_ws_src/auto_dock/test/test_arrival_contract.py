@@ -54,20 +54,7 @@ def test_warning_tape_first_detection_can_use_the_full_frame():
             (0, 220, 220), -1,
         )
 
-    assert detect_warning_tape(frame, roi_top_ratio=0.55) is None
-    assert detect_warning_tape(frame, roi_top_ratio=0.0) is not None
-
-
-def test_warning_tape_roi_is_full_only_until_first_detection():
-    fake = type("FakeDock", (), {})()
-    fake.config = {"tape_roi_top_ratio": 0.55}
-    fake.number = lambda key, default, *_args: fake.config.get(key, default)
-    fake.tape_initial_detection_complete = False
-
-    assert AutoDockNode.warning_tape_roi_top_ratio(fake) == 0.0
-
-    fake.tape_initial_detection_complete = True
-    assert AutoDockNode.warning_tape_roi_top_ratio(fake) == 0.55
+    assert detect_warning_tape(frame) is not None
 
 
 def test_warning_tape_initial_approach_finishes_near_target_height():

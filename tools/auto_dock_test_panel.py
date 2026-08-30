@@ -109,7 +109,6 @@ TUNING_FIELDS = (
     ("candidate_retry_cooldown_sec", "재탐색 이동(초)", 1.0, float, 0.0, 10.0),
     ("tape_guidance_enabled", "주의테이프 추종(1/0)", 0, int, 0, 1),
     ("tape_guidance_only", "주의테이프 전용탐색(1/0)", 0, int, 0, 1),
-    ("tape_roi_top_ratio", "테이프 ROI 시작(비율)", 0.55, float, 0.30, 0.90),
     ("tape_min_yellow_pixels", "테이프 최소 노랑픽셀", 600, int, 100, 20000),
     ("tape_max_age_sec", "테이프 유효시간(초)", 0.50, float, 0.10, 3.0),
     ("tape_target_angle_deg", "테이프 평행 기준각(도)", 0.0, float, -35.0, 35.0),

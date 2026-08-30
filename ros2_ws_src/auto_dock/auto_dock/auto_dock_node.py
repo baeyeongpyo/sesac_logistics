@@ -78,13 +78,13 @@ def scan_direction(angle):
     return "left" if y >= 0.0 else "right"
 
 
-def detect_warning_tape(frame, roi_top_ratio=0.55, minimum_yellow_pixels=600):
+def detect_warning_tape(frame, minimum_yellow_pixels=600):
     """Detect a mostly horizontal yellow/black warning-tape band."""
     if frame is None or frame.size == 0:
         return None
     height, width = frame.shape[:2]
-    roi_top = int(clamp(float(roi_top_ratio), 0.0, 0.90) * height)
-    roi = frame[roi_top:height]
+    roi_top = 0
+    roi = frame
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     yellow = cv2.inRange(
         hsv, np.asarray((15, 90, 70), dtype=np.uint8),
@@ -1437,11 +1437,6 @@ class AutoDockNode(Node):
         self.slot_camera_matrix = np.asarray(msg.k, dtype=np.float64).reshape(3, 3)
         self.slot_distortion = np.asarray(msg.d, dtype=np.float64)
 
-    def warning_tape_roi_top_ratio(self):
-        if not getattr(self, "tape_initial_detection_complete", False):
-            return 0.0
-        return self.number("tape_roi_top_ratio", 0.55, 0.0, 0.90)
-
     def warning_tape_initial_approach_complete(self, tape):
         if not isinstance(tape, dict):
             return False
@@ -1489,7 +1484,6 @@ class AutoDockNode(Node):
         if tape_due or tape_inventory_due:
             self.latest_tape_guidance = detect_warning_tape(
                 frame,
-                roi_top_ratio=AutoDockNode.warning_tape_roi_top_ratio(self),
                 minimum_yellow_pixels=int(self.number(
                     "tape_min_yellow_pixels", 600, 100, 20000
                 )),

@@ -92,13 +92,11 @@ from std_msgs.msg import Empty, String, UInt16
 VEHICLE_HOSTS = {1: "192.168.100.38", 2: "192.168.100.35"}
 
 
-def detect_warning_tape_debug(
-    frame, roi_top_ratio=0.55, minimum_yellow_pixels=600
-):
+def detect_warning_tape_debug(frame, minimum_yellow_pixels=600):
     """Run the auto-dock tape detector and retain its rejection evidence."""
     height, width = frame.shape[:2]
-    roi_top = int(max(0.30, min(0.90, float(roi_top_ratio))) * height)
-    roi = frame[roi_top:height]
+    roi_top = 0
+    roi = frame
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     raw_mask = cv2.inRange(
         hsv, np.asarray((15, 90, 70), dtype=np.uint8),
