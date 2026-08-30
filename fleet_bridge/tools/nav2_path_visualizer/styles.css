@@ -160,6 +160,75 @@ input::file-selector-button {
 .pose-grid label { color: #7f9995; font-size: 0.62rem; }
 .pose-label { color: #e8f1f0; font-size: 0.66rem; font-weight: 700; }
 
+.nav2-pose-output {
+  margin-top: 15px;
+  border: 1px solid #29403e;
+  background: #081216;
+}
+
+.nav2-pose-heading, .nav2-pose-card-heading, .nav2-command-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.nav2-pose-heading {
+  padding: 9px 10px;
+  border-bottom: 1px solid #29403e;
+  background: #0e1c20;
+}
+
+.nav2-pose-heading p, .nav2-command-heading p { margin: 0; color: #75d9c3; font-size: 0.59rem; font-weight: 700; letter-spacing: 0.1em; }
+.nav2-pose-heading span, .nav2-pose-card-heading span { color: #78908d; font-size: 0.58rem; }
+
+.nav2-pose-card { padding: 10px; border-bottom: 1px solid #203633; }
+.nav2-pose-card.is-invalid { opacity: 0.66; }
+.nav2-goal-card { box-shadow: inset 3px 0 #ff7f6b; }
+.nav2-pose-card-heading strong { color: #e8f1f0; font-size: 0.67rem; }
+
+.nav2-pose-values {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin: 9px 0 0;
+  background: #213a36;
+}
+
+.nav2-pose-values > div { min-width: 0; padding: 6px; background: #0c181c; }
+.nav2-pose-values dt { color: #6f8985; font-size: 0.54rem; }
+.nav2-pose-values dd, .quaternion-readout output { margin: 4px 0 0; color: #dff3ed; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 0.62rem; font-variant-numeric: tabular-nums; }
+
+.quaternion-readout {
+  margin: 8px 0 0;
+  color: #78908d;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.58rem;
+}
+
+.quaternion-readout output { color: #ffc857; }
+
+.nav2-command { padding: 10px; border-bottom: 1px solid #203633; }
+.copy-command { border: 1px solid #42615c; border-radius: 2px; padding: 4px 6px; background: #102925; color: #b6eee1; font-size: 0.58rem; }
+.copy-command:hover:not(:disabled) { border-color: #75d9c3; background: #173a34; }
+.copy-command:disabled { cursor: not-allowed; opacity: 0.5; }
+
+.nav2-command pre {
+  overflow-x: auto;
+  margin: 8px 0 0;
+  padding: 8px;
+  border: 1px solid #203a36;
+  background: #050b0e;
+  color: #d9e9e4;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.56rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.nav2-pose-note { margin: 9px 10px 10px; color: #78908d; font-size: 0.58rem; line-height: 1.5; }
+
 .map-pick-controls {
   margin-top: 16px;
   border-top: 1px solid #29403e;
@@ -322,5 +391,6 @@ input[type="number"] {
   .canvas-frame { min-height: 330px; height: 54vh; }
   .canvas-tools { right: 8px; top: 8px; }
   .map-hover-readout { bottom: 8px; left: 8px; font-size: 0.59rem; }
+  .nav2-pose-values { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

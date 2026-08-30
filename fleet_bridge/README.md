@@ -1,7 +1,8 @@
 # Fleet Foxglove Server Bridge
 
-이 번들은 서버에서만 실행한다. 각 차량의 Foxglove Bridge WebSocket은 telemetry를
-ROS 2 Domain 225의 차량별 `/{robot_id}/*` topic으로 재발행하는 데만 사용한다.
+이 번들은 서버에서만 실행한다. 중앙 map-publisher를 같은 Fleet Manager PC에서 실행하고,
+각 차량의 Foxglove Bridge WebSocket은 telemetry를 ROS 2 Domain 225의 차량별
+`/{robot_id}/*` topic으로 재발행하는 데만 사용한다.
 명령 API는 차량별 `vehicle_command_api` HTTP endpoint로 `cmd_vel`, Nav2 goal/cancel,
 초기 위치, 상태 조회, `stop`을 전달하고 Swagger UI를 제공한다.
 
@@ -40,6 +41,9 @@ API URL, 안전한 속도 명령 상한을 정의한다. `id`가 server ROS topi
 
 ```dotenv
 SERVER_ROS_DOMAIN_ID=225
+MAP_DIRECTORY=./maps
+MAP_YAML=/maps/map_0825.yaml
+MAP_USE_SIM_TIME=false
 ROBOT_1_FOXGLOVE_URI=ws://192.168.10.215:8766
 ROBOT_2_FOXGLOVE_URI=ws://192.168.10.216:8766
 ROBOT_1_COMMAND_API_URL=http://192.168.10.215:8082
@@ -54,8 +58,11 @@ COMMAND_API_PORT=8080
 cp fleet_bridge/.env.example fleet_bridge/.env.server
 ```
 
-서버 ROS 2 Domain은 225만 사용한다. 차량의 ROS domain ID, Docker network/IPC,
-Fast DDS 설정은 차량 Bridge를 운영하는 쪽에서 관리하며 이 번들의 설정 대상이 아니다.
+서버 ROS 2 Domain은 225만 사용한다. map-publisher와 server-foxglove는 같은 Fleet
+Manager PC의 localhost DDS에서 실행되며, map-publisher가 중앙 `/map`의 유일한
+publisher다. 운영 PC에서는 별도 map-server를 시작하지 않는다.
+차량의 ROS domain ID, Docker network/IPC, Fast DDS 설정은 차량 Bridge를 운영하는
+쪽에서 관리하며 이 번들의 설정 대상이 아니다.
 
 ## 서버 이미지와 실행
 
@@ -82,6 +89,14 @@ docker compose --env-file fleet_bridge/.env.server \
   up -d
 ```
 
+중앙 지도 서비스 상태와 발행 토픽은 다음처럼 확인한다.
+
+```bash
+docker compose --env-file fleet_bridge/.env.server -f fleet_bridge/docker-compose.server.yaml logs -f map-publisher
+
+docker compose --env-file fleet_bridge/.env.server -f fleet_bridge/docker-compose.server.yaml exec map-publisher bash -lc 'ROS2CLI_NO_DAEMON=1 ros2 topic hz /map'
+```
+
 Compose plugin이 없는 Linux 서버에서는 명령 API만 직접 실행할 수 있다.
 
 ```bash
@@ -99,7 +114,8 @@ docker run -d --name fleet-command-api --restart unless-stopped \
 ```
 
 서버 관제에는 Foxglove 앱에서 `ws://<server-ip>:8765` 하나만 연결한다. 이 endpoint는
-`/robot_1/*`, `/robot_2/*`, `/map`만 제공하며 observation-only이다. 서버에서
+`/robot_1/*`, `/robot_2/*`, `/map`, `/tf`, `/warehouse/zones`를 제공하며 observation-only이다. `/tf`는
+중앙 지도 표시용 `map -> map_visualization` 변환만 포함한다. 서버에서
 topic publish, service 호출, parameter 변경은 허용하지 않는다.
 
 ## telemetry mapping
@@ -147,17 +163,17 @@ RGB와 depth image의 중앙 ROS 재발행은 각각 최대 5 Hz, `scan_filtered
 배터리는 최대 0.2 Hz로 제한한다. 이 제한은 worker가 WebSocket으로 메시지를 받은 뒤에
 적용되므로 차량에서 서버로 들어오는 원본 네트워크 대역폭은 줄이지 않는다.
 
-반면 [`config/central_topics.yaml`](config/central_topics.yaml)의
-`/controller_server/map`은 차량에서 오지 않는다. 중앙 map-server가 자체 발행하는 원본이며,
-`central-topic-republisher`가 수신할 때만 `/map`에 재발행한다. `/map` publisher는
-`reliable`, `transient_local`, `keep_last(1)` QoS로 마지막 지도 하나를 보존하므로, 반복
-발행 없이 늦게 연결한 구독자도 마지막 지도를 받을 수 있다. source와 target을 분리해 자기
-자신을 다시 구독하는 loop를 막고, Foxglove는 `/map`을 사용한다.
+반면 중앙 `/map`은 차량에서 오지 않는다. `map-publisher`가
+[`maps/map_0825.yaml`](maps/map_0825.yaml)과 PGM을 직접 읽어 `reliable`,
+`transient_local`, `keep_last(1)` QoS로 1 Hz 발행한다. 따라서 Foxglove가 늦게
+접속해도 마지막 지도와 다음 주기 발행을 모두 받을 수 있으며, Nav2 map-server와 DDS
+중계 컨테이너는 중앙 지도 전달 경로에 관여하지 않는다.
 차량 Nav2의 `/map`은 별도 소유권을 가지며 각각 `/robot_1/map`, `/robot_2/map`으로
 중계되므로 중앙 `/map`과 충돌하지 않는다.
 
-중앙 Foxglove(`ws://<server-ip>:8765`)는 `/robot_1/*`, `/robot_2/*`, `/map`을
-관측용으로 노출한다. 예를 들어 RGB 영상은
+중앙 Foxglove(`ws://<server-ip>:8765`)는 `/robot_1/*`, `/robot_2/*`, `/map`, `/tf`,
+`/warehouse/zones`를 관측용으로 노출한다. `/tf`는 중앙 지도 표시용 변환이며, 차량 TF는
+각각 `/robot_1/tf`, `/robot_2/tf`로 분리된다. 예를 들어 RGB 영상은
 `/robot_1/ascamera/camera_publisher/rgb0/image`, depth 영상은
 `/robot_1/ascamera/camera_publisher/depth0/image_raw`이다. 중앙 Bridge의
 `clientPublish`, service, parameter 기능은 계속 비활성화되어 있으므로 이 endpoint에서
@@ -172,6 +188,30 @@ Nav2의 plan, local plan, costmap, behavior tree log, `/goal_pose`도 권위 목
 이 중계는 관측 경로다. Command API가 차량 `/goal_pose`에 발행한 목표도 다시
 `/{robot}/goal_pose`로 관측될 수 있지만, 서버의 namespaced telemetry topic에 발행하는
 것만으로 차량 Nav2 명령이 전달되지는 않는다.
+
+### 창고 zone 오버레이
+
+`warehouse-zone-publisher`는 중앙 서버에서 `visualization_msgs/msg/MarkerArray`를
+`/warehouse/zones`로 한 번 발행한다. 이 토픽은 reliable·transient-local QoS이므로
+Foxglove가 늦게 연결돼도 마지막 레이아웃을 즉시 받는다. Foxglove 3D 패널에서 표시 프레임을
+`map`으로 정하고 `/map`과 `/warehouse/zones`를 활성화한다.
+
+[`config/warehouse_zones.yaml`](config/warehouse_zones.yaml)은 `map` 프레임의 물류
+포인트 중심 좌표 원본이다. P(팔레트, 파랑) 4개, F(Fresh, 초록) 9개, N(Normal, 빨강)
+9개 포인트를 각각 점과 라벨로 표시한다. `goal_center_offset_m: 0.15`는 차량 Goal을
+직사각형 중심점에서 약 15 cm 보정해야 한다는 운영 기준을 기록한다. 이 오버레이는 관제용이므로
+Nav2 map, costmap 또는 차량 Goal을 직접 변경하지 않는다. 파일을 수정한 뒤에는 다음 명령으로
+publisher만 재생성한다.
+
+`marker_style`은 3D 표시 높이를 제어한다. 기본값은 점을 중심 Z=3 mm, 높이 6 mm의 바닥
+원판으로 그리고 라벨을 Z=12 mm에 둔다. 따라서 차량 모델이 같은 좌표에 있더라도 포인트
+오버레이보다 위에 렌더링된다.
+
+```bash
+docker compose --env-file fleet_bridge/.env.server \
+  -f fleet_bridge/docker-compose.server.yaml \
+  up -d --build warehouse-zone-publisher server-foxglove
+```
 
 ```yaml
 - id: scan_filtered

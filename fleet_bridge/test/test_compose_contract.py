@@ -150,6 +150,28 @@ class ServerComposeContractTest(unittest.TestCase):
 
         self.assertNotIn('rosbag-recorder', services)
 
+    def test_warehouse_zone_publisher_runs_with_the_editable_layout_config(self):
+        publisher = compose_config('docker-compose.server.yaml')['services'][
+            'warehouse-zone-publisher'
+        ]
+
+        self.assertEqual(publisher['network_mode'], 'host')
+        self.assertEqual(publisher['ipc'], 'host')
+        self.assertEqual(publisher['environment']['ROS_DOMAIN_ID'], '225')
+        self.assertEqual(
+            publisher['environment']['WAREHOUSE_ZONES_CONFIG'],
+            '/config/warehouse_zones.yaml',
+        )
+        self.assertEqual(
+            publisher['command'],
+            ['ros2', 'run', 'foxglove_ros_worker', 'warehouse_zone_publisher'],
+        )
+        config_mount = next(
+            mount for mount in publisher['volumes']
+            if mount['target'] == '/config/warehouse_zones.yaml'
+        )
+        self.assertTrue(config_mount['read_only'])
+
 
 if __name__ == '__main__':
     unittest.main()

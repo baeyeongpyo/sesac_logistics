@@ -14,6 +14,17 @@ node fleet_bridge/tools/nav2_path_visualizer/build-standalone.mjs
 
 Finder 또는 브라우저에서 [index.html](./index.html)을 엽니다.
 
+## Graph Router / Graph Planner 설명 화면
+
+창고의 Lane Graph에서 출발지와 도착지를 클릭해, Dijkstra 기반의 Graph Router와 Graph Planner가 각각 무엇을 만드는지 확인하려면 [graph-route-explainer.html](./graph-route-explainer.html)을 엽니다.
+
+- 첫 waypoint 클릭: 차량의 현재 위치(출발 Node)를 지정합니다.
+- 두 번째 waypoint 클릭: 도착 Node를 지정합니다.
+- Graph Router: 주황색 Lane 중 선택된 Lane ID 순서인 `RoutePlan`을 만듭니다.
+- Graph Planner: 선택된 Lane geometry를 연결해 파란 점선의 `nav_msgs/Path`를 만듭니다.
+
+이 화면도 정적 HTML이며 실제 ROS 토픽을 발행하거나 차량을 제어하지 않습니다.
+
 1. `PGM 지도`와 `YAML metadata`를 선택하고 **선택 지도 읽기**를 누릅니다. P2/P5 PGM과 map_server 형식 YAML을 지원합니다.
 2. 지도 위에 커서를 올려 `x`, `y`, grid cell, 주행 가능/장애물 상태를 확인합니다. 이 hover 정보는 입력값을 바꾸지 않습니다.
 3. **Start 선택** 또는 **Goal 선택**을 누른 뒤 지도에서 입력합니다.
@@ -24,8 +35,8 @@ Finder 또는 브라우저에서 [index.html](./index.html)을 엽니다.
 
 프로젝트의 기본 지도는 다음 파일입니다.
 
-- [`map_server/maps/map_0825.pgm`](../../../map_server/maps/map_0825.pgm)
-- [`map_server/maps/map_0825.yaml`](../../../map_server/maps/map_0825.yaml)
+- [`maps/map_0825.pgm`](../../maps/map_0825.pgm)
+- [`maps/map_0825.yaml`](../../maps/map_0825.yaml)
 
 이 지도에서 예시로 시작 `(-4.0, -3.0, 0°)`, 목표 `(3.8, 2.0, 0°)`를 넣으면 경로를 확인할 수 있습니다.
 

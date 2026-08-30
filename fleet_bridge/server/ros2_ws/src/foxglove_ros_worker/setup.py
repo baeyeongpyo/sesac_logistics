@@ -23,6 +23,7 @@ setup(
             'fleet_command_api = foxglove_ros_worker.api:main',
             'fleet_rosbag_recorder = foxglove_ros_worker.recording:main',
             'fleet_map_publisher = foxglove_ros_worker.map_publisher:main',
+            'warehouse_zone_publisher = foxglove_ros_worker.warehouse_zone_publisher:main',
         ],
     },
 )

@@ -255,6 +255,21 @@ function canvasVectorToYaw(vector) {
   return Object.is(yaw, -0) ? 0 : yaw;
 }
 
+/** Convert the visualizer's planar pose into the orientation representation Nav2 consumes. */
+function toNav2Pose(pose) {
+  return {
+    position: { x: pose.x, y: pose.y, z: 0 },
+    yawRadians: pose.yaw,
+    yawDegrees: pose.yaw * (180 / Math.PI),
+    orientation: {
+      x: 0,
+      y: 0,
+      z: Math.sin(pose.yaw / 2),
+      w: Math.cos(pose.yaw / 2),
+    },
+  };
+}
+
 function createExampleMap() {
   const width = 20;
   const height = 14;
@@ -614,6 +629,7 @@ globalThis.Nav2PathModel = Object.freeze({
   createMapTransform,
   zoomMapView,
   canvasVectorToYaw,
+  toNav2Pose,
   createExampleMap,
   computeNavigation,
 });

@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>MentorPi Nav2 목표 주행 흐름</title>
+    <style>
+      :root {
+        --ink: #06161e;
+        --ink-raised: #0b2430;
+        --panel: #103342;
+        --line: #2b5762;
+        --muted: #9ab7bd;
+        --mist: #eef7f7;
+        --teal: #6ce1cf;
+        --teal-dark: #1a7f78;
+        --amber: #ffbd5c;
+        --coral: #ff8c7a;
+        --blue: #8bc5ff;
+        --shadow: 0 24px 60px rgb(0 0 0 / 28%);
+        font-family: "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif;
+        color: var(--mist);
+        background: var(--ink);
+        font-synthesis: none;
+      }
+
+      * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; }
+      body { min-width: 320px; margin: 0; background: radial-gradient(circle at 86% -10%, #164a5688, transparent 28rem), var(--ink); }
+      button { font: inherit; }
+      button:focus-visible, a:focus-visible { outline: 3px solid var(--amber); outline-offset: 4px; }
+      .page { width: min(1240px, calc(100% - 36px)); margin: 0 auto; padding: 28px 0 56px; }
+      .eyebrow { margin: 0; color: var(--teal); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .7rem; font-weight: 800; letter-spacing: .16em; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+      .masthead { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding-bottom: 36px; }
+      .brand { display: flex; align-items: center; gap: 12px; color: var(--mist); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .76rem; font-weight: 800; letter-spacing: .08em; }
+      .brand-mark { display: inline-grid; width: 25px; height: 25px; place-items: center; border: 1px solid var(--teal); border-radius: 50%; color: var(--teal); font-size: .82rem; }
+      .verified { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: .74rem; }
+      .verified::before { width: 8px; height: 8px; border-radius: 50%; background: var(--teal); box-shadow: 0 0 0 5px rgb(108 225 207 / 12%); content: ""; }
+
+      .hero { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(280px, .75fr); gap: 42px; align-items: end; padding: 28px 0 52px; }
+      h1 { max-width: 820px; margin: 12px 0 0; color: var(--mist); font-size: clamp(2.6rem, 6vw, 5.6rem); letter-spacing: -.085em; line-height: .95; }
+      h1 em { color: var(--teal); font-style: normal; }
+      .hero-summary { max-width: 660px; margin: 24px 0 0; color: #c9dce0; font-size: clamp(.98rem, 1.5vw, 1.14rem); line-height: 1.8; word-break: keep-all; }
+      .scope-note { position: relative; margin: 0; border-left: 2px solid var(--amber); padding: 3px 0 3px 18px; color: var(--muted); font-size: .85rem; line-height: 1.8; word-break: keep-all; }
+      .scope-note strong { color: var(--amber); }
+
+      .command-board { position: relative; overflow: hidden; border: 1px solid var(--line); background: linear-gradient(145deg, #0e303b, #071a23 72%); box-shadow: var(--shadow); }
+      .command-board::before { position: absolute; inset: 0; opacity: .26; background-image: linear-gradient(#85c7d318 1px, transparent 1px), linear-gradient(90deg, #85c7d318 1px, transparent 1px); background-size: 28px 28px; content: ""; pointer-events: none; }
+      .board-header { position: relative; display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 24px 25px 20px; border-bottom: 1px solid var(--line); }
+      .board-header h2 { margin: 6px 0 0; color: var(--mist); font-size: 1.26rem; letter-spacing: -.045em; }
+      .flow-key { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 11px 16px; color: var(--muted); font-size: .7rem; }
+      .flow-key span { display: inline-flex; align-items: center; gap: 6px; }
+      .flow-key i { display: inline-block; width: 16px; height: 2px; background: var(--teal); }
+      .flow-key i.dotted { background: repeating-linear-gradient(90deg, var(--amber) 0 4px, transparent 4px 8px); }
+
+      .pipeline { position: relative; display: grid; grid-template-columns: repeat(7, minmax(105px, 1fr)); gap: 10px; padding: 44px 22px 38px; }
+      .pipeline::before { position: absolute; top: 93px; left: 6%; right: 6%; height: 1px; background: linear-gradient(90deg, transparent, var(--teal) 8%, var(--teal) 92%, transparent); content: ""; }
+      .pipeline::after { position: absolute; top: 89px; right: 5.1%; border-width: 5px 0 5px 8px; border-style: solid; border-color: transparent transparent transparent var(--teal); content: ""; }
+      .stage { position: relative; z-index: 1; min-height: 145px; border: 1px solid #38727a; border-radius: 0; padding: 15px 13px 12px; background: #0b2a35; color: inherit; text-align: left; cursor: pointer; transition: transform 170ms ease, background 170ms ease, border-color 170ms ease; }
+      .stage:hover { transform: translateY(-5px); border-color: var(--teal); background: #12404c; }
+      .stage[aria-pressed="true"] { border-color: var(--teal); background: #15505a; box-shadow: 0 0 0 3px rgb(108 225 207 / 14%); }
+      .stage-number { display: block; color: var(--teal); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .66rem; font-weight: 800; letter-spacing: .12em; }
+      .stage-title { display: block; margin-top: 24px; color: var(--mist); font-size: .93rem; font-weight: 800; letter-spacing: -.04em; line-height: 1.25; }
+      .stage-topic { display: block; margin-top: 10px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .61rem; line-height: 1.45; }
+      .stage.is-safety .stage-number { color: var(--amber); }
+
+      .detail-dock { position: relative; display: grid; grid-template-columns: .78fr 1.22fr 1fr; gap: 0; border-top: 1px solid var(--line); }
+      .detail-title, .detail-copy, .detail-fact { min-height: 152px; padding: 23px 25px; }
+      .detail-title { border-right: 1px solid var(--line); background: #0a2029; }
+      .detail-title .eyebrow { color: var(--amber); }
+      .detail-title h3 { margin: 9px 0 0; color: var(--mist); font-size: 1.25rem; letter-spacing: -.055em; }
+      .detail-copy { border-right: 1px solid var(--line); color: #c6dbe0; font-size: .86rem; line-height: 1.75; word-break: keep-all; }
+      .detail-copy p, .detail-fact p { margin: 0; }
+      .detail-fact { background: #0c2a34; color: #c8dedf; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .72rem; line-height: 1.75; }
+      .detail-fact strong { display: block; margin-bottom: 7px; color: var(--teal); font-size: .64rem; letter-spacing: .12em; }
+
+      .feedback { display: grid; grid-template-columns: 1fr 180px 1fr; gap: 14px; align-items: center; margin-top: 20px; border: 1px solid var(--line); background: #08212a; }
+      .feedback-group { padding: 20px 23px; }
+      .feedback-group h3 { margin: 6px 0 0; color: var(--mist); font-size: .95rem; letter-spacing: -.04em; }
+      .feedback-group p { margin: 8px 0 0; color: var(--muted); font-size: .75rem; line-height: 1.65; word-break: keep-all; }
+      .feedback-arrow { position: relative; display: grid; min-height: 100%; place-items: center; border-right: 1px solid var(--line); border-left: 1px solid var(--line); color: var(--teal); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .66rem; text-align: center; }
+      .feedback-arrow::before, .feedback-arrow::after { position: absolute; left: 16px; right: 16px; height: 1px; background: var(--teal); content: ""; }
+      .feedback-arrow::before { top: 35px; }
+      .feedback-arrow::after { bottom: 35px; background: var(--blue); }
+      .feedback-arrow span { position: relative; z-index: 1; border: 1px solid #2c5963; padding: 5px 7px; background: #0b2933; }
+
+      .section-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin: 76px 0 21px; }
+      .section-heading h2 { margin: 8px 0 0; font-size: clamp(1.7rem, 3vw, 2.55rem); letter-spacing: -.07em; }
+      .section-heading p:last-child { max-width: 440px; margin: 0; color: var(--muted); font-size: .8rem; line-height: 1.7; text-align: right; word-break: keep-all; }
+
+      .responsibility { display: grid; grid-template-columns: 1fr 1fr 1fr; border: 1px solid var(--line); background: #0a222c; }
+      .responsibility article { padding: 25px; border-right: 1px solid var(--line); }
+      .responsibility article:last-child { border-right: 0; }
+      .responsibility .role-index { color: var(--teal); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .68rem; font-weight: 800; }
+      .responsibility h3 { margin: 17px 0 9px; color: var(--mist); font-size: 1.06rem; letter-spacing: -.045em; }
+      .responsibility p { min-height: 55px; margin: 0; color: #bdD2d6; font-size: .84rem; line-height: 1.75; word-break: keep-all; }
+      .responsibility ul { margin: 19px 0 0; border-top: 1px solid #28515c; padding: 13px 0 0; color: var(--muted); font-size: .72rem; line-height: 1.8; list-style: none; }
+      .responsibility li::before { margin-right: 7px; color: var(--amber); content: "→"; }
+
+      .scenario-board { border: 1px solid var(--line); background: #0a232c; }
+      .scenario-tabs { display: flex; gap: 0; overflow-x: auto; border-bottom: 1px solid var(--line); }
+      .scenario-tab { flex: 1 0 180px; border: 0; border-right: 1px solid var(--line); padding: 15px 18px; background: transparent; color: var(--muted); font-size: .79rem; font-weight: 800; text-align: left; cursor: pointer; transition: background 150ms ease, color 150ms ease; }
+      .scenario-tab:last-child { border-right: 0; }
+      .scenario-tab:hover, .scenario-tab[aria-pressed="true"] { background: #12414b; color: var(--mist); }
+      .scenario-tab[aria-pressed="true"] { box-shadow: inset 0 -3px var(--teal); }
+      .scenario-content { display: grid; grid-template-columns: 1.1fr .9fr; min-height: 265px; }
+      .scenario-sequence { display: flex; align-items: center; gap: 8px; padding: 28px; }
+      .scenario-sequence .node { flex: 1; min-height: 88px; border: 1px solid #3e737b; padding: 12px; background: #0d313b; color: var(--mist); font-size: .76rem; font-weight: 800; line-height: 1.45; }
+      .scenario-sequence .node small { display: block; margin-top: 7px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .59rem; font-weight: 500; }
+      .scenario-sequence .node.extension { border-style: dashed; border-color: var(--amber); background: #372c1a; }
+      .scenario-sequence .arrow { color: var(--teal); font-size: 1.1rem; }
+      .scenario-copy { display: flex; flex-direction: column; justify-content: center; border-left: 1px solid var(--line); padding: 28px; }
+      .scenario-copy h3 { margin: 0; color: var(--mist); font-size: 1.18rem; letter-spacing: -.055em; }
+      .scenario-copy p { margin: 13px 0 0; color: #c5d9dc; font-size: .86rem; line-height: 1.8; word-break: keep-all; }
+      .scenario-state { margin-top: 18px; color: var(--amber); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .67rem; letter-spacing: .04em; }
+
+      .source-strip { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-top: 20px; border-top: 1px solid #29525c; padding-top: 18px; color: #7f9ea5; font-size: .68rem; line-height: 1.6; }
+      .source-strip a { color: var(--teal); }
+      .source-strip span:last-child { text-align: right; }
+      .footer { margin-top: 66px; color: #6e8a91; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .65rem; line-height: 1.7; }
+
+      @media (max-width: 1080px) {
+        .pipeline { grid-template-columns: repeat(4, minmax(120px, 1fr)); }
+        .pipeline::before, .pipeline::after { display: none; }
+        .stage-title { margin-top: 17px; }
+        .hero { grid-template-columns: 1fr; gap: 24px; }
+        .scope-note { max-width: 620px; }
+      }
+      @media (max-width: 780px) {
+        .page { width: min(100% - 24px, 1240px); padding-top: 19px; }
+        .masthead { padding-bottom: 18px; }
+        .verified { display: none; }
+        .hero { padding: 24px 0 36px; }
+        .board-header, .section-heading { align-items: flex-start; flex-direction: column; }
+        .flow-key { justify-content: flex-start; }
+        .pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 20px; }
+        .stage { min-height: 126px; }
+        .detail-dock, .responsibility, .scenario-content { grid-template-columns: 1fr; }
+        .detail-title, .detail-copy, .responsibility article, .scenario-copy { border-right: 0; border-bottom: 1px solid var(--line); }
+        .detail-fact { min-height: auto; }
+        .feedback { grid-template-columns: 1fr; }
+        .feedback-arrow { min-height: 76px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); border-right: 0; border-left: 0; }
+        .section-heading p:last-child { text-align: left; }
+        .scenario-sequence { flex-wrap: wrap; }
+        .scenario-sequence .node { flex: 1 1 110px; }
+        .scenario-sequence .arrow { transform: rotate(0deg); }
+        .source-strip { align-items: flex-start; flex-direction: column; }
+        .source-strip span:last-child { text-align: left; }
+      }
+      @media (max-width: 430px) {
+        h1 { font-size: 2.65rem; }
+        .pipeline { grid-template-columns: 1fr; }
+        .stage { min-height: auto; }
+        .scenario-sequence { display: grid; grid-template-columns: 1fr; }
+        .scenario-sequence .arrow { justify-self: center; transform: rotate(90deg); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        html { scroll-behavior: auto; }
+        *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
+      }
+    </style>
+  </head>
+  <body data-stage="fleet" data-scenario="normal">
+    <main class="page">
+      <header class="masthead">
+        <div class="brand"><span class="brand-mark">N</span> MENTORPI / NAV2 FLOW</div>
+        <p class="verified">현재 프로젝트 설정 기준 · shared_map_navigation</p>
+      </header>
+
+      <section class="hero" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">GOAL → MOTION, ONE DECISION CHAIN</p>
+          <h1 id="page-title">목표 하나가<br /><em>바퀴 명령</em>이 되기까지.</h1>
+          <p class="hero-summary">Fleet Manager가 목표를 보내면, BT Navigator가 절차를 실행하고 NavFn이 지도 전체 경로를 만듭니다. DWB는 그 경로와 현재 센서 지도를 기준으로 지금 보낼 속도를 고릅니다.</p>
+        </div>
+        <p class="scope-note"><strong>중요:</strong> 이 페이지는 현재 <span class="mono">NavFn + DWB</span> 구성을 설명합니다. TEB는 사용 중이 아니며, 기본 BT에는 통로 후진 이탈 절차가 아직 들어 있지 않습니다.</p>
+      </section>
+
+      <section class="command-board" aria-labelledby="flow-title">
+        <div class="board-header">
+          <div>
+            <p class="eyebrow">PRIMARY COMMAND PATH</p>
+            <h2 id="flow-title">클릭해서 각 단계의 책임을 확인하세요</h2>
+          </div>
+          <div class="flow-key" aria-label="시각 표기 범례">
+            <span><i></i>현재 명령 흐름</span>
+            <span><i class="dotted"></i>추가 구현이 필요한 흐름</span>
+          </div>
+        </div>
+
+        <div class="pipeline" aria-label="목표 주행 명령 흐름">
+          <button class="stage" type="button" data-stage-button="fleet" aria-pressed="true">
+            <span class="stage-number">01 / POLICY</span><span class="stage-title">Fleet<br />Manager</span><span class="stage-topic">goal · reservation</span>
+          </button>
+          <button class="stage" type="button" data-stage-button="bt" aria-pressed="false">
+            <span class="stage-number">02 / PROCEDURE</span><span class="stage-title">BT<br />Navigator</span><span class="stage-topic">NavigateToPose</span>
+          </button>
+          <button class="stage" type="button" data-stage-button="navfn" aria-pressed="false">
+            <span class="stage-number">03 / GLOBAL</span><span class="stage-title">NavFn<br />Planner</span><span class="stage-topic">{path}</span>
+          </button>
+          <button class="stage" type="button" data-stage-button="dwb" aria-pressed="false">
+            <span class="stage-number">04 / LOCAL</span><span class="stage-title">DWB<br />Controller</span><span class="stage-topic">cmd_vel_nav</span>
+          </button>
+          <button class="stage" type="button" data-stage-button="smoother" aria-pressed="false">
+            <span class="stage-number">05 / SHAPE</span><span class="stage-title">Velocity<br />Smoother</span><span class="stage-topic">cmd_vel_smoothed</span>
+          </button>
+          <button class="stage is-safety" type="button" data-stage-button="safety" aria-pressed="false">
+            <span class="stage-number">06 / SAFETY</span><span class="stage-title">Collision<br />Monitor</span><span class="stage-topic">controller/cmd_vel</span>
+          </button>
+          <button class="stage" type="button" data-stage-button="motor" aria-pressed="false">
+            <span class="stage-number">07 / ACTUATE</span><span class="stage-title">로봇 하위<br />제어</span><span class="stage-topic">chassis · motor</span>
+          </button>
+        </div>
+
+        <div class="detail-dock" aria-live="polite">
+          <div class="detail-title"><p class="eyebrow">SELECTED LAYER</p><h3 id="stage-detail-title">Fleet Manager · 작업 정책</h3></div>
+          <div class="detail-copy"><p id="stage-detail-copy">어느 로봇이 어떤 목표로 갈지, 통로 예약을 얻었는지를 결정합니다. 현재 Dispatcher는 <span class="mono">corridor_a</span> 예약 후 <span class="mono">NavigateToPose</span> 목표 하나를 전송합니다.</p></div>
+          <div class="detail-fact"><strong id="stage-detail-label">CURRENT INPUT / OUTPUT</strong><p id="stage-detail-fact">입력: task, map_version=v001<br />출력: /robot_N/navigate_to_pose<br />예약 TTL: 120 s</p></div>
+        </div>
+      </section>
+
+      <section class="feedback" aria-label="위치와 장애물 피드백 흐름">
+        <article class="feedback-group">
+          <p class="eyebrow">LOCATION</p><h3>AMCL · map ↔ odom</h3>
+          <p>LiDAR <span class="mono">scan_raw</span>과 odometry로 현재 로봇 위치를 추정합니다. 이 위치가 전역 경로와 로컬 경로를 같은 좌표계에서 연결합니다.</p>
+        </article>
+        <div class="feedback-arrow" aria-hidden="true"><span>feedback loop</span></div>
+        <article class="feedback-group">
+          <p class="eyebrow">OBSTACLE</p><h3>Global · Local Costmap</h3>
+          <p>정적 지도와 LiDAR 관측이 costmap을 갱신합니다. DWB와 Collision Monitor는 이 정보를 이용해 장애물을 피하고, 필요하면 속도를 멈춥니다.</p>
+        </article>
+      </section>
+
+      <section aria-labelledby="roles-title">
+        <div class="section-heading">
+          <div><p class="eyebrow">WHO DECIDES WHAT</p><h2 id="roles-title">판단의 책임은 층마다 다릅니다.</h2></div>
+          <p>“어떻게 지나갈지”와 “지금 어떤 속도를 낼지”는 같은 판단이 아닙니다.</p>
+        </div>
+        <div class="responsibility">
+          <article>
+            <span class="role-index">A / FLEET POLICY</span><h3>작업·통로 정책</h3>
+            <p>Fleet Manager는 통로를 쓸지, 예약을 기다릴지, 어떤 순서로 작업을 수행할지를 결정합니다.</p>
+            <ul><li>task / lane_id / mode 같은 업무 의미</li><li>통로 예약과 로봇 선택</li><li>현재는 목표 하나만 전송</li></ul>
+          </article>
+          <article>
+            <span class="role-index">B / NAV2 PROCEDURE</span><h3>주행 절차</h3>
+            <p>BT Navigator는 어떤 Nav2 행동을 어떤 순서로 실행할지 정합니다. 현재 기본 트리는 경로 생성과 추종만 연결합니다.</p>
+            <ul><li>ComputePathToPose @ 1 Hz</li><li>FollowPath로 이어지는 기본 흐름</li><li>BackUp·DriveOnHeading은 서버에 준비됨</li></ul>
+          </article>
+          <article>
+            <span class="role-index">C / LOCAL CONTROL</span><h3>즉시 주행 판단</h3>
+            <p>DWB는 현재 자세·로컬 costmap·전역 경로를 보고 여러 속도 후보 중 충돌하지 않는 궤적을 고릅니다.</p>
+            <ul><li>15 Hz, vx: −0.08 ~ 0.22 m/s</li><li>경로·목표·장애물 critic</li><li>업무상의 lane 의미는 알지 못함</li></ul>
+          </article>
+        </div>
+      </section>
+
+      <section aria-labelledby="scenario-title">
+        <div class="section-heading">
+          <div><p class="eyebrow">SITUATION CONSOLE</p><h2 id="scenario-title">상황별로 현재 시스템을 읽어보세요.</h2></div>
+          <p>아래 세 상황은 같은 Nav2 스택 위에서 정책과 안전 판단이 어디서 달라지는지 보여 줍니다.</p>
+        </div>
+        <div class="scenario-board">
+          <div class="scenario-tabs" role="group" aria-label="주행 상황 선택">
+            <button class="scenario-tab" type="button" data-scenario-button="normal" aria-pressed="true">01 · 정상 목표 주행</button>
+            <button class="scenario-tab" type="button" data-scenario-button="blocked" aria-pressed="false">02 · 장애물로 정지</button>
+            <button class="scenario-tab" type="button" data-scenario-button="corridor" aria-pressed="false">03 · 통로 후진 이탈</button>
+          </div>
+          <div class="scenario-content">
+            <div id="scenario-sequence" class="scenario-sequence" aria-label="선택한 상황의 동작 순서">
+              <div class="node">Fleet Manager<small>goal + reservation</small></div><span class="arrow">→</span>
+              <div class="node">NavFn + DWB<small>plan + local command</small></div><span class="arrow">→</span>
+              <div class="node">Safety → Motor<small>filtered cmd_vel</small></div>
+            </div>
+            <div class="scenario-copy">
+              <h3 id="scenario-heading">정상 목표 주행</h3>
+              <p id="scenario-description">Fleet Manager가 예약을 확보한 뒤 목표를 전송합니다. BT는 경로를 만들고 DWB는 현재 costmap을 피하면서 속도를 선택합니다.</p>
+              <span id="scenario-state" class="scenario-state">CURRENT CONFIGURATION</span>
+            </div>
+          </div>
+        </div>
+        <div class="source-strip">
+          <span>근거: <span class="mono">shared_map_navigation.launch.py</span>, <span class="mono">nav2.yaml</span>, <span class="mono">navigate_to_pose.xml</span>, <span class="mono">collision_monitor.yaml</span>, <span class="mono">dispatcher.py</span></span>
+          <span>점선 노드는 현재 설정이 아니라 <strong>통로 정책을 위한 제안 확장</strong>입니다.</span>
+        </div>
+      </section>
+
+      <footer class="footer">MENTORPI NAV2 FLOW EXPLAINER · 정적 설명 페이지 · 실제 ROS 토픽을 발행하거나 차량을 제어하지 않습니다.</footer>
+    </main>
+
+    <script>
+      (() => {
+        const stages = {
+          fleet: {
+            title: 'Fleet Manager · 작업 정책',
+            copy: '어느 로봇이 어떤 목표로 갈지, 통로 예약을 얻었는지를 결정합니다. 현재 Dispatcher는 corridor_a 예약 후 NavigateToPose 목표 하나를 전송합니다.',
+            label: 'CURRENT INPUT / OUTPUT',
+            fact: '입력: task, map_version=v001<br>출력: /robot_N/navigate_to_pose<br>예약 TTL: 120 s',
+          },
+          bt: {
+            title: 'BT Navigator · 절차 제어',
+            copy: 'BT는 “어떤 행동을 어떤 순서로 할지”를 실행하는 절차 엔진입니다. 현재 기본 트리는 1 Hz로 경로를 다시 만들고, FollowPath에 그 경로를 전달합니다.',
+            label: 'CURRENT TREE',
+            fact: 'PipelineSequence<br>ComputePathToPose @ 1 Hz<br>→ FollowPath',
+          },
+          navfn: {
+            title: 'NavFn · 전역 경로 계획',
+            copy: '정적 지도와 global costmap을 사용해 시작점부터 목표까지의 큰 길을 만듭니다. 이 단계는 통로에서 후진해야 한다는 업무 규칙을 표현하지 않습니다.',
+            label: 'CURRENT PLANNER',
+            fact: 'planner_id: GridBased<br>NavfnPlanner · tolerance 0.25 m<br>allow_unknown: true',
+          },
+          dwb: {
+            title: 'DWB · 로컬 제어',
+            copy: '현재 자세, 로컬 costmap, 전역 경로를 바탕으로 속도 후보를 점수화합니다. 충돌·경로 정렬·목표 방향을 평가해 바로 다음 cmd_vel을 선택합니다.',
+            label: 'CURRENT CONTROLLER',
+            fact: '15 Hz · vx −0.08 ~ 0.22 m/s<br>15 × 20 velocity samples<br>BaseObstacle · Path · Goal critics',
+          },
+          smoother: {
+            title: 'Velocity Smoother · 속도 형상화',
+            copy: 'DWB가 고른 속도의 변화량을 제한해 더 매끄러운 명령으로 만듭니다. 이 뒤의 Collision Monitor가 최종 안전 필터 역할을 합니다.',
+            label: 'CURRENT LIMITS',
+            fact: '20 Hz · OPEN_LOOP<br>max: [0.22, 0.0, 0.75]<br>min: [−0.08, 0.0, −0.75]',
+          },
+          safety: {
+            title: 'Collision Monitor · 최종 안전',
+            copy: 'LiDAR가 정지 또는 감속 폴리곤 안에 장애물을 감지하면, 뒤 단계로 갈 속도 명령을 줄이거나 멈춥니다. 경로 정책을 새로 만들지는 않습니다.',
+            label: 'CURRENT SAFETY TOPICS',
+            fact: 'in: cmd_vel_smoothed<br>out: controller/cmd_vel<br>slowdown ratio: 0.35',
+          },
+          motor: {
+            title: '로봇 하위 제어 · 구동',
+            copy: '안전 필터를 지난 속도 명령이 차량 하위 제어로 전달되어 실제 바퀴 구동으로 이어집니다. Nav2는 이 단계에서 모터를 직접 제어하지 않습니다.',
+            label: 'COMMAND HANDOFF',
+            fact: 'controller/cmd_vel<br>→ chassis controller<br>→ motor actuation',
+          },
+        };
+
+        const scenarios = {
+          normal: {
+            heading: '정상 목표 주행',
+            description: 'Fleet Manager가 예약을 확보한 뒤 목표를 전송합니다. BT는 경로를 만들고 DWB는 현재 costmap을 피하면서 속도를 선택합니다.',
+            state: 'CURRENT CONFIGURATION',
+            nodes: [
+              ['Fleet Manager', 'goal + reservation', false],
+              ['NavFn + DWB', 'plan + local command', false],
+              ['Safety → Motor', 'filtered cmd_vel', false],
+            ],
+          },
+          blocked: {
+            heading: '장애물로 정지',
+            description: 'Collision Monitor가 감속 또는 정지를 우선합니다. 장시간 진행하지 못하면 Nav2 액션은 실패할 수 있습니다.',
+            state: 'SAFETY OVERRIDES MOTION',
+            nodes: [
+              ['DWB', 'local velocity candidate', false],
+              ['Collision Monitor', 'slow / stop polygon', false],
+              ['Progress Checker', '12 s without 0.15 m', false],
+            ],
+          },
+          corridor: {
+            heading: '통로 후진 이탈',
+            description: '현재 기본 BT에는 이탈 후진 절차가 없습니다. Fleet Manager가 DriveOnHeading/BackUp 액션을 순서대로 요청하거나 커스텀 BT가 필요합니다.',
+            state: 'PROPOSED EXTENSION · NOT CURRENT DEFAULT',
+            nodes: [
+              ['NavigateToPose', '통로 입구까지 전진', false],
+              ['DriveOnHeading', '자세 고정 통과', true],
+              ['BackUp', '후진 이탈', true],
+            ],
+          },
+        };
+
+        const body = document.body;
+        const stageTitle = document.querySelector('#stage-detail-title');
+        const stageCopy = document.querySelector('#stage-detail-copy');
+        const stageLabel = document.querySelector('#stage-detail-label');
+        const stageFact = document.querySelector('#stage-detail-fact');
+        const scenarioHeading = document.querySelector('#scenario-heading');
+        const scenarioDescription = document.querySelector('#scenario-description');
+        const scenarioState = document.querySelector('#scenario-state');
+        const scenarioSequence = document.querySelector('#scenario-sequence');
+
+        function selectStage(id) {
+          const stage = stages[id];
+          if (!stage) return;
+          body.dataset.stage = id;
+          document.querySelectorAll('[data-stage-button]').forEach((button) => {
+            button.setAttribute('aria-pressed', String(button.dataset.stageButton === id));
+          });
+          stageTitle.textContent = stage.title;
+          stageCopy.textContent = stage.copy;
+          stageLabel.textContent = stage.label;
+          stageFact.innerHTML = stage.fact;
+        }
+
+        function selectScenario(id) {
+          const scenario = scenarios[id];
+          if (!scenario) return;
+          body.dataset.scenario = id;
+          document.querySelectorAll('[data-scenario-button]').forEach((button) => {
+            button.setAttribute('aria-pressed', String(button.dataset.scenarioButton === id));
+          });
+          scenarioHeading.textContent = scenario.heading;
+          scenarioDescription.textContent = scenario.description;
+          scenarioState.textContent = scenario.state;
+          scenarioSequence.replaceChildren();
+          scenario.nodes.forEach((node, index) => {
+            const item = document.createElement('div');
+            item.className = `node${node[2] ? ' extension' : ''}`;
+            item.textContent = node[0];
+            const detail = document.createElement('small');
+            detail.textContent = node[1];
+            item.append(detail);
+            scenarioSequence.append(item);
+            if (index < scenario.nodes.length - 1) {
+              const arrow = document.createElement('span');
+              arrow.className = 'arrow';
+              arrow.setAttribute('aria-hidden', 'true');
+              arrow.textContent = '→';
+              scenarioSequence.append(arrow);
+            }
+          });
+        }
+
+        document.querySelectorAll('[data-stage-button]').forEach((button) => {
+          button.addEventListener('click', () => selectStage(button.dataset.stageButton));
+        });
+        document.querySelectorAll('[data-scenario-button]').forEach((button) => {
+          button.addEventListener('click', () => selectScenario(button.dataset.scenarioButton));
+        });
+      })();
+    </script>
+  </body>
+</html>

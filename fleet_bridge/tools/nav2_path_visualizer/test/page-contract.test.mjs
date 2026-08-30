@@ -41,6 +41,19 @@ test('page exposes separate hover inspection, pose picking, and map zoom control
   assert.match(app, /wheel/);
 });
 
+test('page exposes Nav2 command-ready pose values in degrees, radians, and quaternion form', () => {
+  const html = readFileSync(`${toolRoot}/index.html`, 'utf8');
+  const app = readFileSync(`${toolRoot}/app.mjs`, 'utf8');
+
+  assert.match(html, /id="start-nav2-pose"/);
+  assert.match(html, /id="goal-nav2-pose"/);
+  assert.match(html, /id="start-yaw-rad"/);
+  assert.match(html, /id="goal-yaw-rad"/);
+  assert.match(html, /id="goal-nav2-command"/);
+  assert.match(html, /id="copy-goal-command"/);
+  assert.match(app, /toNav2Pose/);
+});
+
 test('page embeds navigation code so file:// has no JavaScript subresource CORS request', () => {
   const html = readFileSync(`${toolRoot}/index.html`, 'utf8');
   const model = readFileSync(`${toolRoot}/model.mjs`, 'utf8').trim();

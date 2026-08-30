@@ -13,6 +13,7 @@ const {
   gridToWorld,
   parseMapYaml,
   parsePgm,
+  toNav2Pose,
   worldToGrid,
   zoomMapView,
 } = globalThis.Nav2PathModel;
@@ -133,6 +134,20 @@ test('drag direction converts from canvas axes into Nav2 yaw', () => {
   assert.equal(canvasVectorToYaw({ x: 10, y: 0 }), 0);
   assert.equal(canvasVectorToYaw({ x: 0, y: -10 }), Math.PI / 2);
   assert.equal(canvasVectorToYaw({ x: 0, y: 10 }), -Math.PI / 2);
+});
+
+test('Nav2 pose exposes degree, radian, and quaternion orientation values', () => {
+  assert.equal(typeof toNav2Pose, 'function');
+
+  const pose = toNav2Pose({ x: 1.25, y: -0.75, yaw: Math.PI / 2 });
+
+  assert.deepEqual(pose.position, { x: 1.25, y: -0.75, z: 0 });
+  assert.equal(pose.yawRadians, Math.PI / 2);
+  assert.equal(pose.yawDegrees, 90);
+  assert.equal(pose.orientation.x, 0);
+  assert.equal(pose.orientation.y, 0);
+  assert.ok(Math.abs(pose.orientation.z - Math.SQRT1_2) < 1e-12);
+  assert.ok(Math.abs(pose.orientation.w - Math.SQRT1_2) < 1e-12);
 });
 
 test('navigation result exposes global, transformed, and selected local plans', () => {

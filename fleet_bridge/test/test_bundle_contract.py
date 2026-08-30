@@ -136,6 +136,17 @@ class ConfigurationContractTest(unittest.TestCase):
         self.assertFalse(allowed('/robot_3/odom'))
         self.assertFalse(allowed('/controller_server/map'))
 
+    def test_server_foxglove_exposes_the_central_warehouse_zone_overlay(self):
+        document = yaml.safe_load(
+            (BUNDLE / 'config/server_foxglove.yaml').read_text(encoding='utf-8'),
+        )
+        whitelist = document['foxglove_bridge']['ros__parameters']['topic_whitelist']
+
+        self.assertTrue(any(
+            re.fullmatch(pattern, '/warehouse/zones')
+            for pattern in whitelist
+        ))
+
     def test_server_foxglove_exposes_every_namespaced_vehicle_topic(self):
         document = yaml.safe_load(
             (BUNDLE / 'config/server_foxglove.yaml').read_text(encoding='utf-8'),

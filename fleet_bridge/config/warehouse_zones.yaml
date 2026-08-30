@@ -1,0 +1,90 @@
+# 물류 구역별 중심 좌표를 Foxglove에서 점과 라벨로 표시하는 정적 관제 레이아웃이다.
+# Goal은 차량 중심점이 아래 직사각형 중심점에서 약 15 cm 떨어지도록 별도로 보정한다.
+version: 2
+frame_id: map
+topic: /warehouse/zones
+goal_center_offset_m: 0.15
+marker_style:
+  # 차량 메시보다 낮은 바닥 레이어에 그려 차량을 가리지 않도록 한다.
+  point_center_z_m: 0.003
+  point_diameter_m: 0.06
+  point_height_m: 0.006
+  label_z_m: 0.012
+  label_size_m: 0.12
+point_groups:
+  - id: P
+    label: PALLET
+    color: [0.0, 0.243, 0.612]
+  - id: F
+    label: FRESH
+    color: [0.365, 0.569, 0.216]
+  - id: N
+    label: NORMAL
+    color: [0.992, 0.122, 0.082]
+points:
+  - id: P1
+    group: P
+    center: [0.17, -2.56]
+  - id: P2
+    group: P
+    center: [-0.08, -2.56]
+  - id: P3
+    group: P
+    center: [-0.33, -2.56]
+  - id: P4
+    group: P
+    center: [-0.58, -2.56]
+  - id: F1
+    group: F
+    center: [0.19, -1.36]
+  - id: F2
+    group: F
+    center: [0.19, -1.53]
+  - id: F3
+    group: F
+    center: [0.19, -1.70]
+  - id: F4
+    group: F
+    center: [0.00, -1.36]
+  - id: F5
+    group: F
+    center: [0.00, -1.53]
+  - id: F6
+    group: F
+    center: [0.00, -1.70]
+  - id: F7
+    group: F
+    center: [-0.17, -1.36]
+  - id: F8
+    group: F
+    center: [-0.17, -1.53]
+  - id: F9
+    group: F
+    center: [-0.17, -1.70]
+  - id: N1
+    group: N
+    center: [-0.75, 0.03]
+  - id: N2
+    group: N
+    center: [-0.57, 0.03]
+  - id: N3
+    group: N
+    center: [-0.39, 0.03]
+  - id: N4
+    group: N
+    center: [-0.75, -0.15]
+  - id: N5
+    group: N
+    center: [-0.57, -0.15]
+  - id: N6
+    group: N
+    center: [-0.39, -0.15]
+  - id: N7
+    group: N
+    center: [-0.75, -0.33]
+  - id: N8
+    group: N
+    center: [-0.57, -0.33]
+  - id: N9
+    group: N
+    center: [-0.39, -0.33]

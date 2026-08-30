@@ -7,6 +7,7 @@ foxglove_bridge:
       - ^/map$
       # map-publisher publishes map -> map_visualization on this dynamic TF topic.
       - ^/tf$
+      - ^/warehouse/zones$
     best_effort_qos_topic_whitelist:
       - ^/tf$
       - ^/robot_(1|2)/(tf|odom|odom_raw|odom_rf2o|scan_filtered|imu|imu_corrected|joint_states|joy|cost_cloud)$

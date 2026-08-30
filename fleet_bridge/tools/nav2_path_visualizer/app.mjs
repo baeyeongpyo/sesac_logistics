@@ -7,10 +7,11 @@ const {
   createOccupancyMap,
   parseMapYaml,
   parsePgm,
+  toNav2Pose,
   zoomMapView,
 } = globalThis.Nav2PathModel ?? {};
 
-if (!computeNavigation || !canvasToMapPoint || !createMapTransform || !zoomMapView) {
+if (!computeNavigation || !canvasToMapPoint || !createMapTransform || !toNav2Pose || !zoomMapView) {
   throw new Error('Nav2PathModel 초기화에 실패했습니다.');
 }
 
@@ -43,6 +44,22 @@ const elements = {
   metricCandidates: document.querySelector('#metric-candidates'),
   metricVelocity: document.querySelector('#metric-velocity'),
   metricScore: document.querySelector('#metric-score'),
+  startNav2Pose: document.querySelector('#start-nav2-pose'),
+  startNav2X: document.querySelector('#start-nav2-x'),
+  startNav2Y: document.querySelector('#start-nav2-y'),
+  startYawDegrees: document.querySelector('#start-yaw-deg'),
+  startYawRadians: document.querySelector('#start-yaw-rad'),
+  startQuaternionZ: document.querySelector('#start-quaternion-z'),
+  startQuaternionW: document.querySelector('#start-quaternion-w'),
+  goalNav2Pose: document.querySelector('#goal-nav2-pose'),
+  goalNav2X: document.querySelector('#goal-nav2-x'),
+  goalNav2Y: document.querySelector('#goal-nav2-y'),
+  goalYawDegrees: document.querySelector('#goal-yaw-deg'),
+  goalYawRadians: document.querySelector('#goal-yaw-rad'),
+  goalQuaternionZ: document.querySelector('#goal-quaternion-z'),
+  goalQuaternionW: document.querySelector('#goal-quaternion-w'),
+  goalNav2Command: document.querySelector('#goal-nav2-command'),
+  copyGoalCommand: document.querySelector('#copy-goal-command'),
 };
 
 const state = {
@@ -68,6 +85,47 @@ function readPose(prefix) {
     y: numberInput(`${prefix}-y`),
     yaw: numberInput(`${prefix}-yaw`) * (Math.PI / 180),
   };
+}
+
+function hasFinitePose(pose) {
+  return Number.isFinite(pose.x) && Number.isFinite(pose.y) && Number.isFinite(pose.yaw);
+}
+
+function formatPoseNumber(value, digits, unit = '') {
+  return Number.isFinite(value) ? `${value.toFixed(digits)}${unit ? ` ${unit}` : ''}` : '—';
+}
+
+function createNavigateToPoseCommand(nav2Pose) {
+  const { position, orientation } = nav2Pose;
+  return `ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose "{pose: {header: {frame_id: 'map'}, pose: {position: {x: ${position.x.toFixed(4)}, y: ${position.y.toFixed(4)}, z: 0.0}, orientation: {x: 0.0, y: 0.0, z: ${orientation.z.toFixed(6)}, w: ${orientation.w.toFixed(6)}}}}}"`;
+}
+
+function renderNav2Pose(prefix) {
+  const pose = readPose(prefix);
+  const valid = hasFinitePose(pose);
+  const nav2Pose = valid ? toNav2Pose(pose) : undefined;
+  const idPrefix = prefix === 'start' ? 'start' : 'goal';
+  const poseContainer = elements[`${idPrefix}Nav2Pose`];
+
+  poseContainer.classList.toggle('is-invalid', !valid);
+  elements[`${idPrefix}Nav2X`].textContent = valid ? formatPoseNumber(nav2Pose.position.x, 3, 'm') : '—';
+  elements[`${idPrefix}Nav2Y`].textContent = valid ? formatPoseNumber(nav2Pose.position.y, 3, 'm') : '—';
+  elements[`${idPrefix}YawDegrees`].textContent = valid ? formatPoseNumber(nav2Pose.yawDegrees, 1, '°') : '—';
+  elements[`${idPrefix}YawRadians`].textContent = valid ? formatPoseNumber(nav2Pose.yawRadians, 4, 'rad') : '—';
+  elements[`${idPrefix}QuaternionZ`].textContent = valid ? formatPoseNumber(nav2Pose.orientation.z, 6) : '—';
+  elements[`${idPrefix}QuaternionW`].textContent = valid ? formatPoseNumber(nav2Pose.orientation.w, 6) : '—';
+
+  if (prefix === 'goal') {
+    elements.goalNav2Command.textContent = valid
+      ? createNavigateToPoseCommand(nav2Pose)
+      : '유효한 Goal x, y, yaw 값을 입력하면 실행 명령을 생성합니다.';
+    elements.copyGoalCommand.disabled = !valid;
+  }
+}
+
+function renderNav2Poses() {
+  renderNav2Pose('start');
+  renderNav2Pose('goal');
 }
 
 function setStatus(message, kind = '') {
@@ -317,6 +375,7 @@ function updatePoseFromMapPoint(mode, mapPoint, vector) {
     document.querySelector(`#${mode}-yaw`).value = yawDegrees.toFixed(1);
   }
   state[mode] = readPose(mode);
+  renderNav2Poses();
   clearResultForPoseEdit();
   const modeLabel = mode === 'start' ? 'Start' : 'Goal';
   setStatus(`${modeLabel} 좌표를 지도에서 입력했습니다.${hasHeading ? ' 드래그 방향으로 yaw도 설정했습니다.' : ' yaw는 기존 값을 유지합니다.'}`, 'success');
@@ -377,6 +436,7 @@ function useExampleMap() {
 function runNavigation() {
   const start = readPose('start');
   const goal = readPose('goal');
+  renderNav2Poses();
   const result = computeNavigation({ map: state.map, start, goal });
   state.start = start;
   state.goal = goal;
@@ -450,11 +510,41 @@ function onPointerLeave() {
   renderCanvas();
 }
 
+async function copyGoalCommand() {
+  const command = elements.goalNav2Command.textContent;
+  if (elements.copyGoalCommand.disabled || !command) return;
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(command);
+    } else {
+      const textarea = document.createElement('textarea');
+      textarea.value = command;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.append(textarea);
+      textarea.select();
+      const copied = document.execCommand('copy');
+      textarea.remove();
+      if (!copied) throw new Error('clipboard unavailable');
+    }
+    elements.copyGoalCommand.textContent = '복사됨';
+    setStatus('Goal Nav2 action 명령을 클립보드에 복사했습니다.', 'success');
+    window.setTimeout(() => { elements.copyGoalCommand.textContent = '명령 복사'; }, 1800);
+  } catch {
+    setStatus('명령 복사에 실패했습니다. 아래 명령을 직접 선택해 복사하세요.', 'error');
+  }
+}
+
 elements.loadMap.addEventListener('click', loadMapFromFiles);
 elements.useExampleMap.addEventListener('click', useExampleMap);
 elements.runNavigation.addEventListener('click', runNavigation);
 elements.pickStart.addEventListener('click', () => setPickMode('start'));
 elements.pickGoal.addEventListener('click', () => setPickMode('goal'));
+for (const id of ['start-x', 'start-y', 'start-yaw', 'goal-x', 'goal-y', 'goal-yaw']) {
+  document.querySelector(`#${id}`).addEventListener('input', renderNav2Poses);
+}
+elements.copyGoalCommand.addEventListener('click', copyGoalCommand);
 elements.zoomOut.addEventListener('click', () => applyZoom(1 / ZOOM_STEP, canvasCenter()));
 elements.zoomIn.addEventListener('click', () => applyZoom(ZOOM_STEP, canvasCenter()));
 elements.zoomFit.addEventListener('click', () => {
@@ -477,5 +567,6 @@ setPickMode();
 updateHover({ x: -1, y: -1 });
 updateZoomReadout();
 renderMetrics();
+renderNav2Poses();
 renderCanvas();
 document.documentElement.dataset.nav2PathRuntime = 'ready';
