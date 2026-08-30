@@ -14,7 +14,7 @@
   <link name="base_link">
     <visual>
       <origin xyz="0 0 -0.014" rpy="0 0 0"/>
-      <geometry><mesh filename="package://hiwonder_mecanum_forklift/meshes/mentorpi/base_link.STL"/></geometry>
+      <geometry><mesh filename="../meshes/mentorpi/base_link.STL"/></geometry>
       <material name="chassis_dark"/>
     </visual>
     <visual>
@@ -34,7 +34,7 @@
     </visual>
     <visual>
       <origin xyz="-0.012242 0 0.078501" rpy="0 0 0"/>
-      <geometry><mesh filename="package://hiwonder_mecanum_forklift/meshes/mentorpi/lidar_Link.STL"/></geometry>
+      <geometry><mesh filename="../meshes/mentorpi/lidar_Link.STL"/></geometry>
       <material name="chassis_dark"/>
     </visual>
   </link>
@@ -89,7 +89,7 @@
     <visual><origin xyz="-0.004 0 0.152" rpy="0 0 0"/><geometry><cylinder radius="0.0075" length="0.012"/></geometry><material name="beacon"/></visual>
     <visual>
       <origin xyz="0.035 0 0.100" rpy="0 0.610865 0"/>
-      <geometry><mesh filename="package://hiwonder_mecanum_forklift/meshes/mentorpi/cam_Link.STL"/></geometry>
+      <geometry><mesh filename="../meshes/mentorpi/cam_Link.STL"/></geometry>
       <material name="metal"/>
     </visual>
   </link>

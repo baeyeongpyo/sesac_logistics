@@ -108,7 +108,7 @@ def main(argv: list[str] | None = None) -> None:
         description='Serve Foxglove 3D Panel assets over HTTP.',
     )
     parser.add_argument('--bind', default='0.0.0.0')
-    parser.add_argument('--port', type=int, default=8081)
+    parser.add_argument('--port', type=int, default=8088)
     parser.add_argument('--directory', default='/assets')
     arguments = parser.parse_args(argv)
 

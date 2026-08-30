@@ -34,10 +34,10 @@ docker compose ps
 Foxglove 3D Panel의 URDF Custom Layer URL은 다음과 같다.
 
 ```text
-http://<관제-서버-LAN-IP>:<ASSET_PORT>/hiwonder_mecanum_forklift/urdf/hiwonder_mecanum_forklift.urdf
+http://<관제-서버-LAN-IP>:8088/hiwonder_mecanum_forklift/urdf/hiwonder_mecanum_forklift.urdf
 ```
 
-URL에 `hiwonder_mecanum_forklift`가 포함되어 있으므로 URDF 내부의
-`package://hiwonder_mecanum_forklift/meshes/...` 경로가 같은 서버의 mesh로 해석된다.
-서버는 Foxglove 웹 앱에 필요한 CORS와 HTTP byte-range 응답을 제공한다. `ASSET_PORT`는
-신뢰된 LAN PC에서만 접근하도록 방화벽을 설정한다.
+기본 `ASSET_PORT`는 `8088`이며, 변경했다면 URL의 포트도 같은 값으로 바꾼다.
+URDF 내부 mesh는 URDF 디렉터리를 기준으로 한 `../meshes/...` 상대 경로여서 같은 서버의
+mesh URL로 해석된다. 서버는 Foxglove 웹 앱에 필요한 CORS와 HTTP byte-range 응답을
+제공한다. `ASSET_PORT`는 신뢰된 LAN PC에서만 접근하도록 방화벽을 설정한다.

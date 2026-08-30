@@ -9,6 +9,7 @@ from http.client import HTTPConnection
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Thread
+from urllib.parse import urljoin
 
 
 BUNDLE = Path(__file__).resolve().parents[1]
@@ -37,6 +38,10 @@ class FoxgloveAssetServerBundleTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         service = json.loads(result.stdout)['services']['asset-server']
+        self.assertEqual(service['command'], [
+            'python3', '/app/serve_assets.py', '--port', '8088', '--bind',
+            '0.0.0.0', '--directory', '/assets',
+        ])
         mount = {item['target']: item for item in service['volumes']}['/assets']
         self.assertEqual(mount['source'], str(BUNDLE / 'assets'))
         self.assertTrue(mount['read_only'])
@@ -65,9 +70,21 @@ class FoxgloveAssetServerBundleTest(unittest.TestCase):
         self.assertEqual(
             mesh_uris,
             {
-                'package://hiwonder_mecanum_forklift/meshes/mentorpi/base_link.STL',
-                'package://hiwonder_mecanum_forklift/meshes/mentorpi/cam_Link.STL',
-                'package://hiwonder_mecanum_forklift/meshes/mentorpi/lidar_Link.STL',
+                '../meshes/mentorpi/base_link.STL',
+                '../meshes/mentorpi/cam_Link.STL',
+                '../meshes/mentorpi/lidar_Link.STL',
+            },
+        )
+        urdf_url = (
+            'http://assets.example/hiwonder_mecanum_forklift/urdf/'
+            'hiwonder_mecanum_forklift.urdf'
+        )
+        self.assertEqual(
+            {urljoin(urdf_url, uri) for uri in mesh_uris},
+            {
+                'http://assets.example/hiwonder_mecanum_forklift/meshes/mentorpi/base_link.STL',
+                'http://assets.example/hiwonder_mecanum_forklift/meshes/mentorpi/cam_Link.STL',
+                'http://assets.example/hiwonder_mecanum_forklift/meshes/mentorpi/lidar_Link.STL',
             },
         )
 
@@ -79,7 +96,7 @@ class FoxgloveAssetServerBundleTest(unittest.TestCase):
             environment.update({
                 'ASSET_DIRECTORY': directory,
                 'ASSET_BIND_ADDRESS': '0.0.0.0',
-                'ASSET_PORT': '8081',
+                'ASSET_PORT': '8088',
             })
             result = subprocess.run(
                 [
@@ -98,7 +115,7 @@ class FoxgloveAssetServerBundleTest(unittest.TestCase):
         service = json.loads(result.stdout)['services']['asset-server']
         self.assertEqual(service['network_mode'], 'host')
         self.assertEqual(service['command'], [
-            'python3', '/app/serve_assets.py', '--port', '8081', '--bind',
+            'python3', '/app/serve_assets.py', '--port', '8088', '--bind',
             '0.0.0.0', '--directory', '/assets',
         ])
         mounts = {mount['target']: mount for mount in service['volumes']}
