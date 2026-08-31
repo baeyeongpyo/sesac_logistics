@@ -627,31 +627,7 @@ class TestPanel:
             ),
             padding=10,
         )
-        tuning = self.tuning_frame
-        tuning_columns = 5
-        entry_fields = [
-            field for field in TUNING_FIELDS if field[0] not in CHECKBOX_KEYS
-        ]
-        for index, (key, label, _default, _kind, _minimum, _maximum) in enumerate(
-            entry_fields
-        ):
-            column = index % tuning_columns
-            label_row = (index // tuning_columns) * 2
-            ttk.Label(tuning, text=label).grid(
-                row=label_row, column=column, sticky="w", padx=3
-            )
-            ttk.Entry(
-                tuning, textvariable=self.tuning_vars[key], width=12
-            ).grid(row=label_row + 1, column=column, sticky="ew", padx=3)
-            tuning.columnconfigure(column, weight=1)
-        action_row = ((len(entry_fields) - 1) // tuning_columns + 1) * 2
-        self.add_action_button(
-            tuning, "설정 저장", self.save_tuning,
-            row=action_row, column=0, columnspan=tuning_columns, pady=(8, 3),
-        )
-        ttk.Label(tuning, textvariable=self.tuning_notice).grid(
-            row=action_row + 1, column=0, columnspan=tuning_columns, sticky="w", padx=3
-        )
+        self.tuning_built = False
 
         actions = ttk.LabelFrame(controls, text="적재·포크 명령", padding=4)
         self.actions_frame = actions
@@ -706,6 +682,37 @@ class TestPanel:
         self.log.configure(yscrollcommand=scrollbar.set)
         self.log.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+
+    def build_tuning_fields(self):
+        """Create the large tuning form only when the user first opens it."""
+        if self.tuning_built:
+            return
+        tuning = self.tuning_frame
+        tuning_columns = 5
+        entry_fields = [
+            field for field in TUNING_FIELDS if field[0] not in CHECKBOX_KEYS
+        ]
+        for index, (key, label, _default, _kind, _minimum, _maximum) in enumerate(
+            entry_fields
+        ):
+            column = index % tuning_columns
+            label_row = (index // tuning_columns) * 2
+            ttk.Label(tuning, text=label).grid(
+                row=label_row, column=column, sticky="w", padx=3
+            )
+            ttk.Entry(
+                tuning, textvariable=self.tuning_vars[key], width=12
+            ).grid(row=label_row + 1, column=column, sticky="ew", padx=3)
+            tuning.columnconfigure(column, weight=1)
+        action_row = ((len(entry_fields) - 1) // tuning_columns + 1) * 2
+        self.add_action_button(
+            tuning, "설정 저장", self.save_tuning,
+            row=action_row, column=0, columnspan=tuning_columns, pady=(8, 3),
+        )
+        ttk.Label(tuning, textvariable=self.tuning_notice).grid(
+            row=action_row + 1, column=0, columnspan=tuning_columns, sticky="w", padx=3
+        )
+        self.tuning_built = True
 
     def add_action_button(self, parent, text, command, **grid):
         button = ttk.Button(
@@ -763,6 +770,7 @@ class TestPanel:
             self.tuning_frame.pack_forget()
             self.tuning_toggle_button.configure(text="▶ Auto Dock 상세 설정 펼치기")
         else:
+            self.build_tuning_fields()
             self.tuning_frame.pack(
                 fill="x", padx=12, pady=4, before=self.actions_frame
             )

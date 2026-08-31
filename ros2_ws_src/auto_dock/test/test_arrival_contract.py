@@ -1947,6 +1947,32 @@ def test_tape_only_search_never_falls_through_to_rear_lidar_forward(monkeypatch)
     assert fake.statuses[-1][1] == "warning_tape_missing_lateral_search"
 
 
+def test_guarded_tick_retains_state_when_one_control_tick_raises(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.state = "coarse_align"
+    fake.last_tick_error_at = 0.0
+    fake.last_tick_error_signature = None
+    fake.tick = lambda: (_ for _ in ()).throw(KeyError("bad frame"))
+    stops = []
+    statuses = []
+    errors = []
+    fake.stop_drive = lambda *_args: stops.append(True)
+    fake.publish_status = lambda state, reason, **extra: statuses.append(
+        (state, reason, extra)
+    )
+    fake.get_logger = lambda: type(
+        "Logger", (), {"error": lambda _self, message: errors.append(message)}
+    )()
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
+
+    AutoDockNode.guarded_tick(fake)
+
+    assert fake.state == "coarse_align"
+    assert stops == [True]
+    assert statuses[-1][1] == "internal_tick_error"
+    assert "KeyError" in errors[-1]
+
+
 def missing_tape_recovery_fake(front_margin, rear_margin):
     fake = type("FakeDock", (), {})()
     fake.tape_recovery_done = False

@@ -12,6 +12,7 @@ import os
 import re
 import socket
 import time
+import traceback
 from pathlib import Path
 
 import cv2
@@ -1358,7 +1359,9 @@ class AutoDockNode(Node):
             str(self.get_parameter("control_host").value),
             int(self.get_parameter("control_port").value),
         )
-        self.timer = self.create_timer(0.05, self.tick)
+        self.last_tick_error_at = 0.0
+        self.last_tick_error_signature = None
+        self.timer = self.create_timer(0.05, self.guarded_tick)
         self.publish_status("idle", "ready")
 
     def topic_or_default(self, parameter, default):
@@ -3023,6 +3026,38 @@ class AutoDockNode(Node):
             range_m=round(distance, 3), clearance_m=round(clearance, 3),
         )
         return True
+
+    def guarded_tick(self):
+        """Keep one transient FSM exception from resetting the whole mission."""
+        try:
+            self.tick()
+        except Exception as exc:
+            try:
+                self.stop_drive(10)
+            except Exception:
+                pass
+            now = time.monotonic()
+            signature = f"{type(exc).__name__}: {exc}"
+            if (
+                signature != getattr(self, "last_tick_error_signature", None)
+                or now - getattr(self, "last_tick_error_at", 0.0) >= 1.0
+            ):
+                self.last_tick_error_signature = signature
+                self.last_tick_error_at = now
+                self.get_logger().error(
+                    "auto-dock FSM tick failed; state retained for retry:\n"
+                    + traceback.format_exc()
+                )
+                try:
+                    self.publish_status(
+                        "waiting", "internal_tick_error",
+                        internal_state=self.state,
+                        error=signature,
+                    )
+                except Exception:
+                    self.get_logger().error(
+                        "failed to publish internal_tick_error status"
+                    )
 
     def tick(self):
         if self.interrupt_for_lidar():
