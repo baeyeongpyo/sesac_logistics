@@ -19,11 +19,14 @@ Manager의 차량 상태 이벤트와 Inventory의 물류 상태 이벤트를 �
 | `fleet_bridge` | 차량 HTTP API 중계 |
 | `vehicle_communication` | Nav2와 Auto Dock의 실제 관측 상태 보고 |
 
-## 물류 zone과 초기 설정
+## Inventory 환경 구축 전제
 
-오케스트레이터는 명시적인 bootstrap API로 Inventory에 없는 zone만 생성한다. 기존
-zone의 좌표, enabled, capacity, 재고는 수정하거나 초기화하지 않는다. 재고 수량은
-관리자가 Inventory API에서 설정·실사 보정한다.
+zone·좌표·용량·초기 재고 환경은 Inventory가 별도 환경 구축 절차에서 소유한다.
+오케스트레이터는 zone을 생성·수정·초기화하지 않고, 준비된 Inventory의 zones와 stocks를
+읽어 작업만 생성한다. 재고 수량은 관리자가 Inventory API에서 설정·실사 보정한다.
+
+오케스트레이터 시작 또는 reconcile 시 아래 zone이 없거나 disabled면 상태 화면에
+configuration error를 기록하고 해당 zone을 사용한 자동 명령을 보내지 않는다.
 
 | zone | capacity | 지도 좌표 / 설정 |
 | --- | ---: | --- |
@@ -33,9 +36,9 @@ zone의 좌표, enabled, capacity, 재고는 수정하거나 초기화하지 않
 | `n1`~`n9` | 각 1 | `warehouse_zones.yaml`의 `N1`~`N9` 중심점 |
 
 `p1`~`p3`에는 FRESH 또는 NORMAL 모두 적치할 수 있다. `f*`는 FRESH만,
-`n*`는 NORMAL만 목적지로 선택한다. Nav2 goal 좌표와 Auto Dock `location`은
-zone 정책 파일에 분리해 둔다. 기본 Auto Dock location은 대문자 marker ID(`P1`,
-`F1`, `N1`)이며 `docker`는 `DOCKER`로 설정한다.
+`n*`는 NORMAL만 목적지로 선택한다. Nav2 goal은 Inventory가 제공하는 zone pose를
+사용한다. Auto Dock marker location만 오케스트레이터 설정으로 분리하며, 기본값은
+대문자 marker ID(`P1`, `F1`, `N1`)와 `DOCKER`다.
 
 ## 작업 선택 규칙
 
@@ -77,7 +80,7 @@ inventory mutation -> inventory DB 저장
 - Fleet outbox는 **모든** 차량 상태 보고를 enqueue한다. 같은 상위 상태 `WAIT`이라도
   `NAVIGATION_SUCCEEDED`, `AUTO_DOCK_PICK_COMPLETED`,
   `AUTO_DOCK_PLACE_COMPLETED`의 detail이 다르므로 상태 변경 로그만으로는 충분하지 않다.
-- Inventory outbox는 zone bootstrap, stock 변경, operation 생성, PICK 완료, PLACE 완료를
+- Inventory outbox는 zone·stock 설정 변경, operation 생성, PICK 완료, PLACE 완료를
   enqueue한다.
 - 이벤트 envelope은 `event_id`, `event_type`, `occurred_at`, `payload`를 포함한다.
   source별 `event_id`는 불변이며 재전송에도 유지한다.
@@ -144,7 +147,6 @@ location, `target={"type":"NEAREST"}`를 보낸다.
 ```text
 GET  /healthz
 GET  /api/v1/status
-POST /api/v1/bootstrap
 POST /api/v1/reconcile
 POST /api/v1/events/fleet
 POST /api/v1/events/inventory
@@ -159,7 +161,8 @@ dispatcher를 활성화한다.
 
 테스트를 먼저 추가한다.
 
-1. zone bootstrap은 없는 zone만 만들고 재고·기존 설정을 덮어쓰지 않는다.
+1. Inventory의 필수 zone이 없거나 disabled면 자동 명령을 보내지 않고 configuration
+   error를 제공한다.
 2. Docker FRESH, Docker NORMAL, Docker empty 각각에서 source·destination 우선순위가
    정확히 선택된다.
 3. P/F/N의 capacity와 reservation이 있는 slot은 후보에서 제외된다.
