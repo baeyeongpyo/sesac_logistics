@@ -1274,6 +1274,7 @@ class AutoDockNode(Node):
         }
         self.target_world = None
         self.target_entity_id = None
+        self.target_last_center_error = None
         self.insert_start_position = None
         self.insert_start_yaw = None
         self.insertion_entry_gap_m = None
@@ -1566,6 +1567,7 @@ class AutoDockNode(Node):
         self.load_config()
         self.target_world = None
         self.target_entity_id = None
+        self.target_last_center_error = None
         self.insert_start_position = None
         self.insert_start_yaw = None
         self.insertion_entry_gap_m = None
@@ -2523,8 +2525,6 @@ class AutoDockNode(Node):
         partial = detection.get("tracked_partial")
         if not isinstance(partial, dict) or self.target_entity_id is None:
             return None, None, "partial_entity_unavailable"
-        if partial.get("entity_id") != self.target_entity_id:
-            return None, None, "partial_entity_mismatch"
         try:
             age_sec = float(partial.get("age_sec", math.inf))
             center_error = float(partial["center_error"])
@@ -2548,6 +2548,7 @@ class AutoDockNode(Node):
             "center_error": center_error,
             "depth_yaw": depth,
         }
+        self.target_last_center_error = center_error
         pnp = {
             "depth_fallback": True,
             "distance_source": "depth",
@@ -2610,9 +2611,15 @@ class AutoDockNode(Node):
                         continue
                     if math.isfinite(distance_cm) and 5.0 <= distance_cm <= 300.0:
                         depths.append(distance_cm)
-                if not depths:
-                    continue
-                score = row_error + abs(center_error)
+                previous_center = getattr(
+                    self, "target_last_center_error", None
+                )
+                center_delta = (
+                    abs(center_error)
+                    if previous_center is None
+                    else abs(center_error - float(previous_center))
+                )
+                score = row_error + center_delta
                 pairs.append((score, center_error, left_tag, right_tag, depths))
         if not pairs:
             return None, None, "visible_target_top_pair_unavailable"
@@ -2637,10 +2644,12 @@ class AutoDockNode(Node):
             pass
         if not math.isfinite(yaw_deg) or abs(yaw_deg) > 45.0:
             yaw_deg = 0.0
-        depth = {
-            "forward_distance_cm": float(np.median(depths)),
-            "yaw_deg": yaw_deg,
-        }
+        depth = None
+        if depths:
+            depth = {
+                "forward_distance_cm": float(np.median(depths)),
+                "yaw_deg": yaw_deg,
+            }
         candidate = {
             "entity_id": self.target_entity_id,
             "center_error": center_error,
@@ -2648,9 +2657,11 @@ class AutoDockNode(Node):
         }
         pnp = {
             "depth_fallback": True,
+            "visual_only": depth is None,
             "distance_source": "depth",
             "lateral_ratio": clamp(0.5 * center_error, -0.5, 0.5),
         }
+        self.target_last_center_error = center_error
         return candidate, pnp, None
 
     def valid_measurement(self):
@@ -2757,7 +2768,9 @@ class AutoDockNode(Node):
             if len(matrix) >= 2:
                 self.target_left, self.target_right = matrix[:2]
                 self.send_yolo_target()
-            self.target_world = None
+            self.target_last_center_error = candidate.get("center_error")
+            if not self.update_world_target(candidate, pnp):
+                return False
             self.enter_coarse_alignment("nearest_candidate_centering")
             return True
         if pnp.get("depth_fallback"):
@@ -2795,7 +2808,7 @@ class AutoDockNode(Node):
             or time.monotonic() - getattr(self, "latest_detection_at", 0.0) > 0.8
         ):
             return False
-        candidate, _pnp = AutoDockNode.nearest_product_candidate(
+        candidate, candidate_pnp = AutoDockNode.nearest_product_candidate(
             self, detection, respect_lock=False
         )
         if not isinstance(candidate, dict):
@@ -2829,10 +2842,14 @@ class AutoDockNode(Node):
             and distance_cm + margin_cm >= current_distance_cm
         ):
             return False
+        if not isinstance(candidate_pnp, dict):
+            return False
+        if not self.update_world_target(candidate, candidate_pnp):
+            return False
         previous_id = current_id
         self.target_entity_id = entity_id
         self.nearest_alignment_distance_cm = distance_cm
-        self.target_world = None
+        self.target_last_center_error = candidate.get("center_error")
         matrix = candidate.get("matrix") or []
         if len(matrix) >= 2:
             self.target_left, self.target_right = matrix[:2]
@@ -3898,10 +3915,21 @@ class AutoDockNode(Node):
                     partial_reason = top_pair_reason or partial_reason
             if candidate is None:
                 if getattr(self, "target_type", "SYMBOLS") == "NEAREST":
+                    if self.target_world is not None:
+                        self.stop_drive()
+                        self.state = "docking"
+                        self.reset_coarse_alignment()
+                        self.publish_status(
+                            "running", "nearest_visual_lost_using_locked_pose",
+                            measurement_reason=partial_reason or identity_reason,
+                            entity_id=self.target_entity_id,
+                        )
+                        return
                     lost_entity_id = self.target_entity_id
                     self.stop_drive()
                     self.target_world = None
                     self.target_entity_id = None
+                    self.target_last_center_error = None
                     self.candidate_stop_due_at = None
                     self.candidate_confirmation_started_at = None
                     self.candidate_retry_not_before = 0.0
@@ -3963,6 +3991,7 @@ class AutoDockNode(Node):
             return
         center_tolerance = self.number("coarse_center_error_max", 0.10, 0.01, 0.50)
         if abs(center_error) > center_tolerance:
+            self.target_last_center_error = center_error
             self.coarse_depth_fallback_frames = 0
             self.coarse_last_counted_stamp = None
             lateral_gain = self.number("coarse_align_lateral_gain", 0.10, 0.01, 0.50)
@@ -3989,6 +4018,17 @@ class AutoDockNode(Node):
             return
 
         self.stop_drive()
+        if (
+            getattr(self, "target_type", "SYMBOLS") == "NEAREST"
+            and self.target_world is not None
+        ):
+            self.state = "docking"
+            self.reset_coarse_alignment()
+            self.publish_status(
+                "running", "nearest_centered_using_locked_pose",
+                entity_id=self.target_entity_id,
+            )
+            return
         if (
             measured_candidate is not None
             and not measured_pnp.get("depth_fallback")

@@ -2069,6 +2069,33 @@ def test_depth_fallback_locks_provisional_world_target_before_coarse_alignment()
     assert entered == ["pnp_quality_fallback"]
 
 
+def test_nearest_initial_entity_saves_pose_before_visual_tracking():
+    fake = type("FakeDock", (), {})()
+    fake.target_type = "NEAREST"
+    fake.target_entity_id = None
+    fake.target_world = None
+    fake.nearest_alignment_distance_cm = None
+    fake.send_yolo_target = lambda: None
+    fake.enter_coarse_alignment = lambda reason: setattr(fake, "entered", reason)
+    fake.update_world_target = lambda *_args, **_kwargs: setattr(
+        fake, "target_world", {"x": 1.0, "y": 2.0, "yaw": 0.0}
+    ) or True
+
+    candidate = {
+        "entity_id": 155,
+        "matrix": ["diamond", "diamond", "diamond", "heart"],
+        "center_error": -0.4,
+        "pnp": {"forward_distance_cm": 18.0},
+    }
+    result = AutoDockNode.enter_alignment(fake, candidate, candidate["pnp"])
+
+    assert result is True
+    assert fake.target_entity_id == 155
+    assert fake.target_world == {"x": 1.0, "y": 2.0, "yaw": 0.0}
+    assert fake.target_last_center_error == pytest.approx(-0.4)
+    assert fake.entered == "nearest_candidate_centering"
+
+
 def test_visible_requested_top_pair_recovers_without_pallet_entity(monkeypatch):
     fake = type("FakeDock", (), {})()
     fake.latest_detection_at = 10.0
@@ -2099,6 +2126,34 @@ def test_visible_requested_top_pair_recovers_without_pallet_entity(monkeypatch):
     assert candidate["center_error"] == pytest.approx(-0.0125)
     assert candidate["depth_yaw"]["forward_distance_cm"] == pytest.approx(9.7)
     assert pnp["depth_fallback"] is True
+    assert pnp["visual_only"] is False
+
+
+def test_visible_locked_top_pair_without_depth_is_valid_for_centering(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.latest_detection_at = 10.0
+    fake.target_left = "diamond"
+    fake.target_right = "diamond"
+    fake.target_entity_id = 155
+    fake.target_last_center_error = -0.5
+    fake.latest_detection = {
+        "target_top": ["diamond", "diamond"],
+        "detections": [
+            {"class": "diamond", "box": [176, 123, 323, 253]},
+            {"class": "diamond", "box": [321, 90, 447, 226]},
+            {"class": "diamond", "box": [454, 120, 503, 245]},
+        ],
+    }
+    fake.number = lambda key, default, *_args: default
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    candidate, pnp, reason = AutoDockNode.visible_target_top_pair_measurement(fake)
+
+    assert reason is None
+    assert candidate["entity_id"] == 155
+    assert candidate["depth_yaw"] is None
+    assert pnp["depth_fallback"] is True
+    assert pnp["visual_only"] is True
 
 
 def test_coarse_target_loss_continues_with_provisional_world_target():
@@ -2123,7 +2178,7 @@ def test_coarse_target_loss_continues_with_provisional_world_target():
     assert statuses[-1][1] == "coarse_target_lost_using_virtual_target"
 
 
-def test_nearest_coarse_target_loss_clears_lock_and_resumes_search():
+def test_nearest_coarse_visual_loss_uses_initial_locked_pose():
     fake = type("FakeDock", (), {})()
     fake.target_type = "NEAREST"
     fake.identity_measurement = lambda: (None, None, "no_selected_candidate")
@@ -2147,14 +2202,39 @@ def test_nearest_coarse_target_loss_clears_lock_and_resumes_search():
 
     AutoDockNode.tick_coarse_align(fake)
 
-    assert fake.state == "search"
-    assert fake.target_world is None
-    assert fake.target_entity_id is None
-    assert fake.candidate_retry_not_before == 0.0
+    assert fake.state == "docking"
+    assert fake.target_world == {"x": 1.0, "y": 0.0, "yaw": 0.0}
+    assert fake.target_entity_id == 22
     assert resets == [True]
-    assert headings == [True]
+    assert headings == []
+    assert statuses[-1][1] == "nearest_visual_lost_using_locked_pose"
+
+
+def test_nearest_coarse_target_without_locked_pose_resumes_search():
+    fake = type("FakeDock", (), {})()
+    fake.target_type = "NEAREST"
+    fake.identity_measurement = lambda: (None, None, "no_selected_candidate")
+    fake.tracked_partial_measurement = lambda: (
+        None, None, "partial_entity_unavailable"
+    )
+    fake.target_world = None
+    fake.target_entity_id = 22
+    fake.candidate_stop_due_at = 10.0
+    fake.candidate_confirmation_started_at = 9.0
+    fake.candidate_retry_not_before = 12.0
+    fake.stop_drive = lambda *_args: None
+    fake.reset_coarse_alignment = lambda: None
+    fake.latch_search_heading = lambda: None
+    statuses = []
+    fake.publish_status = lambda state, reason, **extra: statuses.append(
+        (state, reason, extra)
+    )
+
+    AutoDockNode.tick_coarse_align(fake)
+
+    assert fake.state == "search"
+    assert fake.target_entity_id is None
     assert statuses[-1][1] == "nearest_target_lost_resume_search"
-    assert statuses[-1][2]["lost_entity_id"] == 22
 
 
 def test_coarse_alignment_timeout_keeps_locked_target(monkeypatch):
@@ -2209,6 +2289,65 @@ def test_coarse_alignment_moves_laterally_from_image_center_error(monkeypatch):
     assert commands == [(0.0, -0.05, 0.0)]
 
 
+def test_nearest_centered_visual_pair_uses_saved_pose(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.target_type = "NEAREST"
+    fake.target_entity_id = 155
+    fake.target_world = {"x": 1.0, "y": 0.0, "yaw": 0.0}
+    candidate = {"center_error": 0.02, "depth_yaw": None}
+    visual_pnp = {"depth_fallback": True, "visual_only": True}
+    fake.identity_measurement = lambda: (None, None, "no_selected_candidate")
+    fake.tracked_partial_measurement = lambda: (None, None, None)
+    fake.visible_target_top_pair_measurement = lambda: (
+        candidate, visual_pnp, None
+    )
+    fake.valid_measurement = lambda: (None, None, "distance_unavailable")
+    fake.coarse_alignment_started_at = 10.0
+    fake.coarse_depth_fallback_frames = 0
+    fake.coarse_last_counted_stamp = None
+    fake.number = lambda key, default, *_args: default
+    fake.stop_drive = lambda *_args: None
+    fake.reset_coarse_alignment = lambda: None
+    statuses = []
+    fake.publish_status = lambda state, reason, **extra: statuses.append(
+        (state, reason, extra)
+    )
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_coarse_align(fake)
+
+    assert fake.state == "docking"
+    assert fake.target_world == {"x": 1.0, "y": 0.0, "yaw": 0.0}
+    assert statuses[-1][1] == "nearest_centered_using_locked_pose"
+
+
+def test_nearest_centered_full_entity_does_not_require_current_valid_pnp(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.target_type = "NEAREST"
+    fake.target_entity_id = 155
+    fake.target_world = {"x": 1.0, "y": 0.0, "yaw": 0.0}
+    candidate = {"center_error": 0.02, "pnp": {"reprojection_error_px": 20.0}}
+    fake.identity_measurement = lambda: (candidate, candidate["pnp"], None)
+    fake.tracked_partial_measurement = lambda: (None, None, None)
+    fake.valid_measurement = lambda: (None, None, "invalid_pnp")
+    fake.coarse_alignment_started_at = 10.0
+    fake.coarse_depth_fallback_frames = 0
+    fake.coarse_last_counted_stamp = None
+    fake.number = lambda key, default, *_args: default
+    fake.stop_drive = lambda *_args: None
+    fake.reset_coarse_alignment = lambda: None
+    statuses = []
+    fake.publish_status = lambda state, reason, **extra: statuses.append(
+        (state, reason, extra)
+    )
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_coarse_align(fake)
+
+    assert fake.state == "docking"
+    assert statuses[-1][1] == "nearest_centered_using_locked_pose"
+
+
 def test_locked_entity_upper_pair_keeps_coarse_alignment(monkeypatch):
     fake = type("FakeDock", (), {})()
     partial = {
@@ -2249,7 +2388,7 @@ def test_locked_entity_upper_pair_keeps_coarse_alignment(monkeypatch):
     assert commands[0][2] == 0.0
 
 
-def test_partial_pair_from_different_entity_is_rejected(monkeypatch):
+def test_partial_pair_keeps_locked_identity_even_if_tracker_entity_id_changes(monkeypatch):
     fake = type("FakeDock", (), {})()
     fake.latest_detection = {
         "target_top": ["heart", "clover"],
@@ -2269,9 +2408,10 @@ def test_partial_pair_from_different_entity_is_rejected(monkeypatch):
 
     candidate, pnp, reason = AutoDockNode.tracked_partial_measurement(fake)
 
-    assert candidate is None
-    assert pnp is None
-    assert reason == "partial_entity_mismatch"
+    assert reason is None
+    assert candidate["entity_id"] == 42
+    assert candidate["center_error"] == pytest.approx(0.0)
+    assert pnp["depth_fallback"] is True
 
 
 def test_candidate_is_rejected_when_best_same_pallet_entity_disagrees():
@@ -2635,13 +2775,16 @@ def test_nearest_centering_switches_to_stable_closer_visible_candidate(monkeypat
     statuses = []
     fake.send_yolo_target = lambda: None
     fake.reset_coarse_alignment = lambda: None
+    fake.update_world_target = lambda *_args, **_kwargs: setattr(
+        fake, "target_world", {"x": 2.0}
+    ) or True
     fake.publish_status = lambda *args, **kwargs: statuses.append((args, kwargs))
     monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
 
     assert AutoDockNode.maybe_switch_nearest_alignment_target(fake) is True
     assert fake.target_entity_id == 124
     assert fake.nearest_alignment_distance_cm == pytest.approx(20.0)
-    assert fake.target_world is None
+    assert fake.target_world == {"x": 2.0}
     assert statuses[-1][0] == ("running", "nearest_centering_target_switched")
 
 
