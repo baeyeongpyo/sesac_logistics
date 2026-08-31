@@ -381,15 +381,23 @@ def test_dock_end_marker_rejects_repeating_red_band_without_yellow_tape():
     assert detect_dock_end_markers(frame) == {}
 
 
-def test_dock_end_marker_rejects_red_band_far_above_warning_tape():
+def test_dock_end_marker_accepts_red_segments_with_hidden_black_contact_gap():
     frame = np.full((480, 640, 3), 100, dtype=np.uint8)
-    for top in (0, 55, 110):
-        cv2.rectangle(frame, (595, top), (628, top + 34), (0, 0, 230), -1)
-    for left in (80, 190, 300, 410, 550):
-        cv2.rectangle(frame, (left, 410), (left + 70, 438), (0, 230, 230), -1)
-        cv2.rectangle(frame, (left + 70, 410), (left + 100, 438), (5, 5, 5), -1)
+    for center_x, center_y in ((470, 110), (495, 180), (520, 250), (545, 320)):
+        cv2.rectangle(
+            frame,
+            (center_x - 15, center_y - 17),
+            (center_x + 15, center_y + 17),
+            (0, 0, 230), -1,
+        )
+    for left in (40, 150, 260, 370, 480):
+        cv2.rectangle(frame, (left, 400), (left + 70, 430), (0, 230, 230), -1)
+        cv2.rectangle(frame, (left + 70, 400), (left + 100, 430), (5, 5, 5), -1)
 
-    assert detect_dock_end_markers(frame) == {}
+    markers = detect_dock_end_markers(frame)
+
+    assert "right" in markers
+    assert markers["right"]["tape_endpoint_gap_px"] > 48.0
 
 
 def test_dock_end_marker_rejects_single_red_or_low_saturation_edge_object():
@@ -1284,7 +1292,7 @@ def test_reverse_starts_right_turn_when_swept_circle_is_clear():
     assert fake.drive_ready_pub.messages == []
 
 
-def test_reverse_enters_enabled_rear_opening_test(monkeypatch):
+def test_reverse_enters_enabled_right_dock_end_search(monkeypatch):
     fake = type("FakeDock", (), {})()
     fake.config = {"post_lift_rear_opening_test_enabled": True}
     fake.post_lift_reverse_start = (0.0, 0.0)
@@ -1303,23 +1311,48 @@ def test_reverse_enters_enabled_rear_opening_test(monkeypatch):
 
     assert fake.state == "post_lift_opening_search"
     assert fake.post_lift_reverse_target_m is None
-    assert statuses[-1][1] == "post_lift_opening_search_started"
+    assert statuses[-1][1] == "post_lift_right_end_search_started"
 
 
-def test_post_lift_right_search_detects_confirmed_rear_opening(monkeypatch):
+def test_post_lift_right_search_strafes_with_warning_tape_until_confirmed(monkeypatch):
     fake = type("FakeDock", (), {})()
-    fake.scan_updated_at = 10.0
-    fake.nearest_by_direction = {"rear": (0.30, math.pi, 0.20)}
     fake.post_lift_opening_started_at = 10.0
-    fake.post_lift_opening_reference_m = None
-    fake.post_lift_opening_previous_m = None
     fake.post_lift_opening_confirmation_count = 0
-    fake.post_lift_reverse_start_yaw = 0.0
-    fake.odom_yaw = 0.0
+    fake.post_lift_right_end_marker = None
+    fake.post_lift_right_end_seen_at = 0.0
+    fake.number = lambda key, default, *_args: default
+    fake.stop_drive = lambda *_args: None
+    statuses = []
+    fake.publish_status = lambda state, reason, **extra: statuses.append(
+        (state, reason, extra)
+    )
+    fake.cancel = lambda reason: pytest.fail(reason)
+    guidance_calls = []
+    monkeypatch.setattr(
+        AutoDockNode, "command_warning_tape_search",
+        lambda self, now, speed, direction, force_enabled=False: (
+            guidance_calls.append((speed, direction, force_enabled)) or True
+        ),
+    )
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_post_lift_opening_search(fake)
+
+    assert guidance_calls == [(0.12, -1.0, True)]
+    assert statuses == []
+
+
+def test_post_lift_right_search_stops_without_extra_reverse(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.post_lift_opening_started_at = 10.0
+    fake.post_lift_opening_confirmation_count = 3
+    fake.post_lift_right_end_marker = {"x_px": 590.0, "confidence": 0.9}
+    fake.post_lift_right_end_seen_at = 10.0
     fake.number = lambda key, default, *_args: default
     commands = []
     fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
-    fake.stop_drive = lambda *_args: None
+    fake.stop_drive = lambda *_args: commands.append((0.0, 0.0, 0.0))
+    fake.drive_ready_pub = CapturePublisher()
     statuses = []
     fake.publish_status = lambda state, reason, **extra: statuses.append(
         (state, reason, extra)
@@ -1328,59 +1361,11 @@ def test_post_lift_right_search_detects_confirmed_rear_opening(monkeypatch):
     monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
 
     AutoDockNode.tick_post_lift_opening_search(fake)
-    fake.nearest_by_direction["rear"] = (0.50, math.pi, 0.20)
-    AutoDockNode.tick_post_lift_opening_search(fake)
-    AutoDockNode.tick_post_lift_opening_search(fake)
 
-    assert commands[:2] == [(0.0, -0.12, 0.0), (0.0, -0.12, 0.0)]
-    assert fake.state == "post_lift_opening_reverse"
-    assert statuses[-1][1] == "post_lift_rear_opening_detected"
-
-
-def test_post_lift_right_search_holds_real_imu_yaw(monkeypatch):
-    fake = type("FakeDock", (), {})()
-    fake.scan_updated_at = 10.0
-    fake.nearest_by_direction = {"rear": (0.30, math.pi, 0.20)}
-    fake.post_lift_opening_started_at = 10.0
-    fake.post_lift_opening_reference_m = None
-    fake.post_lift_opening_confirmation_count = 0
-    fake.post_lift_opening_heading_yaw = 0.0
-    fake.post_lift_opening_heading_source = "imu"
-    fake.imu_yaw = math.radians(10.0)
-    fake.odom_yaw = 0.0
-    fake.number = lambda key, default, *_args: default
-    commands = []
-    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
-    fake.publish_status = lambda *_args, **_kwargs: None
-    fake.cancel = lambda reason: pytest.fail(reason)
-    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
-
-    AutoDockNode.tick_post_lift_opening_search(fake)
-
-    assert commands == [(0.0, 0.0, -0.35)]
-
-
-def test_post_lift_opening_reverses_until_rear_twenty_cm(monkeypatch):
-    fake = type("FakeDock", (), {})()
-    fake.scan_updated_at = 10.0
-    fake.nearest_by_direction = {"rear": (0.25, math.pi, 0.20)}
-    fake.post_lift_opening_reverse_started_at = 10.0
-    fake.number = lambda key, default, *_args: default
-    commands = []
-    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
-    fake.stop_drive = lambda *_args: None
-    fake.drive_ready_pub = CapturePublisher()
-    fake.publish_status = lambda *_args, **_kwargs: None
-    fake.cancel = lambda reason: pytest.fail(reason)
-    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
-
-    AutoDockNode.tick_post_lift_opening_reverse(fake)
-    fake.nearest_by_direction["rear"] = (0.20, math.pi, 0.20)
-    AutoDockNode.tick_post_lift_opening_reverse(fake)
-
-    assert commands == [(-0.05, 0.0, 0.0)]
+    assert commands == [(0.0, 0.0, 0.0)]
     assert fake.state == "ready"
     assert len(fake.drive_ready_pub.messages) == 1
+    assert statuses[-1][1] == "post_lift_right_end_confirmed_ready"
 
 
 def test_reverse_waits_for_fresh_scan_before_skipping_turn(monkeypatch):
@@ -1947,9 +1932,10 @@ def test_tape_only_search_does_not_reverse_when_tape_is_already_close(monkeypatc
     assert fake.statuses[-1][2]["close_tape_reverse_suppressed"] is True
 
 
-def test_tape_only_search_resumes_lateral_search_after_missing_tape_nudge(monkeypatch):
+def test_tape_only_search_never_falls_through_to_rear_lidar_forward(monkeypatch):
     fake = tape_search_fake(angle_deg=0.0)
     fake.config["tape_guidance_only"] = True
+    fake.config["search_rear_lidar_guidance_enabled"] = True
     fake.latest_tape_guidance = None
     fake.tape_recovery_done = True
     fake.stop_drive = lambda *_args: None
@@ -1957,8 +1943,8 @@ def test_tape_only_search_resumes_lateral_search_after_missing_tape_nudge(monkey
 
     AutoDockNode.tick_search(fake)
 
-    assert fake.commands == [(pytest.approx(0.02), 0.12, 0.0)]
-    assert fake.statuses[-1][1] == "lateral_target_search"
+    assert fake.commands == [(0.0, 0.12, 0.0)]
+    assert fake.statuses[-1][1] == "warning_tape_missing_lateral_search"
 
 
 def missing_tape_recovery_fake(front_margin, rear_margin):

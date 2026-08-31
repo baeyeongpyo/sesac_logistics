@@ -58,7 +58,6 @@ def public_fsm_state(internal_state, operation, event_state="", was_docking=Fals
         "inserting": "INSERTING",
         "reversing_after_lift": "REVERSING",
         "post_lift_opening_search": "SEARCHING",
-        "post_lift_opening_reverse": "REVERSING",
         "turning_right_for_ready": "TURNING",
         "slot_target_ready": "SEARCHING",
         "slot_scanning": "SEARCHING",
@@ -371,12 +370,6 @@ def detect_dock_end_markers(
                 if length < height * 0.08:
                     continue
                 direction = delta / length
-                angle_deg = abs(math.degrees(math.atan2(
-                    direction[1], direction[0]
-                )))
-                angle_deg = min(angle_deg, 180.0 - angle_deg)
-                if angle_deg < 50.0:
-                    continue
                 inliers = []
                 residuals = []
                 for item in side_components:
@@ -444,9 +437,17 @@ def detect_dock_end_markers(
         if side != inferred_side:
             continue
         red_bottom = max(item["y"] + item["height"] for item in inliers)
-        contact_gap = max(30, int(round(height * 0.10)))
+        # Perspective can make a real dock-end band appear strongly diagonal,
+        # and its final red segment can end well above the black/yellow contact.
+        # The fitted repeating-red line must intersect the detected warning
+        # tape; do not impose an image-space perpendicular-angle assumption.
         tape_endpoint_gap_px = intersection_y - float(red_bottom)
-        if not -contact_gap * 0.25 <= tape_endpoint_gap_px <= contact_gap:
+        # Only reject a band which visibly continues below the warning tape.
+        # Do not cap the gap above it: the black segments are intentionally
+        # absent from the red mask, so a real alternating band can otherwise
+        # look disconnected even though its fitted axis meets the tape.
+        below_tape_tolerance = max(8.0, height * 0.025)
+        if tape_endpoint_gap_px < -below_tape_tolerance:
             continue
         x1 = min(item["x"] for item in inliers)
         y1 = min(item["y"] for item in inliers)
@@ -1284,12 +1285,9 @@ class AutoDockNode(Node):
         self.post_lift_reverse_start_yaw = None
         self.post_lift_reverse_target_m = None
         self.post_lift_opening_started_at = None
-        self.post_lift_opening_reference_m = None
-        self.post_lift_opening_previous_m = None
         self.post_lift_opening_confirmation_count = 0
-        self.post_lift_opening_reverse_started_at = None
-        self.post_lift_opening_heading_yaw = None
-        self.post_lift_opening_heading_source = None
+        self.post_lift_right_end_marker = None
+        self.post_lift_right_end_seen_at = 0.0
         self.state_before_lidar_interrupt = None
         self.completed_insertion_distance_m = None
         self.right_turn_target_yaw = None
@@ -1577,12 +1575,9 @@ class AutoDockNode(Node):
         self.post_lift_reverse_start_yaw = None
         self.post_lift_reverse_target_m = None
         self.post_lift_opening_started_at = None
-        self.post_lift_opening_reference_m = None
-        self.post_lift_opening_previous_m = None
         self.post_lift_opening_confirmation_count = 0
-        self.post_lift_opening_reverse_started_at = None
-        self.post_lift_opening_heading_yaw = None
-        self.post_lift_opening_heading_source = None
+        self.post_lift_right_end_marker = None
+        self.post_lift_right_end_seen_at = 0.0
         self.state_before_lidar_interrupt = None
         self.backoff_attempt_count = 0
         self.completed_insertion_distance_m = None
@@ -1718,12 +1713,9 @@ class AutoDockNode(Node):
         self.post_lift_reverse_start_yaw = None
         self.post_lift_reverse_target_m = None
         self.post_lift_opening_started_at = None
-        self.post_lift_opening_reference_m = None
-        self.post_lift_opening_previous_m = None
         self.post_lift_opening_confirmation_count = 0
-        self.post_lift_opening_reverse_started_at = None
-        self.post_lift_opening_heading_yaw = None
-        self.post_lift_opening_heading_source = None
+        self.post_lift_right_end_marker = None
+        self.post_lift_right_end_seen_at = 0.0
         self.state_before_lidar_interrupt = None
         self.completed_insertion_distance_m = None
         self.right_turn_target_yaw = None
@@ -1836,8 +1828,10 @@ class AutoDockNode(Node):
 
     def on_slot_image(self, msg):
         zone = self.location.split("_", 1)[0]
+        post_lift_dock_end_active = self.state == "post_lift_opening_search"
         tape_due = (
-            self.state in {"search", "confirm", "coarse_align", "docking"}
+            post_lift_dock_end_active
+            or self.state in {"search", "confirm", "coarse_align", "docking"}
             and (
                 AutoDockNode.boolean(self, "tape_guidance_enabled", False)
                 or AutoDockNode.boolean(self, "tape_guidance_only", False)
@@ -1853,11 +1847,18 @@ class AutoDockNode(Node):
             and time.monotonic() - self.last_dock_inventory_scan_at
             >= self.number("dock_inventory_scan_interval_sec", 0.50, 0.20, 5.0)
         )
+        post_lift_marker_due = (
+            post_lift_dock_end_active
+            and time.monotonic() - self.last_dock_inventory_scan_at
+            >= self.number(
+                "post_lift_dock_end_scan_interval_sec", 0.15, 0.05, 1.0
+            )
+        )
         grid_due = (
             self.state in {"slot_scanning", "slot_target_ready"}
             and zone in {"NORMAL", "FRESH"}
         )
-        if not tape_due and not inventory_due and not grid_due:
+        if not tape_due and not inventory_due and not post_lift_marker_due and not grid_due:
             return
         try:
             frame = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
@@ -1925,7 +1926,7 @@ class AutoDockNode(Node):
                 self.tape_recovery_start_position = None
                 self.tape_recovery_direction = None
                 self.tape_recovery_done = False
-        if inventory_due:
+        if inventory_due or post_lift_marker_due:
             self.last_dock_inventory_scan_at = time.monotonic()
             dock_end_filter = self.dock_end_filter_values()
             markers = detect_dock_end_markers(
@@ -1937,6 +1938,23 @@ class AutoDockNode(Node):
                 dock_end_filter_config=dock_end_filter,
                 warning_tape=current_tape_observation,
             )
+            if post_lift_dock_end_active:
+                right_marker = markers.get("right")
+                minimum_confidence = self.number(
+                    "post_lift_right_end_min_confidence", 0.60, 0.10, 1.0
+                )
+                if (
+                    isinstance(right_marker, dict)
+                    and float(right_marker.get("confidence", 0.0))
+                    >= minimum_confidence
+                ):
+                    self.post_lift_opening_confirmation_count += 1
+                    self.post_lift_right_end_marker = dict(right_marker)
+                    self.post_lift_right_end_seen_at = time.monotonic()
+                else:
+                    self.post_lift_opening_confirmation_count = 0
+            if not inventory_due:
+                return
             detection = self.latest_detection or {}
             detection_age = time.monotonic() - self.latest_detection_at
             entities = (
@@ -2175,9 +2193,10 @@ class AutoDockNode(Node):
             getattr(self, "imu_yaw", None)
             if source == "imu" else getattr(self, "odom_yaw", None)
         )
-        if self.search_heading_yaw is None or current_yaw is None:
+        search_heading_yaw = getattr(self, "search_heading_yaw", None)
+        if search_heading_yaw is None or current_yaw is None:
             return None
-        return normalize_angle(self.search_heading_yaw - current_yaw)
+        return normalize_angle(search_heading_yaw - current_yaw)
 
     def search_angular_command(self, yaw_error):
         minimum = self.number(
@@ -2922,7 +2941,6 @@ class AutoDockNode(Node):
             "idle", "ready", "waiting_fork",
             "slot_scanning", "slot_target_ready",
             "safety_backoff", "turning_right_for_ready",
-            "post_lift_opening_reverse",
         }:
             return False
         default_clearance = self.number("lidar_stop_distance_m", 0.35, 0.05, 2.0)
@@ -3033,8 +3051,6 @@ class AutoDockNode(Node):
             self.tick_reversing_after_lift()
         elif self.state == "post_lift_opening_search":
             self.tick_post_lift_opening_search()
-        elif self.state == "post_lift_opening_reverse":
-            self.tick_post_lift_opening_reverse()
         elif self.state == "turning_right_for_ready":
             self.tick_turning_right_for_ready()
         elif self.state == "safety_backoff":
@@ -3335,7 +3351,10 @@ class AutoDockNode(Node):
             self.config.get("search_lateral_direction", "left")
         ).strip().lower()
         direction_sign = -1.0 if direction == "right" else 1.0
-        if AutoDockNode.boolean(self, "tape_guidance_only", False):
+        tape_guidance_only = AutoDockNode.boolean(
+            self, "tape_guidance_only", False
+        )
+        if tape_guidance_only:
             if AutoDockNode.command_warning_tape_search(
                 self,
                 now, lateral_speed, direction_sign
@@ -3343,12 +3362,34 @@ class AutoDockNode(Node):
                 return
             if not getattr(self, "tape_recovery_done", False):
                 AutoDockNode.tick_missing_tape_recovery(
-                    self, now, preferred_direction="front"
+                    self, now, preferred_direction="rear"
                 )
                 return
-            # Tape is an auxiliary distance/yaw reference.  Losing it after
-            # one safe forward nudge must not permanently end product search;
-            # continue below with heading-held lateral search.
+            # Tape-only mode must never fall through to the optional rear
+            # LiDAR distance controller: that controller drives forward when
+            # rear clearance is below 30 cm.  After one short reverse recovery,
+            # keep searching laterally with zero longitudinal velocity.
+            yaw_error = AutoDockNode.search_heading_error(self)
+            yaw_tolerance = self.number(
+                "tag_search_yaw_tolerance_deg", 3.0, 0.5, 15.0
+            )
+            if (
+                yaw_error is not None
+                and abs(math.degrees(yaw_error)) > yaw_tolerance
+            ):
+                angular = AutoDockNode.search_angular_command(self, yaw_error)
+                self.publish_drive(0.0, 0.0, angular)
+                self.publish_status(
+                    "running", "warning_tape_missing_yaw_correction",
+                    yaw_deg=round(math.degrees(yaw_error), 1),
+                )
+                return
+            self.publish_drive(0.0, direction_sign * lateral_speed, 0.0)
+            self.publish_status(
+                "running", "warning_tape_missing_lateral_search",
+                lateral_speed_m_s=round(direction_sign * lateral_speed, 3),
+            )
+            return
         front_guidance_enabled = AutoDockNode.boolean(
             self, "tag_guided_lateral_search_enabled", False
         )
@@ -3595,10 +3636,11 @@ class AutoDockNode(Node):
         )
 
     def command_warning_tape_search(
-        self, now, lateral_speed, direction_sign, pose_correction_only=False
+        self, now, lateral_speed, direction_sign, pose_correction_only=False,
+        force_enabled=False,
     ):
         """Hold tape angle/distance, then optionally issue the lateral command."""
-        if not (
+        if not force_enabled and not (
             AutoDockNode.boolean(self, "tape_guidance_enabled", False)
             or AutoDockNode.boolean(self, "tape_guidance_only", False)
         ):
@@ -4344,20 +4386,13 @@ class AutoDockNode(Node):
             self.post_lift_reverse_target_m = None
             self.right_turn_clearance_wait_started_at = None
             self.post_lift_opening_started_at = time.monotonic()
-            self.post_lift_opening_reference_m = None
-            self.post_lift_opening_previous_m = None
             self.post_lift_opening_confirmation_count = 0
-            self.post_lift_opening_reverse_started_at = None
-            imu_yaw = getattr(self, "imu_yaw", None)
-            if imu_yaw is not None:
-                self.post_lift_opening_heading_yaw = imu_yaw
-                self.post_lift_opening_heading_source = "imu"
-            else:
-                self.post_lift_opening_heading_yaw = getattr(self, "odom_yaw", None)
-                self.post_lift_opening_heading_source = "odom"
+            self.post_lift_right_end_marker = None
+            self.post_lift_right_end_seen_at = 0.0
+            self.tape_reference = None
             self.state = "post_lift_opening_search"
             self.publish_status(
-                "running", "post_lift_opening_search_started",
+                "running", "post_lift_right_end_search_started",
                 direction="right",
             )
             return
@@ -4409,24 +4444,6 @@ class AutoDockNode(Node):
 
     def tick_post_lift_opening_search(self):
         now = time.monotonic()
-        maximum_scan_age = self.number(
-            "post_lift_opening_scan_max_age_sec", 0.50, 0.10, 2.0
-        )
-        scan_age = now - getattr(self, "scan_updated_at", 0.0)
-        if scan_age > maximum_scan_age:
-            self.stop_drive()
-            self.publish_status(
-                "waiting", "post_lift_opening_scan_stale",
-                scan_age_sec=round(scan_age, 2),
-            )
-            return
-        rear_distance, rear_angle, _clearance = self.nearest_by_direction.get(
-            "rear", (math.inf, None, 0.0)
-        )
-        if not math.isfinite(rear_distance):
-            self.stop_drive()
-            self.publish_status("waiting", "post_lift_opening_rear_missing")
-            return
         started_at = getattr(self, "post_lift_opening_started_at", None)
         if started_at is None:
             started_at = now
@@ -4435,121 +4452,42 @@ class AutoDockNode(Node):
             "post_lift_opening_search_timeout_sec", 30.0, 1.0, 120.0
         )
         if now - started_at >= timeout:
-            self.cancel("post_lift_opening_search_timeout")
+            self.cancel("post_lift_right_end_search_timeout")
             return
-        reference = getattr(self, "post_lift_opening_reference_m", None)
-        if reference is None:
-            reference = rear_distance
-        else:
-            reference = min(reference, rear_distance)
-        self.post_lift_opening_reference_m = reference
-        self.post_lift_opening_previous_m = rear_distance
-        jump_m = self.number(
-            "post_lift_opening_jump_cm", 15.0, 5.0, 100.0
-        ) / 100.0
-        if rear_distance - reference >= jump_m:
-            self.post_lift_opening_confirmation_count = (
-                getattr(self, "post_lift_opening_confirmation_count", 0) + 1
-            )
-        else:
-            self.post_lift_opening_confirmation_count = 0
         required = int(self.number(
-            "post_lift_opening_confirmation_frames", 2, 1, 10
+            "post_lift_right_end_confirmation_frames", 3, 1, 10
         ))
-        if self.post_lift_opening_confirmation_count >= required:
-            self.stop_drive(5)
-            self.post_lift_opening_reverse_started_at = now
-            self.state = "post_lift_opening_reverse"
-            self.publish_status(
-                "running", "post_lift_rear_opening_detected",
-                baseline_cm=round(reference * 100.0, 1),
-                rear_distance_cm=round(rear_distance * 100.0, 1),
-                rear_angle_deg=(
-                    None if rear_angle is None
-                    else round(math.degrees(rear_angle), 1)
-                ),
+        marker = getattr(self, "post_lift_right_end_marker", None)
+        marker_age = now - getattr(self, "post_lift_right_end_seen_at", 0.0)
+        if (
+            self.post_lift_opening_confirmation_count >= required
+            and isinstance(marker, dict)
+            and marker_age <= self.number(
+                "post_lift_right_end_max_age_sec", 0.50, 0.10, 2.0
             )
-            return
-        yaw_error = 0.0
-        start_yaw = getattr(self, "post_lift_opening_heading_yaw", None)
-        heading_source = getattr(self, "post_lift_opening_heading_source", None)
-        current_yaw = (
-            getattr(self, "imu_yaw", None)
-            if heading_source == "imu" else self.odom_yaw
-        )
-        if start_yaw is not None and current_yaw is not None:
-            yaw_error = normalize_angle(start_yaw - current_yaw)
-        yaw_tolerance = math.radians(self.number(
-            "tag_search_yaw_tolerance_deg", 3.0, 0.5, 15.0
-        ))
-        if abs(yaw_error) > yaw_tolerance:
-            max_yaw = self.number(
-                "post_lift_opening_max_angular_speed_rad_s", 0.35, 0.10, 0.50
-            )
-            self.publish_drive(0.0, 0.0, math.copysign(max_yaw, yaw_error))
+        ):
+            self.stop_drive(10)
+            self.state = "ready"
+            self.drive_ready_pub.publish(Empty())
             self.publish_status(
-                "running", "post_lift_opening_yaw_correction",
-                yaw_deg=round(math.degrees(yaw_error), 1),
-                rear_distance_cm=round(rear_distance * 100.0, 1),
+                "completed", "post_lift_right_end_confirmed_ready",
+                right_end_x_px=marker.get("x_px"),
+                right_end_confidence=marker.get("confidence"),
+                confirmation_frames=self.post_lift_opening_confirmation_count,
             )
             return
         lateral_speed = self.number(
             "post_lift_opening_lateral_speed_m_s", 0.12, 0.05, 0.20
         )
-        self.publish_drive(0.0, -lateral_speed, 0.0)
+        if AutoDockNode.command_warning_tape_search(
+            self, now, lateral_speed, -1.0, force_enabled=True
+        ):
+            return
+        self.stop_drive()
         self.publish_status(
-            "running", "post_lift_opening_search_right",
-            rear_distance_cm=round(rear_distance * 100.0, 1),
-            baseline_cm=round(reference * 100.0, 1),
-        )
-
-    def tick_post_lift_opening_reverse(self):
-        now = time.monotonic()
-        maximum_scan_age = self.number(
-            "post_lift_opening_scan_max_age_sec", 0.50, 0.10, 2.0
-        )
-        if now - getattr(self, "scan_updated_at", 0.0) > maximum_scan_age:
-            self.stop_drive()
-            self.publish_status("waiting", "post_lift_opening_reverse_scan_stale")
-            return
-        rear_distance, _angle, _clearance = self.nearest_by_direction.get(
-            "rear", (math.inf, None, 0.0)
-        )
-        if not math.isfinite(rear_distance):
-            self.stop_drive()
-            self.publish_status("waiting", "post_lift_opening_reverse_rear_missing")
-            return
-        started_at = getattr(self, "post_lift_opening_reverse_started_at", None)
-        if started_at is None:
-            started_at = now
-            self.post_lift_opening_reverse_started_at = now
-        timeout = self.number(
-            "post_lift_opening_reverse_timeout_sec", 10.0, 1.0, 60.0
-        )
-        if now - started_at >= timeout:
-            self.cancel("post_lift_opening_reverse_timeout")
-            return
-        target_m = self.number(
-            "post_lift_opening_rear_target_cm", 20.0, 5.0, 100.0
-        ) / 100.0
-        if rear_distance <= target_m:
-            self.stop_drive(10)
-            self.state = "ready"
-            self.drive_ready_pub.publish(Empty())
-            self.publish_status(
-                "completed", "post_lift_opening_rear_target_reached",
-                rear_distance_cm=round(rear_distance * 100.0, 1),
-                target_cm=round(target_m * 100.0, 1),
-            )
-            return
-        speed = self.number(
-            "post_lift_opening_reverse_speed_m_s", 0.05, 0.01, 0.15
-        )
-        self.publish_drive(-speed, 0.0, 0.0)
-        self.publish_status(
-            "running", "post_lift_opening_reversing_to_rear_target",
-            rear_distance_cm=round(rear_distance * 100.0, 1),
-            target_cm=round(target_m * 100.0, 1),
+            "waiting", "post_lift_warning_tape_not_detected",
+            right_end_confirmed_frames=self.post_lift_opening_confirmation_count,
+            required_frames=required,
         )
 
     def tick_turning_right_for_ready(self):
