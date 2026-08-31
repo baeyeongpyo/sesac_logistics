@@ -150,6 +150,43 @@ class ServerComposeContractTest(unittest.TestCase):
 
         self.assertNotIn('rosbag-recorder', services)
 
+    def test_telemetry_writer_uses_server_dds_and_persistent_database_mount(self):
+        services = compose_config('docker-compose.server.yaml')['services']
+        environment = environment_values()
+        writer = services['telemetry-writer']
+
+        self.assertEqual(writer['network_mode'], 'host')
+        self.assertEqual(writer['ipc'], 'host')
+        self.assertEqual(writer['environment'], {
+            'FASTDDS_BUILTIN_TRANSPORTS': 'DEFAULT',
+            'FLEET_CONFIG': '/config/fleet.yaml',
+            'RMW_IMPLEMENTATION': 'rmw_fastrtps_cpp',
+            'ROBOT_1_COMMAND_API_URL': environment['ROBOT_1_COMMAND_API_URL'],
+            'ROBOT_1_FOXGLOVE_URI': environment['ROBOT_1_FOXGLOVE_URI'],
+            'ROBOT_2_COMMAND_API_URL': environment['ROBOT_2_COMMAND_API_URL'],
+            'ROBOT_2_FOXGLOVE_URI': environment['ROBOT_2_FOXGLOVE_URI'],
+            'ROS_DOMAIN_ID': '225',
+            'ROS_LOCALHOST_ONLY': '1',
+            'TELEMETRY_DB_PATH': '/data/fleet_telemetry.db',
+            'TELEMETRY_POSE_WRITE_RATE_HZ': '5',
+            'TELEMETRY_TF_FRESHNESS_TIMEOUT_SEC': '10',
+        })
+        self.assertEqual(
+            writer['command'],
+            ['ros2', 'run', 'foxglove_ros_worker', 'fleet_telemetry_writer'],
+        )
+        self.assertEqual(writer['image'], environment['SERVER_IMAGE'])
+        data_mount = next(
+            mount for mount in writer['volumes']
+            if mount['target'] == '/data'
+        )
+        database_directory = Path(environment['TELEMETRY_DB_HOST_DIRECTORY'])
+        if not database_directory.is_absolute():
+            database_directory = BUNDLE / database_directory
+        self.assertEqual(data_mount['source'], str(database_directory))
+        self.assertFalse(data_mount.get('read_only', False))
+        self.assertFalse(data_mount['bind']['create_host_path'])
+
     def test_warehouse_zone_publisher_runs_with_the_editable_layout_config(self):
         publisher = compose_config('docker-compose.server.yaml')['services'][
             'warehouse-zone-publisher'

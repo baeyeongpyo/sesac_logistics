@@ -35,6 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-humble-sensor-msgs \
       ros-humble-std-msgs \
       ros-humble-tf2-msgs \
+      ros-humble-tf2-ros \
       ros-humble-visualization-msgs \
       zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -88,6 +89,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-humble-sensor-msgs \
       ros-humble-std-msgs \
       ros-humble-tf2-msgs \
+      ros-humble-tf2-ros \
       ros-humble-visualization-msgs \
       zlib1g \
     && rm -rf /var/lib/apt/lists/*

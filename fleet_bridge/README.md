@@ -16,6 +16,11 @@ robot_1 vehicle_command_api :8082  <── Command API :8080
 
 robot_2 Foxglove Bridge :8766          server Foxglove Bridge :8765
   /odom, /tf, /amcl_pose  ────────>  worker-robot-2 -> /robot_2/*
+
+server ROS Domain 225
+  /robot_N/tf, /robot_N/tf_static,
+  /robot_N/ros_robot_controller/battery
+    ────────────────────────────────> telemetry-writer -> SQLite latest state
 ```
 
 차량용 Docker 이미지, Compose 파일, ROS topic filter는 이 저장소에 포함하지 않는다.
@@ -57,6 +62,46 @@ COMMAND_API_PORT=8080
 
 ```bash
 cp fleet_bridge/.env.example fleet_bridge/.env.server
+```
+
+### 최신 telemetry DB
+
+`telemetry-writer`는 활성 차량의 `/robot_N/tf`, `/robot_N/tf_static`,
+`/robot_N/ros_robot_controller/battery`만 구독한다. `map ->
+robot_N/base_footprint`를 합성해 pose를 기록하며, battery의
+`std_msgs/msg/UInt16.data`는 전압이나 percent로 변환하지 않고 raw 값으로
+기록한다. rosbag과 다른 관제 topic은 저장하지 않는다.
+
+차량별 dynamic TF가 기본 10초(`TELEMETRY_TF_FRESHNESS_TIMEOUT_SEC`) 동안
+정상 수신되지 않으면 이전 pose 행을 그대로 보존하고 갱신하지 않는다. 따라서
+`received_at`이 오래된 값이면 대시보드가 차량 위치의 stale 상태를 판별할 수 있다.
+수신 topic과 frame 소유 차량이 일치하지 않는 TF도 기록 대상에서 제외한다.
+
+Compose 실행 전에 DB 디렉터리를 만든다.
+
+```bash
+sudo mkdir -p /srv/fleet-telemetry
+sudo chown "$(id -u):$(id -g)" /srv/fleet-telemetry
+```
+
+기본 DB 파일은 `/srv/fleet-telemetry/fleet_telemetry.db`이며, 재시작 후에도
+유지된다. 각 테이블은 차량별 최신 한 행만 유지한다.
+
+```text
+robot_pose(robot_id, x_m, y_m, yaw_rad, observed_at, received_at)
+robot_battery(robot_id, battery_raw, received_at)
+```
+
+`robot_pose.observed_at`은 TF `header.stamp`이고
+`robot_battery`에는 ROS header가 없으므로 `received_at`만 저장한다.
+
+호스트에서 읽기 전용으로 확인할 수 있다.
+
+```bash
+sqlite3 /srv/fleet-telemetry/fleet_telemetry.db \
+  'SELECT robot_id, x_m, y_m, yaw_rad, observed_at, received_at FROM robot_pose;'
+sqlite3 /srv/fleet-telemetry/fleet_telemetry.db \
+  'SELECT robot_id, battery_raw, received_at FROM robot_battery;'
 ```
 
 서버 ROS 2 Domain은 225만 사용한다. map-publisher와 server-foxglove는 같은 Fleet

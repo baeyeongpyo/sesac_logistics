@@ -74,6 +74,42 @@ services:
         read_only: true
     command: [ros2, run, foxglove_ros_worker, fleet_command_api]
 
+  telemetry-writer:
+    image: ${SERVER_IMAGE:-mentorpi-fleet-bridge-server:humble}
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    network_mode: host
+    ipc: host
+    restart: unless-stopped
+    stop_signal: SIGINT
+    stop_grace_period: 10s
+    environment:
+      ROS_DOMAIN_ID: ${SERVER_ROS_DOMAIN_ID:-225}
+      ROS_LOCALHOST_ONLY: "1"
+      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+      FASTDDS_BUILTIN_TRANSPORTS: ${FASTDDS_BUILTIN_TRANSPORTS:-DEFAULT}
+      FLEET_CONFIG: /config/fleet.yaml
+      ROBOT_1_FOXGLOVE_URI: ${ROBOT_1_FOXGLOVE_URI:?ROBOT_1_FOXGLOVE_URI is required}
+      ROBOT_2_FOXGLOVE_URI: ${ROBOT_2_FOXGLOVE_URI:?ROBOT_2_FOXGLOVE_URI is required}
+      ROBOT_1_COMMAND_API_URL: ${ROBOT_1_COMMAND_API_URL:?ROBOT_1_COMMAND_API_URL is required}
+      ROBOT_2_COMMAND_API_URL: ${ROBOT_2_COMMAND_API_URL:?ROBOT_2_COMMAND_API_URL is required}
+      TELEMETRY_DB_PATH: ${TELEMETRY_DB_PATH:-/data/fleet_telemetry.db}
+      TELEMETRY_POSE_WRITE_RATE_HZ: ${TELEMETRY_POSE_WRITE_RATE_HZ:-5}
+      TELEMETRY_TF_FRESHNESS_TIMEOUT_SEC: ${TELEMETRY_TF_FRESHNESS_TIMEOUT_SEC:-10}
+    volumes:
+      - type: bind
+        source: ./config/fleet.yaml
+        target: /config/fleet.yaml
+        read_only: true
+      - type: bind
+        source: ${TELEMETRY_DB_HOST_DIRECTORY:?TELEMETRY_DB_HOST_DIRECTORY is required}
+        target: /data
+        read_only: false
+        bind:
+          create_host_path: false
+    command: [ros2, run, foxglove_ros_worker, fleet_telemetry_writer]
+
   server-foxglove:
     image: ${SERVER_IMAGE:-mentorpi-fleet-bridge-server:humble}
     build:
