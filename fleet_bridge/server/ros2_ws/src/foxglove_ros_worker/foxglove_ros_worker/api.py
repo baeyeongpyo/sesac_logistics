@@ -1,16 +1,21 @@
 """REST command API that delegates commands to vehicle HTTP command APIs."""
 
 import argparse
+from datetime import datetime, timezone
 import os
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import Body, FastAPI, HTTPException, Path, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from fleet_bridge_config.loader import load_fleet
 from fleet_bridge_config.models import FleetConfig, VehicleConfig
 
 from .command import (
+    FleetManagerApiError,
+    FleetManagerClient,
+    FleetManagerTransportError,
     VehicleCommandApiError,
     VehicleCommandClient,
     VehicleCommandTransportError,
@@ -33,6 +38,36 @@ VEHICLE_COMMAND_TAG = {
         '변경하지 않고 중계합니다.'
     ),
 }
+
+VEHICLE_STATUS_TAG = {
+    'name': 'vehicle-status relay',
+    'description': (
+        '차량이 관측한 Nav2·Auto Dock·API 상태를 Fleet Manager 저장 API로 전달합니다. '
+        'Bridge는 상태를 저장하거나 해석하지 않습니다.'
+    ),
+}
+
+VehicleState = Literal['INIT', 'WAIT', 'DRIVE', 'PICK', 'PLACE', 'FAIL']
+StateSource = Literal['VEHICLE', 'NAV2', 'AUTO_DOCK', 'API']
+
+
+class VehicleStatusReport(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    state: VehicleState
+    previous_state: VehicleState | None
+    operation_id: str | None
+    attempt_id: str | None
+    source: StateSource
+    detail: str
+    observed_at: datetime
+
+    @field_validator('observed_at')
+    @classmethod
+    def observed_at_must_be_utc(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() != timezone.utc.utcoffset(value):
+            raise ValueError('observed_at must be UTC')
+        return value.astimezone(timezone.utc)
 
 
 def _relay_error_responses() -> dict[int, dict[str, Any]]:
@@ -89,7 +124,11 @@ def _delivery_error(error: Exception) -> HTTPException:
     )
 
 
-def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
+def create_app(
+    fleet: FleetConfig,
+    command_client: Any,
+    fleet_manager_client: Any | None = None,
+) -> FastAPI:
     """Create the documented Fleet Manager API with injected vehicle transport."""
 
     app = FastAPI(
@@ -103,6 +142,7 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
         ),
         openapi_tags=[
             VEHICLE_COMMAND_TAG,
+            VEHICLE_STATUS_TAG,
             {
                 'name': 'health',
                 'description': 'Fleet Manager Command API 프로세스 상태를 확인합니다.',
@@ -152,6 +192,42 @@ def create_app(fleet: FleetConfig, command_client: Any) -> FastAPI:
             VehicleCommandTransportError,
         ) as error:
             raise _delivery_error(error) from error
+        return JSONResponse(status_code=response.status_code, content=response.body)
+
+    @app.post(
+        '/api/v1/vehicle-status/{robot_id}',
+        tags=['vehicle-status relay'],
+        summary='차량 관측 상태 전달',
+        description=(
+            '등록·활성 차량이 보낸 상태 payload를 Fleet Manager에 그대로 전달합니다. '
+            'Bridge는 상태를 저장하거나 다음 작업을 판단하지 않습니다.'
+        ),
+    )
+    async def record_vehicle_status(
+        robot_id: RobotId,
+        payload: VehicleStatusReport = Body(
+            ...,
+            description='차량이 실제 이벤트에서 관측한 Fleet Manager 상태 payload입니다.',
+        ),
+    ) -> JSONResponse:
+        _active_vehicle(fleet, robot_id)
+        if fleet_manager_client is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail='fleet manager status relay is not configured',
+            )
+        try:
+            response = await fleet_manager_client.record_vehicle_state(
+                robot_id,
+                payload.model_dump(mode='json'),
+            )
+        except FleetManagerApiError as error:
+            return JSONResponse(status_code=error.status_code, content=error.body)
+        except FleetManagerTransportError as error:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f'fleet manager status delivery failed: {error}',
+            ) from error
         return JSONResponse(status_code=response.status_code, content=response.body)
 
     @app.get(
@@ -577,6 +653,10 @@ def _arguments(argv=None):
         '--fleet-config',
         default=os.environ.get('FLEET_CONFIG', '/config/fleet.yaml'),
     )
+    parser.add_argument(
+        '--fleet-manager-url',
+        default=os.environ.get('FLEET_MANAGER_URL'),
+    )
     parser.add_argument('--host', default=os.environ.get('COMMAND_API_HOST'))
     parser.add_argument(
         '--port',
@@ -592,11 +672,17 @@ def _arguments(argv=None):
 
 def main(argv=None) -> None:
     args = _arguments(argv)
+    if not args.fleet_manager_url:
+        raise SystemExit('FLEET_MANAGER_URL or --fleet-manager-url is required')
     fleet = load_fleet(args.fleet_config, os.environ)
     import uvicorn
 
     uvicorn.run(
-        create_app(fleet, VehicleCommandClient()),
+        create_app(
+            fleet,
+            VehicleCommandClient(),
+            FleetManagerClient(args.fleet_manager_url),
+        ),
         host=args.host or fleet.server.command_api.host,
         port=args.port or fleet.server.command_api.port,
     )

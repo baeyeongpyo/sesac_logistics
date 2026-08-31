@@ -5,12 +5,15 @@ import argparse
 from datetime import datetime, timezone
 import json
 import math
+import os
+import queue
 import signal
 import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 
 class CommandValidationError(ValueError):
@@ -31,6 +34,58 @@ class InitialPoseMotionError(RuntimeError):
 
 class OperationConflictError(RuntimeError):
     pass
+
+
+class FleetStatusReporter:
+    """Send vehicle observations to Fleet Bridge without blocking vehicle control."""
+
+    def __init__(self, robot_id, relay_url, timeout_sec=2.0):
+        if not isinstance(robot_id, str) or not robot_id:
+            raise ValueError('robot_id must be a non-empty string')
+        if not isinstance(relay_url, str) or not relay_url.strip():
+            raise ValueError('relay_url must be a non-empty string')
+        if timeout_sec <= 0:
+            raise ValueError('timeout_sec must be greater than zero')
+        self._endpoint = (
+            f'{relay_url.rstrip("/")}/api/v1/vehicle-status/{robot_id}'
+        )
+        self._timeout_sec = timeout_sec
+        self._queue = queue.Queue()
+        self._closed = False
+        self._lock = threading.Lock()
+        self._worker = threading.Thread(target=self._run, daemon=True)
+        self._worker.start()
+
+    def report(self, payload):
+        with self._lock:
+            if self._closed:
+                return
+            self._queue.put(dict(payload))
+
+    def close(self):
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._queue.put(None)
+        self._worker.join(timeout=self._timeout_sec + 1)
+
+    def _run(self):
+        while True:
+            payload = self._queue.get()
+            if payload is None:
+                return
+            try:
+                request = Request(
+                    self._endpoint,
+                    data=json.dumps(payload).encode('utf-8'),
+                    headers={'Content-Type': 'application/json'},
+                    method='POST',
+                )
+                with urlopen(request, timeout=self._timeout_sec) as response:
+                    response.read()
+            except Exception:
+                pass
 
 
 class VehicleStatus:
@@ -91,6 +146,7 @@ class VehicleCommandService:
         initial_pose_position_variance=0.25,
         initial_pose_yaw_variance=0.0685,
         vehicle_status=None,
+        status_reporter=None,
     ):
         self.velocity = velocity
         self.navigation = navigation
@@ -104,6 +160,7 @@ class VehicleCommandService:
         self._initial_pose_position_variance = initial_pose_position_variance
         self._initial_pose_yaw_variance = initial_pose_yaw_variance
         self._vehicle_status = vehicle_status or VehicleStatus('unknown', 3.0)
+        self._status_reporter = status_reporter
         self._lock = threading.Lock()
         self._manual_timer = None
         self._manual_generation = 0
@@ -113,6 +170,7 @@ class VehicleCommandService:
         self._manual_restore_status = None
         self._auto_dock_active = False
         self._auto_dock_operation = None
+        self._last_reported_external_state = None
         self._status = {
             'operation_id': None,
             'previous_operation_id': None,
@@ -127,6 +185,10 @@ class VehicleCommandService:
 
     def vehicle_status(self):
         return self._vehicle_status.snapshot(self.operation_status())
+
+    def report_current_status(self):
+        with self._lock:
+            self._report_external_state('VEHICLE')
 
     def initial_pose(self, payload):
         pose = self._goal(payload)
@@ -161,7 +223,7 @@ class VehicleCommandService:
             state = self._status['state']
             if state not in {'INIT', 'CANCELLED', 'FAILED'}:
                 raise OperationConflictError('IDLE_TRANSITION_NOT_ALLOWED')
-            self._complete_to_idle('OPERATOR_READY', state)
+            self._complete_to_idle('OPERATOR_READY', state, source='API')
             return dict(self._status)
 
     def command(self, payload):
@@ -230,6 +292,8 @@ class VehicleCommandService:
             origin_state = self._status['state']
             if origin_state not in {'IDLE', 'PICK_COMPLETE'}:
                 raise OperationConflictError('OPERATION_NOT_READY_FOR_DRIVE')
+            if self._active_navigation_operation is not None:
+                raise OperationConflictError('NAVIGATION_OPERATION_ACTIVE')
             if (
                 origin_state == 'PICK_COMPLETE'
                 and operation_id != self._status['operation_id']
@@ -243,12 +307,6 @@ class VehicleCommandService:
             self._active_navigation_attempt = attempt_id
             self._navigation_origin_state = origin_state
             self._manual_restore_status = None
-            self._set_status(
-                operation_id,
-                'DRIVE',
-                'NAVIGATION_GOAL_ACCEPTED',
-                origin_state,
-            )
 
         try:
             response = self.navigation.submit_goal(attempt_id, goal, self._on_navigation_terminal)
@@ -262,8 +320,26 @@ class VehicleCommandService:
                     self._active_navigation_operation = None
                     self._active_navigation_attempt = None
                     self._navigation_origin_state = None
-                    self._set_status(operation_id, 'FAILED', detail, 'DRIVE')
+                    self._set_status(
+                        operation_id,
+                        'FAILED',
+                        detail,
+                        'DRIVE',
+                        source='NAV2',
+                        attempt_id=attempt_id,
+                    )
             raise NavigationUnavailableError(detail)
+
+        with self._lock:
+            if self._active_navigation_attempt == attempt_id:
+                self._set_status(
+                    operation_id,
+                    'DRIVE',
+                    'NAVIGATION_GOAL_ACCEPTED',
+                    origin_state,
+                    source='NAV2',
+                    attempt_id=attempt_id,
+                )
 
         return {
             'operation_id': operation_id,
@@ -321,7 +397,13 @@ class VehicleCommandService:
                 detail = 'AUTO_DOCK_ERROR'
                 if reason:
                     detail = f'{detail}:{reason}'
-                self._set_status(operation_id, 'FAILED', detail, previous_state)
+                self._set_status(
+                    operation_id,
+                    'FAILED',
+                    detail,
+                    previous_state,
+                    source='AUTO_DOCK',
+                )
                 return
             if raw_state in {
                 'SEARCHING', 'ALIGNING', 'INSERTING', 'WAIT_UP_COMPLETE',
@@ -335,6 +417,7 @@ class VehicleCommandService:
                     self._status['state'],
                     detail,
                     self._status['previous_state'],
+                    source='AUTO_DOCK',
                 )
 
     def on_auto_dock_drive_ready(self):
@@ -352,6 +435,7 @@ class VehicleCommandService:
                     'PICK_COMPLETE',
                     'AUTO_DOCK_PICK_COMPLETED',
                     previous_state,
+                    source='AUTO_DOCK',
                 )
                 return
             self._set_status(
@@ -359,6 +443,7 @@ class VehicleCommandService:
                 'PLACE_COMPLETE',
                 'AUTO_DOCK_PLACE_COMPLETED',
                 previous_state,
+                source='AUTO_DOCK',
             )
             self._complete_to_idle('AUTO_DOCK_PLACE_COMPLETED', 'PLACE_COMPLETE')
 
@@ -382,7 +467,14 @@ class VehicleCommandService:
                 self._active_navigation_operation = None
                 self._active_navigation_attempt = None
                 self._navigation_origin_state = None
-                self._set_status(operation_id, 'CANCELLED', 'NAVIGATION_CANCELLED', 'DRIVE')
+                self._set_status(
+                    operation_id,
+                    'CANCELLED',
+                    'NAVIGATION_CANCELLED',
+                    'DRIVE',
+                    source='API',
+                    attempt_id=active_attempt,
+                )
         return {
             'operation_id': operation_id,
             'state': 'CANCELLED',
@@ -427,20 +519,24 @@ class VehicleCommandService:
                     'CANCELLED',
                     'STOP_REQUESTED',
                     status_before_stop['state'],
+                    source='API',
+                    attempt_id=navigation_attempt,
                 )
             elif status_before_stop['state'] == 'MANUAL':
                 self._set_status(
                     None,
-                    'INIT',
+                    'FAILED',
                     'STOP_REQUESTED',
                     'MANUAL',
+                    source='API',
                 )
             else:
                 self._set_status(
                     None,
-                    status_before_stop['state'],
+                    'FAILED',
                     'STOP_REQUESTED',
-                    status_before_stop['previous_state'],
+                    status_before_stop['state'],
+                    source='API',
                 )
         return {
             'operation_id': status_before_stop['operation_id'],
@@ -467,14 +563,35 @@ class VehicleCommandService:
                         'PICK_COMPLETE',
                         'NAVIGATION_SUCCEEDED',
                         'DRIVE',
+                        source='NAV2',
+                        attempt_id=attempt_id,
                     )
                     return
-                self._complete_to_idle('NAVIGATION_SUCCEEDED', 'DRIVE')
+                self._complete_to_idle(
+                    'NAVIGATION_SUCCEEDED',
+                    'DRIVE',
+                    source='NAV2',
+                    attempt_id=attempt_id,
+                )
                 return
             if terminal_state == 'CANCELLED':
-                self._set_status(operation_id, 'CANCELLED', 'NAVIGATION_CANCELLED', 'DRIVE')
+                self._set_status(
+                    operation_id,
+                    'CANCELLED',
+                    'NAVIGATION_CANCELLED',
+                    'DRIVE',
+                    source='NAV2',
+                    attempt_id=attempt_id,
+                )
                 return
-            self._set_status(operation_id, 'FAILED', 'NAVIGATION_FAILED', 'DRIVE')
+            self._set_status(
+                operation_id,
+                'FAILED',
+                'NAVIGATION_FAILED',
+                'DRIVE',
+                source='NAV2',
+                attempt_id=attempt_id,
+            )
 
     def _expire_manual_command(self, generation):
         with self._lock:
@@ -495,7 +612,15 @@ class VehicleCommandService:
                 'detail': 'MANUAL_COMMAND_EXPIRED',
             }
 
-    def _set_status(self, operation_id, state, detail, previous_state=None):
+    def _set_status(
+        self,
+        operation_id,
+        state,
+        detail,
+        previous_state=None,
+        source=None,
+        attempt_id=None,
+    ):
         self._status = {
             'operation_id': operation_id,
             'previous_operation_id': self._status['previous_operation_id'],
@@ -504,7 +629,10 @@ class VehicleCommandService:
             'detail': detail,
         }
 
-    def _complete_to_idle(self, detail, previous_state):
+        if source is not None:
+            self._report_external_state(source, attempt_id)
+
+    def _complete_to_idle(self, detail, previous_state, source=None, attempt_id=None):
         operation_id = self._status['operation_id']
         self._status = {
             'operation_id': None,
@@ -513,6 +641,52 @@ class VehicleCommandService:
             'previous_state': previous_state,
             'detail': detail,
         }
+        if source is not None:
+            self._report_external_state(source, attempt_id, operation_id)
+
+    def _report_external_state(self, source, attempt_id=None, operation_id=None):
+        if self._status_reporter is None:
+            return
+        external_state = {
+            'INIT': 'INIT',
+            'IDLE': 'WAIT',
+            'DRIVE': 'DRIVE',
+            'PICKING': 'PICK',
+            'PICK_COMPLETE': 'WAIT',
+            'PLACE': 'PLACE',
+            'PLACE_COMPLETE': 'WAIT',
+            'FAILED': 'FAIL',
+            'CANCELLED': 'FAIL',
+        }.get(self._status['state'])
+        if external_state is None:
+            return
+        detail = self._status['detail']
+        if detail == 'NAVIGATION_GOAL_ACCEPTED':
+            detail = 'NAVIGATION_STARTED'
+        elif detail == 'STOP_REQUESTED':
+            detail = 'API_STOP'
+        elif detail == 'NAVIGATION_CANCELLED' and source == 'API':
+            detail = 'API_NAVIGATION_CANCEL'
+        payload = {
+            'state': external_state,
+            'previous_state': self._last_reported_external_state,
+            'operation_id': (
+                self._status['operation_id']
+                if operation_id is None
+                else operation_id
+            ),
+            'attempt_id': attempt_id,
+            'source': source,
+            'detail': detail,
+            'observed_at': datetime.now(timezone.utc).isoformat(
+                timespec='milliseconds',
+            ).replace('+00:00', 'Z'),
+        }
+        try:
+            self._status_reporter.report(payload)
+        except Exception:
+            return
+        self._last_reported_external_state = external_state
 
     def _cancel_manual_timer(self):
         if self._manual_timer is not None:
@@ -1239,6 +1413,10 @@ def parse_args(argv=None):
     parser.add_argument('--action-server-timeout-sec', type=float, default=1.0)
     parser.add_argument('--goal-response-timeout-sec', type=float, default=3.0)
     parser.add_argument('--cancel-response-timeout-sec', type=float, default=3.0)
+    parser.add_argument(
+        '--fleet-status-relay-url',
+        default=os.environ.get('FLEET_STATUS_RELAY_URL'),
+    )
     return parser.parse_args(argv)
 
 
@@ -1263,6 +1441,12 @@ def run_server(arguments, adapter_factory=None, http_server_factory=create_http_
         battery_stale_sec=arguments.battery_stale_sec,
     )
     adapter = create_ros_vehicle_adapter(arguments) if adapter_factory is None else adapter_factory(arguments)
+    relay_url = getattr(arguments, 'fleet_status_relay_url', None)
+    status_reporter = (
+        FleetStatusReporter(arguments.robot_id, relay_url)
+        if relay_url
+        else None
+    )
     if hasattr(adapter, 'subscribe_battery'):
         adapter.subscribe_battery(arguments.battery_topic, vehicle_status.update_battery)
     if hasattr(adapter, 'configure_initial_pose_publisher'):
@@ -1278,12 +1462,14 @@ def run_server(arguments, adapter_factory=None, http_server_factory=create_http_
         initial_pose_position_variance=arguments.initial_pose_position_variance,
         initial_pose_yaw_variance=arguments.initial_pose_yaw_variance,
         vehicle_status=vehicle_status,
+        status_reporter=status_reporter,
     )
     if hasattr(adapter, 'configure_auto_dock'):
         adapter.configure_auto_dock(
             service.on_auto_dock_status,
             service.on_auto_dock_drive_ready,
         )
+    service.report_current_status()
     http_server = http_server_factory(arguments.host, arguments.port, service)
     previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
 
@@ -1301,7 +1487,11 @@ def run_server(arguments, adapter_factory=None, http_server_factory=create_http_
             http_server.server_close()
             adapter.close()
         finally:
-            signal.signal(signal.SIGTERM, previous_sigterm_handler)
+            try:
+                if status_reporter is not None:
+                    status_reporter.close()
+            finally:
+                signal.signal(signal.SIGTERM, previous_sigterm_handler)
 
 
 def main(argv=None):

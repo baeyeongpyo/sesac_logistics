@@ -12,7 +12,12 @@ PACKAGE = Path(__file__).resolve().parents[1]
 COMMON = PACKAGE.parents[3] / 'common' / 'fleet_bridge_config'
 sys.path[:0] = [str(COMMON), str(PACKAGE)]
 
-from foxglove_ros_worker.command import VehicleCommandApiError, VehicleCommandClient
+from foxglove_ros_worker.command import (
+    FleetManagerApiError,
+    FleetManagerClient,
+    VehicleCommandApiError,
+    VehicleCommandClient,
+)
 
 
 class VehicleCommandClientTest(unittest.TestCase):
@@ -94,6 +99,81 @@ class VehicleCommandClientTest(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 409)
         self.assertEqual(raised.exception.body, {'error': 'VEHICLE_MOTION_ACTIVE'})
         self.assertTrue(raised.exception.__cause__.closed)
+
+
+class FleetManagerClientTest(unittest.TestCase):
+    def test_record_vehicle_state_posts_payload_to_vehicle_state_endpoint(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                size = int(self.headers['Content-Length'])
+                self.server.received = (self.path, json.loads(self.rfile.read(size)))
+                body = b'{"robot_id":"robot_2","state":"DRIVE"}'
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format, *_args):
+                return
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        payload = {
+            'state': 'DRIVE',
+            'previous_state': 'WAIT',
+            'operation_id': 'operation-1',
+            'attempt_id': 'attempt-1',
+            'source': 'NAV2',
+            'detail': 'NAVIGATION_STARTED',
+            'observed_at': '2026-08-31T12:00:00Z',
+        }
+        try:
+            response = asyncio.run(
+                FleetManagerClient(f'http://127.0.0.1:{server.server_port}').record_vehicle_state(
+                    'robot_2', payload
+                )
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+        self.assertEqual(server.received, ('/api/v1/vehicles/robot_2/state', payload))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.body, {'robot_id': 'robot_2', 'state': 'DRIVE'})
+
+    def test_record_vehicle_state_preserves_manager_error_response(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = b'{"detail":"invalid vehicle state"}'
+                self.send_response(422)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format, *_args):
+                return
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with self.assertRaises(FleetManagerApiError) as raised:
+                asyncio.run(
+                    FleetManagerClient(
+                        f'http://127.0.0.1:{server.server_port}'
+                    ).record_vehicle_state('robot_2', {'state': 'DRIVE'})
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertEqual(raised.exception.body, {'detail': 'invalid vehicle state'})
 
 
 if __name__ == '__main__':

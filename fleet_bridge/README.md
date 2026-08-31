@@ -245,6 +245,21 @@ Fleet Manager는 차량 HTTP API로 자동 폴백하지 않는다. 차량 API �
 차량 API가 반환한 409/422/503 등의 상태는 그대로 Fleet Manager 응답으로 전달한다.
 따라서 중복 명령 전송 없이 실패 원인을 호출자에게 확인시킬 수 있다.
 
+### 차량 상태 전달
+
+차량 `vehicle_communication`은 실제 Nav2·Auto Dock·정지 이벤트를 아래 Bridge
+endpoint로 보고한다. Bridge는 `config/fleet.yaml`에 등록되고 활성화된 차량만 확인한 뒤
+`FLEET_MANAGER_URL/api/v1/vehicles/{robot_id}/state`로 payload를 그대로 전달한다.
+상태를 SQLite나 메모리에 저장하거나 다음 작업을 판단하지 않는다.
+
+```text
+POST /api/v1/vehicle-status/{robot_id}
+```
+
+`FLEET_MANAGER_URL`은 command-api 컨테이너에서 접근 가능한 Fleet Manager 주소여야 한다.
+Docker Desktop에서 같은 호스트에 Fleet Manager를 실행하면
+`http://host.docker.internal:8082`를 사용할 수 있다.
+
 ### 차량 API 전체 중계
 
 차량 `vehicle_command_api`의 모든 공개 경로는 아래 짧은 Fleet Manager 경로로도 사용할 수

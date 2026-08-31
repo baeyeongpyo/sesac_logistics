@@ -13,8 +13,10 @@ from fleet_bridge_config.models import (
     ServerConfig,
     VehicleConfig,
 )
-from foxglove_ros_worker.api import create_app
+from foxglove_ros_worker.api import _arguments, create_app
 from foxglove_ros_worker.command import (
+    FleetManagerApiError,
+    FleetManagerTransportError,
     VehicleCommandApiError,
     VehicleCommandResponse,
     VehicleCommandTransportError,
@@ -53,6 +55,28 @@ class RecordingVehicleApiClient:
         return self.response
 
 
+class FleetManagerResponse:
+    def __init__(self, status_code, body):
+        self.status_code = status_code
+        self.body = body
+
+
+class RecordingFleetManagerClient:
+    def __init__(self, response=None, error=None):
+        self.response = response or FleetManagerResponse(
+            200,
+            {'state': 'DRIVE', 'detail': 'stored'},
+        )
+        self.error = error
+        self.calls = []
+
+    async def record_vehicle_state(self, robot_id, payload):
+        self.calls.append((robot_id, payload))
+        if self.error:
+            raise self.error
+        return self.response
+
+
 class CommandApiTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -60,9 +84,132 @@ class CommandApiTest(unittest.TestCase):
 
         cls.TestClient = TestClient
 
-    def client(self, *, enabled=True, error=None, response=None):
+    def client(self, *, enabled=True, error=None, response=None, fleet_manager=None):
         vehicle_api = RecordingVehicleApiClient(error=error, response=response)
-        return self.TestClient(create_app(fleet(enabled=enabled), vehicle_api)), vehicle_api
+        return (
+            self.TestClient(
+                create_app(fleet(enabled=enabled), vehicle_api, fleet_manager),
+            ),
+            vehicle_api,
+        )
+
+    def test_cli_accepts_fleet_manager_url(self):
+        arguments = _arguments([
+            '--fleet-manager-url',
+            'http://fleet-manager:8080',
+        ])
+
+        self.assertEqual(arguments.fleet_manager_url, 'http://fleet-manager:8080')
+
+    def test_vehicle_status_relay_forwards_payload_without_storing_it(self):
+        fleet_manager = RecordingFleetManagerClient()
+        client, _vehicle_api = self.client(fleet_manager=fleet_manager)
+        payload = {
+            'state': 'DRIVE',
+            'previous_state': 'WAIT',
+            'operation_id': 'operation-1',
+            'attempt_id': 'attempt-1',
+            'source': 'NAV2',
+            'detail': 'NAVIGATION_STARTED',
+            'observed_at': '2026-08-31T12:00:00Z',
+        }
+
+        response = client.post('/api/v1/vehicle-status/robot_1', json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {'state': 'DRIVE', 'detail': 'stored'})
+        self.assertEqual(fleet_manager.calls, [('robot_1', payload)])
+
+    def test_vehicle_status_relay_rejects_invalid_state_payload(self):
+        fleet_manager = RecordingFleetManagerClient()
+        client, _vehicle_api = self.client(fleet_manager=fleet_manager)
+
+        response = client.post(
+            '/api/v1/vehicle-status/robot_1',
+            json={
+                'state': 'UNKNOWN',
+                'previous_state': None,
+                'operation_id': None,
+                'attempt_id': None,
+                'source': 'NAV2',
+                'detail': 'NAVIGATION_STARTED',
+                'observed_at': '2026-08-31T12:00:00Z',
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(fleet_manager.calls, [])
+
+    def test_vehicle_status_relay_preserves_fleet_manager_error_response(self):
+        fleet_manager = RecordingFleetManagerClient(
+            error=FleetManagerApiError(422, {'detail': 'invalid vehicle state'}),
+        )
+        vehicle_api = RecordingVehicleApiClient()
+        client = self.TestClient(
+            create_app(fleet(), vehicle_api, fleet_manager),
+            raise_server_exceptions=False,
+        )
+
+        response = client.post(
+            '/api/v1/vehicle-status/robot_1',
+            json={
+                'state': 'DRIVE',
+                'previous_state': 'WAIT',
+                'operation_id': None,
+                'attempt_id': None,
+                'source': 'NAV2',
+                'detail': 'NAVIGATION_STARTED',
+                'observed_at': '2026-08-31T12:00:00Z',
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json(), {'detail': 'invalid vehicle state'})
+
+    def test_vehicle_status_relay_returns_bad_gateway_for_manager_transport_error(self):
+        fleet_manager = RecordingFleetManagerClient(
+            error=FleetManagerTransportError('fleet manager unavailable'),
+        )
+        vehicle_api = RecordingVehicleApiClient()
+        client = self.TestClient(
+            create_app(fleet(), vehicle_api, fleet_manager),
+            raise_server_exceptions=False,
+        )
+
+        response = client.post(
+            '/api/v1/vehicle-status/robot_1',
+            json={
+                'state': 'DRIVE',
+                'previous_state': 'WAIT',
+                'operation_id': None,
+                'attempt_id': None,
+                'source': 'NAV2',
+                'detail': 'NAVIGATION_STARTED',
+                'observed_at': '2026-08-31T12:00:00Z',
+            },
+        )
+
+        self.assertEqual(response.status_code, 502)
+
+    def test_vehicle_status_relay_requires_a_utc_observed_time(self):
+        fleet_manager = RecordingFleetManagerClient()
+        client, _vehicle_api = self.client(fleet_manager=fleet_manager)
+
+        response = client.post(
+            '/api/v1/vehicle-status/robot_1',
+            json={
+                'state': 'DRIVE',
+                'previous_state': 'WAIT',
+                'operation_id': None,
+                'attempt_id': None,
+                'source': 'NAV2',
+                'detail': 'NAVIGATION_STARTED',
+                'observed_at': '2026-08-31T21:00:00+09:00',
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(fleet_manager.calls, [])
 
     def test_vehicle_command_relay_exposes_every_vehicle_api_path(self):
         client, vehicle_api = self.client(

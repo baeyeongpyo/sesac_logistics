@@ -137,3 +137,73 @@ class VehicleCommandClient:
         if isinstance(body.get('error'), str):
             return body['error']
         return 'vehicle command API returned an error response'
+
+
+@dataclass(frozen=True)
+class FleetManagerResponse:
+    """The exact HTTP status and JSON object returned by Fleet Manager."""
+
+    status_code: int
+    body: dict[str, Any]
+
+
+class FleetManagerApiError(RuntimeError):
+    """Fleet Manager returned a non-success HTTP response."""
+
+    def __init__(self, status_code: int, body: dict[str, Any]) -> None:
+        self.status_code = status_code
+        self.body = body
+        super().__init__('fleet manager rejected vehicle state')
+
+
+class FleetManagerTransportError(RuntimeError):
+    """Fleet Manager could not be reached or returned invalid JSON."""
+
+
+class FleetManagerClient:
+    """Forward observed vehicle state to the Fleet Manager storage API."""
+
+    def __init__(self, base_url: str, *, timeout_sec: float = 5.0) -> None:
+        if not base_url.strip():
+            raise ValueError('base_url must not be empty')
+        if timeout_sec <= 0:
+            raise ValueError('timeout_sec must be greater than zero')
+        self._base_url = base_url.rstrip('/')
+        self._timeout_sec = timeout_sec
+
+    async def record_vehicle_state(
+        self, robot_id: str, payload: dict[str, Any]
+    ) -> FleetManagerResponse:
+        return await asyncio.to_thread(
+            self._record_vehicle_state_sync,
+            robot_id,
+            payload,
+        )
+
+    def _record_vehicle_state_sync(
+        self, robot_id: str, payload: dict[str, Any]
+    ) -> FleetManagerResponse:
+        request = Request(
+            f'{self._base_url}/api/v1/vehicles/{robot_id}/state',
+            data=json.dumps(payload).encode('utf-8'),
+            headers={'Content-Type': 'application/json'},
+            method='POST',
+        )
+        try:
+            with urlopen(request, timeout=self._timeout_sec) as response:
+                return FleetManagerResponse(
+                    status_code=response.status,
+                    body=VehicleCommandClient._decode_response(
+                        response.read(), response.status
+                    ),
+                )
+        except HTTPError as error:
+            try:
+                body = VehicleCommandClient._error_body(error.read())
+            finally:
+                error.close()
+            raise FleetManagerApiError(error.code, body) from error
+        except (OSError, URLError) as error:
+            raise FleetManagerTransportError(
+                f'fleet manager unavailable: {error}',
+            ) from error

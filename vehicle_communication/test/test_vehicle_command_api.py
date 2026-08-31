@@ -1,4 +1,5 @@
 import importlib.util
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import signal
@@ -95,6 +96,66 @@ class RecordingAutoDock:
         self.stop_requests += 1
 
 
+class RecordingStatusReporter:
+    def __init__(self):
+        self.reports = []
+
+    def report(self, payload):
+        self.reports.append(payload)
+
+
+class FleetStatusReporterTest(unittest.TestCase):
+    def test_posts_state_payload_to_bridge_for_configured_robot(self):
+        module = load_server_module()
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                size = int(self.headers['Content-Length'])
+                self.server.received = (self.path, json.loads(self.rfile.read(size)))
+                body = b'{"status":"ok"}'
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format, *_args):
+                return
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        payload = {
+            'state': 'INIT',
+            'previous_state': None,
+            'operation_id': None,
+            'attempt_id': None,
+            'source': 'VEHICLE',
+            'detail': 'VEHICLE_BOOTED',
+            'observed_at': '2026-08-31T12:00:00Z',
+        }
+        reporter = None
+        try:
+            reporter = module.FleetStatusReporter(
+                'robot_2', f'http://127.0.0.1:{server.server_port}'
+            )
+            reporter.report(payload)
+            deadline = time.monotonic() + 1
+            while not hasattr(server, 'received') and time.monotonic() < deadline:
+                time.sleep(0.01)
+        finally:
+            if reporter is not None:
+                reporter.close()
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+        self.assertEqual(
+            server.received,
+            ('/api/v1/vehicle-status/robot_2', payload),
+        )
+
+
 class ClosingFakeAdapter(FakeNavigation, RecordingVelocity):
     def __init__(self):
         FakeNavigation.__init__(self)
@@ -144,6 +205,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         self.navigation = FakeNavigation()
         self.initial_pose_publisher = RecordingInitialPose()
         self.auto_dock = RecordingAutoDock()
+        self.status_reporter = RecordingStatusReporter()
         self.service = self.module.VehicleCommandService(
             velocity=self.velocity,
             navigation=self.navigation,
@@ -153,6 +215,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             max_angular_z=0.50,
             max_hold_ms=1000,
             vehicle_status=self.vehicle_status,
+            status_reporter=self.status_reporter,
         )
         self.server = self.module.create_http_server('127.0.0.1', 0, self.service)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -231,6 +294,18 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             'detail': 'OPERATOR_READY',
         })
 
+    def test_current_init_state_can_be_reported_after_startup(self):
+        self.service.report_current_status()
+
+        report = self.status_reporter.reports[-1]
+
+        self.assertEqual(report['state'], 'INIT')
+        self.assertIsNone(report['previous_state'])
+        self.assertIsNone(report['operation_id'])
+        self.assertIsNone(report['attempt_id'])
+        self.assertEqual(report['source'], 'VEHICLE')
+        self.assertEqual(report['detail'], 'VEHICLE_BOOTED')
+
     def test_failed_operation_keeps_current_id_until_idle_is_explicit(self):
         """Failure must retain the server operation ID until an operator clears it."""
         _, goal = self.navigation_goal()
@@ -273,6 +348,169 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         self.navigation.complete(drive['attempt_id'], 'COMPLETED')
         _, operation_status = self.get_json('/v1/operation-status')
         self.assertEqual(operation_status['previous_operation_id'], INVENTORY_OPERATION_ID)
+
+    def test_nav2_reports_drive_only_after_goal_acceptance(self):
+        reporter = RecordingStatusReporter()
+        test_case = self
+
+        class AcceptanceInspectingNavigation(FakeNavigation):
+            def submit_goal(self, operation_id, goal, on_terminal):
+                test_case.assertEqual(reporter.reports, [])
+                return super().submit_goal(operation_id, goal, on_terminal)
+
+        navigation = AcceptanceInspectingNavigation()
+        service = self.module.VehicleCommandService(
+            velocity=RecordingVelocity(),
+            navigation=navigation,
+            max_linear_x=0.10,
+            max_angular_z=0.50,
+            max_hold_ms=1000,
+            status_reporter=reporter,
+        )
+        service.mark_idle({'reason': 'OPERATOR_CONFIRMED'})
+        reporter.reports.clear()
+
+        response = service.navigation_goal({
+            'operation_id': INVENTORY_OPERATION_ID,
+            'purpose': 'PICK',
+            'x': 1.5,
+            'y': 0.0,
+            'yaw': 0.0,
+        })
+
+        self.assertEqual(response['state'], 'DRIVE')
+        self.assertEqual(reporter.reports[-1]['state'], 'DRIVE')
+        self.assertEqual(reporter.reports[-1]['source'], 'NAV2')
+        self.assertEqual(reporter.reports[-1]['detail'], 'NAVIGATION_STARTED')
+        self.assertEqual(reporter.reports[-1]['operation_id'], INVENTORY_OPERATION_ID)
+        self.assertEqual(reporter.reports[-1]['attempt_id'], response['attempt_id'])
+
+    def test_nav2_success_reports_wait_with_the_completed_operation(self):
+        _, goal = self.navigation_goal(INVENTORY_OPERATION_ID)
+        self.navigation.complete(goal['attempt_id'], 'COMPLETED')
+
+        report = self.status_reporter.reports[-1]
+
+        self.assertEqual(report['state'], 'WAIT')
+        self.assertEqual(report['previous_state'], 'DRIVE')
+        self.assertEqual(report['operation_id'], INVENTORY_OPERATION_ID)
+        self.assertEqual(report['attempt_id'], goal['attempt_id'])
+        self.assertEqual(report['source'], 'NAV2')
+        self.assertEqual(report['detail'], 'NAVIGATION_SUCCEEDED')
+
+    def test_nav2_failure_reports_fail(self):
+        _, goal = self.navigation_goal(INVENTORY_OPERATION_ID)
+        self.navigation.complete(goal['attempt_id'], 'FAILED')
+
+        report = self.status_reporter.reports[-1]
+
+        self.assertEqual(report['state'], 'FAIL')
+        self.assertEqual(report['previous_state'], 'DRIVE')
+        self.assertEqual(report['operation_id'], INVENTORY_OPERATION_ID)
+        self.assertEqual(report['attempt_id'], goal['attempt_id'])
+        self.assertEqual(report['source'], 'NAV2')
+        self.assertEqual(report['detail'], 'NAVIGATION_FAILED')
+
+    def test_navigation_cancel_reports_fail_from_api(self):
+        _, goal = self.navigation_goal(INVENTORY_OPERATION_ID)
+
+        status, _ = post_json(
+            f'{self.base_url}/v1/navigation/cancel',
+            {'operation_id': INVENTORY_OPERATION_ID},
+        )
+        report = self.status_reporter.reports[-1]
+
+        self.assertEqual(status, 202)
+        self.assertEqual(report['state'], 'FAIL')
+        self.assertEqual(report['previous_state'], 'DRIVE')
+        self.assertEqual(report['operation_id'], INVENTORY_OPERATION_ID)
+        self.assertEqual(report['attempt_id'], goal['attempt_id'])
+        self.assertEqual(report['source'], 'API')
+        self.assertEqual(report['detail'], 'API_NAVIGATION_CANCEL')
+
+    def test_stop_reports_fail_from_api(self):
+        _, goal = self.navigation_goal(INVENTORY_OPERATION_ID)
+
+        status, _ = post_json(f'{self.base_url}/v1/stop', {})
+        report = self.status_reporter.reports[-1]
+
+        self.assertEqual(status, 200)
+        self.assertEqual(report['state'], 'FAIL')
+        self.assertEqual(report['previous_state'], 'DRIVE')
+        self.assertEqual(report['operation_id'], INVENTORY_OPERATION_ID)
+        self.assertEqual(report['attempt_id'], goal['attempt_id'])
+        self.assertEqual(report['source'], 'API')
+        self.assertEqual(report['detail'], 'API_STOP')
+
+    def test_stop_from_wait_reports_fail_from_api(self):
+        self.mark_idle()
+
+        status, _ = post_json(f'{self.base_url}/v1/stop', {})
+        report = self.status_reporter.reports[-1]
+
+        self.assertEqual(status, 200)
+        self.assertEqual(report['state'], 'FAIL')
+        self.assertEqual(report['previous_state'], 'WAIT')
+        self.assertIsNone(report['operation_id'])
+        self.assertIsNone(report['attempt_id'])
+        self.assertEqual(report['source'], 'API')
+        self.assertEqual(report['detail'], 'API_STOP')
+
+    def test_auto_dock_reports_pick_only_after_running_status(self):
+        self.mark_idle()
+        reports_before_command = len(self.status_reporter.reports)
+
+        status, _ = self.auto_dock_command('PICK')
+
+        self.assertEqual(status, 202)
+        self.assertEqual(len(self.status_reporter.reports), reports_before_command)
+
+        self.service.on_auto_dock_status({
+            'state': 'SEARCHING',
+            'operation': 'PICK',
+        })
+        report = self.status_reporter.reports[-1]
+
+        self.assertEqual(report['state'], 'PICK')
+        self.assertEqual(report['previous_state'], 'WAIT')
+        self.assertEqual(report['operation_id'], INVENTORY_OPERATION_ID)
+        self.assertIsNone(report['attempt_id'])
+        self.assertEqual(report['source'], 'AUTO_DOCK')
+        self.assertEqual(report['detail'], 'AUTO_DOCK_SEARCHING')
+
+    def test_auto_dock_drive_ready_reports_wait(self):
+        self.mark_idle()
+        self.auto_dock_command('PICK')
+        self.service.on_auto_dock_status({'state': 'ALIGNING', 'operation': 'PICK'})
+
+        self.service.on_auto_dock_drive_ready()
+        report = self.status_reporter.reports[-1]
+
+        self.assertEqual(report['state'], 'WAIT')
+        self.assertEqual(report['previous_state'], 'PICK')
+        self.assertEqual(report['operation_id'], INVENTORY_OPERATION_ID)
+        self.assertIsNone(report['attempt_id'])
+        self.assertEqual(report['source'], 'AUTO_DOCK')
+        self.assertEqual(report['detail'], 'AUTO_DOCK_PICK_COMPLETED')
+
+    def test_auto_dock_error_reports_fail(self):
+        self.mark_idle()
+        self.auto_dock_command('PICK')
+        self.service.on_auto_dock_status({'state': 'SEARCHING', 'operation': 'PICK'})
+
+        self.service.on_auto_dock_status({
+            'state': 'ERROR',
+            'reason': 'fork_failed',
+            'operation': 'PICK',
+        })
+        report = self.status_reporter.reports[-1]
+
+        self.assertEqual(report['state'], 'FAIL')
+        self.assertEqual(report['previous_state'], 'PICK')
+        self.assertEqual(report['operation_id'], INVENTORY_OPERATION_ID)
+        self.assertIsNone(report['attempt_id'])
+        self.assertEqual(report['source'], 'AUTO_DOCK')
+        self.assertEqual(report['detail'], 'AUTO_DOCK_ERROR:fork_failed')
 
     def test_auto_dock_uses_drive_ready_not_ready_status_for_pick_completion(self):
         """Auto Dock READY is not complete until its drive_ready event arrives."""
@@ -731,8 +969,69 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             '--max-linear-x', '--max-angular-z', '--max-hold-ms',
             '--action-server-timeout-sec', '--goal-response-timeout-sec',
             '--cancel-response-timeout-sec',
+            '--fleet-status-relay-url',
         ):
             self.assertIn(option, result.stdout)
+
+    def test_direct_runner_reports_init_to_the_configured_status_relay(self):
+        adapter = ClosingFakeAdapter()
+        http_server = ReturningHttpServer()
+        arguments = SimpleNamespace(
+            host='0.0.0.0',
+            port=8082,
+            robot_id='robot_2',
+            cmd_vel_topic='/cmd_vel',
+            action_name='/navigate_to_pose',
+            battery_topic='/ros_robot_controller/battery',
+            battery_stale_sec=3.0,
+            initial_pose_topic='/initialpose',
+            initial_pose_position_variance=0.25,
+            initial_pose_yaw_variance=0.0685,
+            auto_dock_arrival_topic=None,
+            auto_dock_status_topic=None,
+            auto_dock_stop_topic=None,
+            auto_dock_drive_ready_topic=None,
+            max_linear_x=0.10,
+            max_angular_z=0.50,
+            max_hold_ms=1000,
+            action_server_timeout_sec=1.0,
+            goal_response_timeout_sec=3.0,
+            cancel_response_timeout_sec=3.0,
+            fleet_status_relay_url='http://fleet-bridge:8080',
+        )
+        reporters = []
+
+        class CapturingReporter:
+            def __init__(self, robot_id, relay_url):
+                self.robot_id = robot_id
+                self.relay_url = relay_url
+                self.reports = []
+                self.closed = False
+                reporters.append(self)
+
+            def report(self, payload):
+                self.reports.append(payload)
+
+            def close(self):
+                self.closed = True
+
+        original_reporter = self.module.FleetStatusReporter
+        self.module.FleetStatusReporter = CapturingReporter
+        try:
+            self.module.run_server(
+                arguments,
+                adapter_factory=lambda _args: adapter,
+                http_server_factory=lambda _host, _port, _service: http_server,
+            )
+        finally:
+            self.module.FleetStatusReporter = original_reporter
+
+        self.assertEqual(len(reporters), 1)
+        self.assertEqual(reporters[0].robot_id, 'robot_2')
+        self.assertEqual(reporters[0].relay_url, 'http://fleet-bridge:8080')
+        self.assertEqual(reporters[0].reports[0]['state'], 'INIT')
+        self.assertEqual(reporters[0].reports[0]['source'], 'VEHICLE')
+        self.assertTrue(reporters[0].closed)
 
     def test_direct_runner_zeroes_velocity_and_closes_its_adapter(self):
         """Removing shutdown zeroing or adapter cleanup must fail the process lifecycle contract."""

@@ -28,6 +28,7 @@ API를 검증하기 위해 실행하지 않는다.
 VEHICLE_ROBOT_ID=robot_2
 VEHICLE_COMMAND_API_PORT=8082
 FOXGLOVE_PORT=8765
+FLEET_STATUS_RELAY_URL=http://<fleet-bridge-host>:8080
 ```
 
 ### ROS 2 패키지 빌드와 독립 실행
@@ -128,6 +129,7 @@ Foxglove Bridge의 허용 topic, QoS, 서비스/파라미터 차단, 압축 설�
 | `--action-server-timeout-sec` | `1.0` | Nav2 action server 탐색 대기 시간 |
 | `--goal-response-timeout-sec` | `3.0` | goal 수락 응답 대기 시간 |
 | `--cancel-response-timeout-sec` | `3.0` | cancel 수락 응답 대기 시간 |
+| `--fleet-status-relay-url` | `FLEET_STATUS_RELAY_URL` | Fleet Bridge의 차량 상태 전달 API 주소. 없으면 상태 보고를 하지 않음 |
 
 ## API 확인과 테스트
 
@@ -254,6 +256,28 @@ curl -sS http://192.168.100.20:8082/v1/vehicle-status | python3 -m json.tool
 }
 ```
 
+### Fleet Manager 상태 보고
+
+`FLEET_STATUS_RELAY_URL`이 설정되면 차량은 Fleet Bridge의
+`POST /api/v1/vehicle-status/{robot_id}`로 실제 관측 상태를 순서대로 전송한다.
+Bridge는 이를 저장하지 않고 Fleet Manager로 전달하며, Fleet Manager가 최신 상태와
+상태 변경 로그를 SQLite에 저장한다.
+
+| 실제 근거 | Fleet Manager 상태 | source |
+| --- | --- | --- |
+| 차량 API 기동 | `INIT` | `VEHICLE` |
+| 운영자 `operation/idle` 완료 | `WAIT` | `API` |
+| Nav2 goal 수락 응답 | `DRIVE` | `NAV2` |
+| Auto Dock의 `SEARCHING`·`ALIGNING` 등 실행 status | `PICK` 또는 `PLACE` | `AUTO_DOCK` |
+| Nav2 성공 또는 Auto Dock `drive_ready` | `WAIT` | `NAV2` 또는 `AUTO_DOCK` |
+| Nav2 실패, Auto Dock `ERROR`, API `stop`·`cancel` | `FAIL` | `NAV2`·`AUTO_DOCK`·`API` |
+
+명령 HTTP 요청만으로 `DRIVE`, `PICK`, `PLACE`를 보고하지 않는다. 특히 Nav2는 action
+goal 수락 뒤, Auto Dock은 ROS status topic의 실행 상태 뒤에만 보고한다. 상태 payload는
+`state`, `previous_state`, `operation_id`, `attempt_id`, `source`, `detail`,
+`observed_at`(UTC)을 가진다. 전달 HTTP 실패는 차량의 Nav2·Auto Dock 제어 상태를
+바꾸지 않으며, 다음 상태 이벤트가 다시 전송된다. 영속 outbox·재시도 큐는 범위에 없다.
+
 ### AMCL 초기 위치 설정
 
 ```bash
@@ -300,7 +324,7 @@ curl -i -X POST http://192.168.100.20:8082/v1/navigation/cancel \
 curl -i -X POST http://192.168.100.20:8082/v1/stop
 ```
 
-`cancel`은 지정된 활성 Nav2 작업의 영구 취소를 요청하고 상태를 `CANCELLED`로
+`cancel`은 지정된 활성 Nav2 작업의 영구 취소를 요청하고 내부 상태를 `CANCELLED`로
 바꾼다. `stop`은 먼저 `/cmd_vel`에 0속도를 발행하고 활성 Nav2 또는 Auto Dock
 작업의 cancel/stop topic을 함께 요청한다. 둘 다 자동으로 `IDLE`로 돌아가지 않으며
 원인 조치와 `operation/idle` 운영자 확인 뒤에만 다음 작업을 받을 수 있다.
@@ -309,9 +333,8 @@ curl -i -X POST http://192.168.100.20:8082/v1/stop
 
 `stop`은 Nav2 cancel과 Auto Dock stop topic을 요청하고 0속도 명령을 발행하지만,
 하드웨어 수준 stop latch 또는 다른 publisher의 속도 명령 차단 기능은 제공하지
-않는다. 작업 완료·실패 이벤트를 중앙 서버에 재전송하는 기능도 이 패키지의
-책임이 아니다. 그 기능은 Nav2와 Auto Dock 양쪽에서 재사용할 별도
-`vehicle_task_reporter` 패키지에서 상태 스냅샷을 읽어 구현한다.
+않는다. Nav2·Auto Dock·API 이벤트의 Fleet Manager 상태 보고는 이 패키지가 수행하지만,
+다음 작업 생성·재고 정산·재시도 판단은 `logistics_orchestrator`의 책임이다.
 
 ## 로컬 검증
 
