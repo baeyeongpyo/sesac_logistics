@@ -1,0 +1,10 @@
+<library path="orthogonal_planner">
+  <class
+    name="orthogonal_planner/OrthogonalPlanner"
+    type="orthogonal_planner::OrthogonalPlanner"
+    base_class_type="nav2_core::GlobalPlanner">
+    <description>
+      4-connected A* global planner with turn penalty
+    </description>
+  </class>
+</library>

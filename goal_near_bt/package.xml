@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>goal_near_bt</name>
+  <version>0.0.0</version>
+  <description>Goal near condition plugin for Nav2 Behavior Tree</description>
+
+  <maintainer email="ubuntu@todo.todo">ubuntu</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>behaviortree_cpp_v3</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

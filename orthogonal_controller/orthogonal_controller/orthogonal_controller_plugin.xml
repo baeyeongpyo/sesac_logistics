@@ -1,0 +1,10 @@
+<library path="orthogonal_controller">
+  <class
+    name="orthogonal_controller/OrthogonalController"
+    type="orthogonal_controller::OrthogonalController"
+    base_class_type="nav2_core::Controller">
+    <description>
+      Orthogonal path-following controller for Nav2
+    </description>
+  </class>
+</library>
