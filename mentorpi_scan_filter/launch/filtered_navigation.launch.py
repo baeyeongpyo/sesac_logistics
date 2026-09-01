@@ -48,6 +48,39 @@ def _launch_setup(context):
         ],
     )
 
+    depthimage_to_laserscan = Node(
+        package='depthimage_to_laserscan',
+        executable='depthimage_to_laserscan_node',
+        name='depthimage_to_laserscan',
+        output='screen',
+        parameters=[{
+            'output_frame': 'depth_scan_frame',
+            'scan_height': 101,
+        }],
+        remappings=[
+            ('depth', '/ascamera/camera_publisher/depth0/image_raw'),
+            ('depth_camera_info', '/ascamera/camera_publisher/depth0/camera_info'),
+            ('scan', '/depth_scan'),
+        ],
+    )
+
+    depth_scan_tf = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        name='depth_scan_static_tf',
+        output='screen',
+        arguments=[
+            '--x', '0',
+            '--y', '0',
+            '--z', '0',
+            '--yaw', '1.5708',
+            '--pitch', '-1.5708',
+            '--roll', '0',
+            '--frame-id', 'ascamera_color_0',
+            '--child-frame-id', 'depth_scan_frame',
+        ],
+    )
+
     remap_actions = []
     # AMCL과 local/global costmap에서 원시 스캔을 사용하지 않게 한다.
     for node_name in ('amcl', 'controller_server', 'planner_server'):
@@ -68,7 +101,7 @@ def _launch_setup(context):
             }.items(),
         ),
     ])
-    return [scan_filter, filtered_navigation]
+    return [scan_filter, depthimage_to_laserscan, depth_scan_tf, filtered_navigation]
 
 
 def generate_launch_description():
