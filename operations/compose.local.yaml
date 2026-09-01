@@ -1,0 +1,9 @@
+# 각 서비스의 상대 경로와 해당 디렉터리의 .env 기본값을 유지한 통합 로컬 실행 구성입니다.
+name: logistics
+
+include:
+  - ./fleet_bridge/docker-compose.yaml
+  - ./fleet_manager/docker-compose.yaml
+  - ./inventory_db/docker-compose.yaml
+  - ./logistics_orchestrator/docker-compose.yaml
+  - ./foxglove_assert_server/docker-compose.yaml

@@ -152,11 +152,11 @@ REQUEST_DEDUPED
 
 주요 구현 근거:
 
-- `inventory_db/app/inventory.py`: 예약·PICK·PLACE의 SQLite transaction과
+- `operations/inventory_db/app/inventory.py`: 예약·PICK·PLACE의 SQLite transaction과
   활성 작업 상태
-- `fleet_bridge/server/ros2_ws/src/foxglove_ros_worker/foxglove_ros_worker/api.py`:
+- `operations/fleet_bridge/server/ros2_ws/src/foxglove_ros_worker/foxglove_ros_worker/api.py`:
   vehicle-native relay 경계
-- `fleet_bridge/server/ros2_ws/src/foxglove_ros_worker/foxglove_ros_worker/command.py`:
+- `operations/fleet_bridge/server/ros2_ws/src/foxglove_ros_worker/foxglove_ros_worker/command.py`:
   HTTP timeout·전송 동작
 - `vehicle_communication/vehicle_command_api.py`: Nav2/Auto Dock 상태 전이
 - `llm-wiki/concepts/mentorpi-m1-navigation-stack.md`: MentorPi 명령 소유권과
