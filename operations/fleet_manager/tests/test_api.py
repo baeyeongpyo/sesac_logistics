@@ -25,6 +25,18 @@ class FleetManagerApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"status": "ok"})
 
+    def test_openapi_exposes_fleet_manager_command_routes(self) -> None:
+        schema = self.client.get("/openapi.json").json()
+
+        self.assertIn(
+            "/api/v1/vehicles/{robot_id}/commands/navigation/goals",
+            schema["paths"],
+        )
+        self.assertIn(
+            "/api/v1/vehicles/{robot_id}/commands/auto-dock",
+            schema["paths"],
+        )
+
     def test_state_report_creates_vehicle_snapshot(self) -> None:
         response = self.client.post(
             "/api/v1/vehicles/robot-1/state",

@@ -2,13 +2,14 @@
 
 `logistics_orchestrator`는 Fleet Manager의 실제 차량 상태와 Inventory의 최신 재고를
 다시 조회해 다음 작업을 결정하는 중앙 제어 서비스입니다. 차량 명령은 직접 차량에
-보내지 않고 반드시 Fleet Bridge를 통해 전달합니다.
+보내지 않고 반드시 Fleet Manager를 통해 전달합니다.
 
 ## 소유 경계
 
 - `inventory_db`: zone, 재고, 예약, `operation_id`, PICK/PLACE 완료의 원장
-- `fleet_manager`: 차량 최신 상태와 상태 변경 로그, 모든 차량 보고의 event outbox
-- `fleet_bridge`: 차량 API 중계만 담당
+- `fleet_manager`: 차량 최신 상태와 상태 변경 로그, 모든 차량 보고의 event outbox,
+  차량 모델/기능 확인과 Fleet Bridge 명령 중계
+- `fleet_bridge`: 모델별 차량 API·ROS·Foxglove 명령 변환만 담당
 - `logistics_orchestrator`: 우선순위, WAIT 차량 배차, 작업 단계, recovery, 명령 outbox
 
 Inventory 환경은 별도로 먼저 구성해야 합니다. Orchestrator는 zone이나 초기 재고를
@@ -75,7 +76,7 @@ PICK 완료는 Inventory `pick-completions`를 `{operation_id}:pick` 키로 한 
 한 번만 반영합니다.
 
 `INIT`, `FAIL`, `DRIVE`, `PICK`, `PLACE` 상태에는 신규 명령을 보내지 않습니다.
-사고·경로 실패·재부팅 뒤에는 운영자가 차량을 수동 대응한 뒤 Fleet Bridge의
+사고·경로 실패·재부팅 뒤에는 운영자가 차량을 수동 대응한 뒤 해당 Fleet Bridge의
 `POST /api/v1/vehicle-command/{robot_id}/operation/idle`을 호출해 차량이 `WAIT`
 (`OPERATOR_READY`)을 보고해야 합니다. 이 승인은 작업마다가 아니라 INIT/FAIL에서
 정상 운행 상태로 되돌릴 때만 필요합니다. 이후 활성 작업은 남아 있는 PICK 또는 PLACE
@@ -87,7 +88,7 @@ PICK 완료는 Inventory `pick-completions`를 `{operation_id}:pick` 키로 한 
 
 - `orchestrator_inbox`: `(source, event_id)` 중복 제거
 - `orchestrator_steps`: `RESERVED`부터 `PLACE_COMMITTED`까지의 작업 단계
-- `command_outbox`: Fleet Bridge 명령과 `PENDING`, `SENT`, `DELIVERY_UNKNOWN`, `FAILED` 결과
+- `command_outbox`: Fleet Manager 명령과 `PENDING`, `SENT`, `DELIVERY_UNKNOWN`, `FAILED` 결과
 - `operation_recoveries`: `FAIL` 후 운영자 `OPERATOR_READY`를 기다리는 작업
 
 차량 명령 HTTP timeout은 수락 여부를 알 수 없으므로 `DELIVERY_UNKNOWN`으로 남기고

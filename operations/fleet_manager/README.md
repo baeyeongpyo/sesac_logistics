@@ -1,7 +1,8 @@
 # Fleet Manager
 
-Fleet Manager는 차량의 최신 상태와 **상태 변경 로그**를 SQLite에 저장합니다.
-물류 작업과 재고의 원장은 `inventory_db`에 있으며, 다음 작업 판단은
+Fleet Manager는 차량의 최신 상태와 **상태 변경 로그**를 SQLite에 저장하고,
+Orchestrator의 표준 명령을 차량 모델별 Fleet Bridge에 중계합니다. 물류 작업과
+재고의 원장은 `inventory_db`에 있으며, 다음 작업 판단은
 `logistics_orchestrator`의 책임입니다.
 
 ## 실행
@@ -13,6 +14,26 @@ docker compose --env-file .env up --build
 ```
 
 기본 API 주소는 `.env`의 `FLEET_MANAGER_API_PORT`를 사용합니다.
+
+`VEHICLE_REGISTRY_PATH`의 기본값은 `/app/config/vehicles.yaml`입니다. 통합
+`operations/compose.local.yaml`에서는 이 파일이 모델별 Bridge endpoint와 차량별
+모델 할당을 정의합니다.
+
+```yaml
+models:
+  - id: mentorpi
+    bridge_url: http://command-api:8080
+    capabilities: [navigate, auto_dock, stop, report_status]
+vehicles:
+  - id: robot_1
+    model: mentorpi
+  - id: robot_2
+    model: mentorpi
+```
+
+`http://command-api:8080`은 통합 Compose 내부의 MentorPi Fleet Bridge 서비스
+주소입니다. 차량의 실제 command API 주소는 Fleet Bridge 설정에만 두며, Fleet
+Manager는 차량 IP나 ROS/Foxglove 프로토콜을 알지 않습니다.
 
 ## 차량 상태 보고
 
@@ -48,6 +69,21 @@ GET /api/v1/vehicles
 GET /api/v1/vehicles/{robot_id}
 GET /api/v1/vehicles/{robot_id}/logs?limit=100&before_id={id}
 ```
+
+## 차량 명령 중계
+
+Orchestrator는 Fleet Bridge가 아닌 Fleet Manager에 아래 표준 역할을 요청합니다.
+
+```text
+POST /api/v1/vehicles/{robot_id}/commands/navigation/goals
+POST /api/v1/vehicles/{robot_id}/commands/auto-dock
+```
+
+Fleet Manager는 `robot_id`의 model과 capability를 registry에서 확인한 뒤 해당
+Bridge의 기존 차량 command API로 payload와 응답을 변경하지 않고 전달합니다.
+미등록 차량은 404, 지원하지 않는 역할은 409, Bridge 전달 완료 여부를 확인할 수
+없으면 503을 반환합니다. Orchestrator는 마지막 경우를 `DELIVERY_UNKNOWN`으로
+기록하고 즉시 재시도하지 않습니다.
 
 ## Orchestrator 이벤트 전달
 

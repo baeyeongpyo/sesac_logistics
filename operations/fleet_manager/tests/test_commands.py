@@ -1,10 +1,17 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
+import httpx
 from fastapi.testclient import TestClient
 
-from fleet_manager.app.commands import BridgeUnavailableError, RelayResponse
+from fleet_manager.app.commands import (
+    BridgeCommandClient,
+    BridgeUnavailableError,
+    RelayResponse,
+    load_vehicle_registry,
+)
 from fleet_manager.app.main import create_app
 
 
@@ -146,6 +153,33 @@ vehicles:
 
         self.assertEqual(response.status_code, 503)
         self.assertIn("bridge timed out", response.json()["detail"])
+
+    def test_http_bridge_client_posts_to_the_registered_model_endpoint(self) -> None:
+        received: dict[str, object] = {}
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            received["url"] = str(request.url)
+            received["body"] = json.loads(request.content)
+            return httpx.Response(202, json={"state": "DRIVE"})
+
+        client = httpx.Client(transport=httpx.MockTransport(respond))
+        bridge = BridgeCommandClient(client=client)
+        vehicle = load_vehicle_registry(self.registry_path).require("robot_1", "navigate")
+        payload = {"operation_id": "operation-1", "purpose": "PICK"}
+
+        response = bridge.relay(
+            vehicle,
+            "/api/v1/vehicle-command/robot_1/navigation/goals",
+            payload,
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.body, {"state": "DRIVE"})
+        self.assertEqual(
+            received["url"],
+            "http://command-api:8080/api/v1/vehicle-command/robot_1/navigation/goals",
+        )
+        self.assertEqual(received["body"], payload)
 
 
 if __name__ == "__main__":

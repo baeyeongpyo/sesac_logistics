@@ -185,4 +185,5 @@ app = create_app(
     os.getenv("FLEET_MANAGER_DB_PATH", "/data/fleet_manager.db"),
     orchestrator_event_url=os.getenv("ORCHESTRATOR_EVENT_URL", ""),
     retry_interval_sec=float(os.getenv("EVENT_RETRY_INTERVAL_SEC", "2")),
+    vehicle_registry_path=os.getenv("VEHICLE_REGISTRY_PATH") or None,
 )

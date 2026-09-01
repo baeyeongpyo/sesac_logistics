@@ -12,7 +12,16 @@ class ComposeContractTests(unittest.TestCase):
 
         service = compose["services"]["fleet-manager-api"]
         self.assertIn("FLEET_MANAGER_DB_PATH", service["environment"])
+        self.assertIn("VEHICLE_REGISTRY_PATH", service["environment"])
         self.assertIn("../data:/data", service["volumes"])
+        registry_mount = next(
+            volume
+            for volume in service["volumes"]
+            if isinstance(volume, dict)
+            and volume["target"] == "/app/config/vehicles.yaml"
+        )
+        self.assertEqual(registry_mount["source"], "./config/vehicles.yaml")
+        self.assertTrue(registry_mount["read_only"])
 
 
 if __name__ == "__main__":

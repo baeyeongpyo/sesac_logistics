@@ -4,6 +4,7 @@ services:
       context: .
     environment:
       FLEET_MANAGER_DB_PATH: ${FLEET_MANAGER_DB_PATH:-/data/fleet_manager.db}
+      VEHICLE_REGISTRY_PATH: ${VEHICLE_REGISTRY_PATH:-/app/config/vehicles.yaml}
       ORCHESTRATOR_EVENT_URL: ${ORCHESTRATOR_EVENT_URL:-}
       EVENT_RETRY_INTERVAL_SEC: ${EVENT_RETRY_INTERVAL_SEC:-2}
     ports:
