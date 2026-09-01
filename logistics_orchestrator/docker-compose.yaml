@@ -1,0 +1,28 @@
+services:
+  logistics-orchestrator-api:
+    build:
+      context: .
+    environment:
+      ORCHESTRATOR_DB_PATH: ${ORCHESTRATOR_DB_PATH:-/data/orchestrator.db}
+      INVENTORY_URL: ${INVENTORY_URL:-http://host.docker.internal:8081}
+      FLEET_MANAGER_URL: ${FLEET_MANAGER_URL:-http://host.docker.internal:8090}
+      FLEET_BRIDGE_URL: ${FLEET_BRIDGE_URL:-http://host.docker.internal:8080}
+      ORCHESTRATOR_EVENT_URL: ${ORCHESTRATOR_EVENT_URL:-}
+      EVENT_RETRY_INTERVAL_SEC: ${EVENT_RETRY_INTERVAL_SEC:-2}
+    ports:
+      - "${ORCHESTRATOR_API_HOST:-127.0.0.1}:${ORCHESTRATOR_API_PORT:-8083}:8080"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz').read()",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
