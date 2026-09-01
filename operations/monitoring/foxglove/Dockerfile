@@ -35,6 +35,7 @@ SHELL ["/bin/bash", "-c"]
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libssl3 \
       ros-humble-rmw-fastrtps-cpp \
+      ros-humble-resource-retriever \
       ros-humble-rosbag2 \
       ros-humble-rosidl-default-runtime \
       ros-humble-rosx-introspection \

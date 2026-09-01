@@ -9,6 +9,7 @@ import unittest
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / 'tools' / 'foxglove_bridge_ctl.sh'
+FOXGLOVE_DOCKERFILE = Path(__file__).resolve().parents[1] / 'foxglove' / 'Dockerfile'
 
 
 class FoxgloveBridgeControlScriptTest(unittest.TestCase):
@@ -78,6 +79,12 @@ class FoxgloveBridgeControlScriptTest(unittest.TestCase):
             time.sleep(0.1)
         else:
             self.fail(f'process {pid} remained after stop')
+
+    def test_runtime_image_includes_resource_retriever_for_bridge_component_loading(self):
+        content = FOXGLOVE_DOCKERFILE.read_text(encoding='utf-8')
+        runtime = content.split('FROM ros:humble-ros-base-jammy AS runtime', 1)[1]
+
+        self.assertIn('ros-humble-resource-retriever', runtime)
 
 
 if __name__ == '__main__':
