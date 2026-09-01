@@ -65,24 +65,33 @@ API로 중계한다. 나머지 역할은 같은 패턴으로 확장한다.
 
 ## 차량 모델과 Bridge 등록
 
-Fleet Manager는 배포 설정 파일에 차량별 등록 정보를 둔다.
+Fleet Manager는 모델별 Bridge endpoint와 차량별 모델 할당을 분리해 배포 설정에
+둔다.
 
 ```yaml
+models:
+  - id: mentorpi
+    bridge_url: http://command-api:8080
+    capabilities: [navigate, auto_dock, stop, report_status]
+
 vehicles:
   - id: robot_1
     model: mentorpi
-    bridge_url: http://host.docker.internal:8080
-    capabilities: [navigate, auto_dock, stop, report_status]
   - id: robot_2
     model: mentorpi
-    bridge_url: http://host.docker.internal:8080
-    capabilities: [navigate, auto_dock, stop, report_status]
 ```
 
-동일 모델의 여러 차량은 하나의 Bridge 배포본을 공유하되, 각 차량 ID와 capability는
-독립적으로 등록한다. 새 차종은 별도의 Fleet Bridge 배포와 등록 항목을 더하는
-방식으로 확장한다. Fleet Manager에는 차종별 ROS 또는 제조사 API 코드가 추가되지
-않는다.
+`bridge_url`은 차량 API가 아니라 Fleet Bridge의 command-api 주소다. 통합
+`compose.local.yaml` 실행에서는 Fleet Manager와 현재 `command-api`가 동일 Compose
+기본 네트워크에 있으므로 `http://command-api:8080` 서비스 DNS를 사용한다.
+`host.docker.internal`은 컨테이너에서 호스트에 공개된 포트로 접근할 때만 쓰는
+Docker Desktop 전용 별칭이며, 이 통합 배포의 서비스 간 주소로 사용하지 않는다.
+
+각 차량의 실제 command API 주소(예: `http://192.168.100.38:8082`)는 해당 모델의
+Fleet Bridge 설정에 둔다. MentorPi Bridge는 `robot_id`로 이 주소를 찾아 차량에
+전달한다. 동일 모델의 여러 차량은 하나의 Bridge 배포본과 모델 capability를
+공유한다. 새 차종은 별도의 Fleet Bridge 배포와 model 등록 항목을 더하는 방식으로
+확장한다. Fleet Manager에는 차종별 ROS 또는 제조사 API 코드가 추가되지 않는다.
 
 ## 신뢰성과 오류 처리
 
