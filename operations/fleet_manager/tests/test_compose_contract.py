@@ -12,7 +12,7 @@ class ComposeContractTests(unittest.TestCase):
 
         service = compose["services"]["fleet-manager-api"]
         self.assertIn("FLEET_MANAGER_DB_PATH", service["environment"])
-        self.assertIn("./data:/data", service["volumes"])
+        self.assertIn("../data:/data", service["volumes"])
 
 
 if __name__ == "__main__":

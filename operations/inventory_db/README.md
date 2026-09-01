@@ -11,7 +11,7 @@ docker compose up --build -d
 curl http://127.0.0.1:8081/healthz
 ```
 
-SQLite 파일은 호스트의 `operations/inventory_db/data/inventory.db`에 생성됩니다. `data/`와 `.env`는 Git에서 제외됩니다. 중지는 `docker compose down`으로 수행하며 bind mount의 DB 파일은 유지됩니다.
+SQLite 파일은 호스트의 `operations/data/inventory.db`에 생성됩니다. `data/`와 `.env`는 Git에서 제외됩니다. 중지는 `docker compose down`으로 수행하며 bind mount의 DB 파일은 유지됩니다.
 
 ## 상태 모델
 

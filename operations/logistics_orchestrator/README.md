@@ -83,7 +83,7 @@ PICK 완료는 Inventory `pick-completions`를 `{operation_id}:pick` 키로 한 
 
 ## 영속 데이터
 
-`data/orchestrator.db`에는 다음 데이터가 보존됩니다.
+`../data/orchestrator.db`(`operations/data/orchestrator.db`)에는 다음 데이터가 보존됩니다.
 
 - `orchestrator_inbox`: `(source, event_id)` 중복 제거
 - `orchestrator_steps`: `RESERVED`부터 `PLACE_COMMITTED`까지의 작업 단계

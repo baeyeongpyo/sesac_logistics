@@ -9,7 +9,7 @@ services:
     ports:
       - "${FLEET_MANAGER_API_HOST:-127.0.0.1}:${FLEET_MANAGER_API_PORT:-8082}:8080"
     volumes:
-      - ./data:/data
+      - ../data:/data
     restart: unless-stopped
     healthcheck:
       test:

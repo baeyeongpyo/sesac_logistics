@@ -9,7 +9,7 @@ class ComposeContractTest(unittest.TestCase):
         compose = compose_path.read_text()
 
         self.assertIn("inventory-api:", compose)
-        self.assertIn("./data:/data", compose)
+        self.assertIn("../data:/data", compose)
         self.assertIn("INVENTORY_DB_PATH", compose)
         self.assertIn("127.0.0.1", compose)
 

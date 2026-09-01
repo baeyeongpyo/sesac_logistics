@@ -12,7 +12,7 @@ services:
     ports:
       - "${ORCHESTRATOR_API_HOST:-127.0.0.1}:${ORCHESTRATOR_API_PORT:-8083}:8080"
     volumes:
-      - ./data:/data
+      - ../data:/data
     restart: unless-stopped
     healthcheck:
       test:

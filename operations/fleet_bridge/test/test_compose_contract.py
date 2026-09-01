@@ -183,7 +183,7 @@ class ServerComposeContractTest(unittest.TestCase):
         database_directory = Path(environment['TELEMETRY_DB_HOST_DIRECTORY'])
         if not database_directory.is_absolute():
             database_directory = BUNDLE / database_directory
-        self.assertEqual(data_mount['source'], str(database_directory))
+        self.assertEqual(data_mount['source'], str(database_directory.resolve()))
         self.assertFalse(data_mount.get('read_only', False))
         self.assertFalse(data_mount['bind']['create_host_path'])
 

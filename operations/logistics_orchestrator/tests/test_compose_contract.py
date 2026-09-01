@@ -23,6 +23,10 @@ class OrchestratorComposeContractTest(unittest.TestCase):
         self.assertIn("FLEET_MANAGER_URL", service["environment"])
         self.assertIn("FLEET_BRIDGE_URL", service["environment"])
         self.assertEqual(service["volumes"][0]["type"], "bind")
+        self.assertEqual(
+            service["volumes"][0]["source"],
+            str(compose_path.parents[1] / "data"),
+        )
         self.assertEqual(service["volumes"][0]["target"], "/data")
         self.assertEqual(
             service["ports"],
