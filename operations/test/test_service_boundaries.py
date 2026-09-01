@@ -8,9 +8,9 @@ import yaml
 
 OPERATIONS = Path(__file__).resolve().parents[1]
 FLEET_BRIDGE = OPERATIONS / 'fleet_bridge'
-MAP_SERVER = OPERATIONS / 'map_server'
-WAREHOUSE_SERVER = OPERATIONS / 'warehouse_server'
 MONITORING = OPERATIONS / 'monitoring'
+MAP_SERVER = MONITORING / 'map_server'
+WAREHOUSE_SERVER = MONITORING / 'warehouse_server'
 
 
 def compose(path: Path) -> dict:
@@ -18,17 +18,17 @@ def compose(path: Path) -> dict:
 
 
 class ServiceBoundaryContractTest(unittest.TestCase):
-    def test_integrated_compose_includes_each_service_bundle(self):
+    def test_integrated_compose_includes_fleet_bridge_and_monitoring_bundles(self):
         content = (OPERATIONS / 'compose.local.yaml').read_text(encoding='utf-8')
 
         for bundle in (
             './fleet_bridge/docker-compose.yaml',
-            './map_server/docker-compose.yaml',
-            './warehouse_server/docker-compose.yaml',
             './monitoring/docker-compose.yaml',
         ):
             with self.subTest(bundle=bundle):
                 self.assertIn(bundle, content)
+        self.assertNotIn('./map_server/docker-compose.yaml', content)
+        self.assertNotIn('./warehouse_server/docker-compose.yaml', content)
         self.assertNotIn('./foxglove_assert_server/docker-compose.yaml', content)
 
     def test_fleet_bridge_owns_only_vehicle_communication_services(self):
@@ -42,7 +42,7 @@ class ServiceBoundaryContractTest(unittest.TestCase):
         })
 
     def test_map_server_owns_the_central_map_publisher(self):
-        service = compose(MAP_SERVER / 'docker-compose.yaml')['services']['map-publisher']
+        service = compose(MONITORING / 'docker-compose.yaml')['services']['map-publisher']
 
         self.assertEqual(service['network_mode'], 'host')
         self.assertEqual(service['ipc'], 'host')
@@ -53,7 +53,7 @@ class ServiceBoundaryContractTest(unittest.TestCase):
         )
 
     def test_warehouse_server_owns_the_zone_overlay_publisher(self):
-        service = compose(WAREHOUSE_SERVER / 'docker-compose.yaml')['services'][
+        service = compose(MONITORING / 'docker-compose.yaml')['services'][
             'warehouse-zone-publisher'
         ]
 
@@ -64,10 +64,15 @@ class ServiceBoundaryContractTest(unittest.TestCase):
             '/config/warehouse_zones.yaml',
         )
 
-    def test_monitoring_owns_foxglove_and_assets(self):
+    def test_monitoring_owns_foxglove_assets_map_and_warehouse(self):
         services = compose(MONITORING / 'docker-compose.yaml')['services']
 
-        self.assertEqual(set(services), {'foxglove-bridge', 'asset-server'})
+        self.assertEqual(set(services), {
+            'foxglove-bridge',
+            'asset-server',
+            'map-publisher',
+            'warehouse-zone-publisher',
+        })
         self.assertEqual(services['foxglove-bridge']['network_mode'], 'host')
         self.assertEqual(services['foxglove-bridge']['ipc'], 'host')
         self.assertEqual(services['asset-server']['network_mode'], 'host')
@@ -76,6 +81,8 @@ class ServiceBoundaryContractTest(unittest.TestCase):
     def test_legacy_ownership_paths_are_absent(self):
         for path in (
             OPERATIONS / 'foxglove_assert_server',
+            OPERATIONS / 'map_server',
+            OPERATIONS / 'warehouse_server',
             FLEET_BRIDGE / 'maps',
             FLEET_BRIDGE / 'config' / 'server_foxglove.yaml',
             FLEET_BRIDGE / 'config' / 'warehouse_zones.yaml',

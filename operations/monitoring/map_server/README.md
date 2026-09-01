@@ -1,12 +1,12 @@
 # Central Map Server
 
-이 bundle은 관제 PC에서 중앙 정적 지도만 발행한다. 차량과 통신하지 않으며
+이 Monitoring 하위 구성요소는 관제 PC에서 중앙 정적 지도만 발행한다. 차량과 통신하지 않으며
 `/map`과 Foxglove의 지도 시각화용 `map -> map_visualization` 변환만 소유한다.
 
 ```bash
-cp operations/map_server/.env.example operations/map_server/.env.server
-docker compose --env-file operations/map_server/.env.server \
-  -f operations/map_server/docker-compose.yaml up -d --build
+cp operations/monitoring/.env.example operations/monitoring/.env.server
+docker compose --env-file operations/monitoring/.env.server \
+  -f operations/monitoring/docker-compose.yaml up -d --build map-publisher
 ```
 
 `MAP_DIRECTORY`에는 `MAP_YAML`이 가리키는 YAML과 PGM이 있어야 한다. map 데이터는
@@ -14,4 +14,4 @@ docker compose --env-file operations/map_server/.env.server \
 단일 `/map` publisher로 실행한다.
 
 `tools/nav2_path_visualizer`는 이 중앙 map data를 검토하고 Nav2 경로를 설명하는
-정적 도구다. ROS와 차량 통신을 실행하지 않으며 map_server의 운영 보조 도구로 관리한다.
+정적 도구다. ROS와 차량 통신을 실행하지 않으며 Monitoring의 운영 보조 도구로 관리한다.

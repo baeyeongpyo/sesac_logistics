@@ -7,7 +7,7 @@
 `index.html`에는 실행용 JavaScript가 인라인으로 포함되어 있어 Chrome에서도 `file://`로 바로 열 수 있습니다. 소스인 `model.mjs` 또는 `app.mjs`를 수정한 개발자는 배포 전에 아래 명령으로 `index.html` 번들을 갱신합니다. 이 명령은 최종 사용자의 실행 과정에는 필요 없습니다.
 
 ```bash
-node operations/map_server/tools/nav2_path_visualizer/build-standalone.mjs
+node operations/monitoring/map_server/tools/nav2_path_visualizer/build-standalone.mjs
 ```
 
 ## 실행
@@ -61,6 +61,6 @@ Finder 또는 브라우저에서 [index.html](./index.html)을 엽니다.
 Node.js가 있으면 순수 모델과 정적 화면 계약을 확인할 수 있습니다.
 
 ```bash
-node --test operations/map_server/tools/nav2_path_visualizer/test/model.test.mjs \
-  operations/map_server/tools/nav2_path_visualizer/test/page-contract.test.mjs
+node --test operations/monitoring/map_server/tools/nav2_path_visualizer/test/model.test.mjs \
+  operations/monitoring/map_server/tools/nav2_path_visualizer/test/page-contract.test.mjs
 ```

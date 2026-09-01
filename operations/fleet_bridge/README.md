@@ -4,9 +4,8 @@
 WebSocket telemetry를 관제 ROS 2 Domain으로 재발행하고, 차량 Command API로 HTTP
 명령을 전달하며, 최신 telemetry를 SQLite에 기록한다.
 
-지도 발행은 [`../map_server`](../map_server/README.md), 창고 zone overlay는
-[`../warehouse_server`](../warehouse_server/README.md), 중앙 Foxglove Bridge 및 3D
-asset은 [`../monitoring`](../monitoring/README.md)이 소유한다.
+중앙 Foxglove Bridge, 3D asset, 지도 발행, 창고 zone overlay는 모두
+[`../monitoring`](../monitoring/README.md)이 소유한다.
 
 ## 차량 인터페이스
 

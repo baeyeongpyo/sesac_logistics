@@ -77,13 +77,13 @@ Run: `python3 -m unittest operations.test.test_service_boundaries operations.fle
 
 Expected: production layout을 옮기기 전이므로 실패한다.
 
-### Task 2: map_server bundle을 추출한다
+### Task 2: Monitoring 하위 map_server 구성요소를 추출한다
 
 **Files:**
-- Create: `operations/map_server/{.env.example,README.md,Dockerfile,docker-compose.yaml,entrypoint.sh}`
-- Create: `operations/map_server/maps/{map_0825.yaml,map_0825.pgm}`
-- Create: `operations/map_server/ros2_ws/src/central_map_server/{package.xml,setup.cfg,setup.py,resource/central_map_server,central_map_server/__init__.py,central_map_server/publisher.py}`
-- Create: `operations/map_server/ros2_ws/src/central_map_server/test/test_publisher.py`
+- Create: `operations/monitoring/map_server/{README.md,Dockerfile,entrypoint.sh}`
+- Create: `operations/monitoring/map_server/maps/{map_0825.yaml,map_0825.pgm}`
+- Create: `operations/monitoring/map_server/ros2_ws/src/central_map_server/{package.xml,setup.cfg,setup.py,resource/central_map_server,central_map_server/__init__.py,central_map_server/publisher.py}`
+- Create: `operations/monitoring/map_server/ros2_ws/src/central_map_server/test/test_publisher.py`
 - Delete: `operations/fleet_bridge/maps/**`
 - Delete: `operations/fleet_bridge/server/ros2_ws/src/foxglove_ros_worker/foxglove_ros_worker/map_publisher.py`
 - Delete: `operations/fleet_bridge/server/ros2_ws/src/foxglove_ros_worker/test/test_map_publisher.py`
@@ -104,7 +104,7 @@ def test_checked_in_map_keeps_nav2_geometry(self):
     self.assertEqual(loaded.origin, (-5.04, -4.03, 0.0))
 
 def test_compose_uses_central_map_entry_point(self):
-    service = compose(MAP_SERVER / 'docker-compose.yaml')['services']['map-publisher']
+    service = compose(MONITORING / 'docker-compose.yaml')['services']['map-publisher']
     self.assertEqual(service['command'][:4], [
         'ros2', 'run', 'central_map_server', 'central_map_publisher',
     ])
@@ -112,23 +112,24 @@ def test_compose_uses_central_map_entry_point(self):
 
 - [ ] **Step 2: 실패를 확인한다**
 
-Run: `PYTHONPATH=operations/map_server/ros2_ws/src/central_map_server python3 -m unittest discover -s operations/map_server/ros2_ws/src/central_map_server/test -v`
+Run: `PYTHONPATH=operations/monitoring/map_server/ros2_ws/src/central_map_server python3 -m unittest discover -s operations/monitoring/map_server/ros2_ws/src/central_map_server/test -v`
 
 Expected: `central_map_server`가 없어 실패한다.
 
 - [ ] **Step 3: publisher와 map data를 새 bundle로 옮긴다**
 
 ```python
-# operations/map_server/ros2_ws/src/central_map_server/setup.py
+# operations/monitoring/map_server/ros2_ws/src/central_map_server/setup.py
 entry_points={'console_scripts': [
     'central_map_publisher = central_map_server.publisher:main',
 ]}
 ```
 
 ```yaml
-# operations/map_server/docker-compose.yaml
+# operations/monitoring/docker-compose.yaml
 services:
   map-publisher:
+    build: {context: ./map_server, dockerfile: Dockerfile}
     network_mode: host
     ipc: host
     environment:
@@ -138,17 +139,17 @@ services:
 
 - [ ] **Step 4: map tests를 green으로 만든다**
 
-Run: `PYTHONPATH=operations/map_server/ros2_ws/src/central_map_server python3 -m unittest discover -s operations/map_server/ros2_ws/src/central_map_server/test -v`
+Run: `PYTHONPATH=operations/monitoring/map_server/ros2_ws/src/central_map_server python3 -m unittest discover -s operations/monitoring/map_server/ros2_ws/src/central_map_server/test -v`
 
 Expected: PASS.
 
-### Task 3: warehouse_server bundle을 추출한다
+### Task 3: Monitoring 하위 warehouse_server 구성요소를 추출한다
 
 **Files:**
-- Create: `operations/warehouse_server/{.env.example,README.md,Dockerfile,docker-compose.yaml,entrypoint.sh}`
-- Create: `operations/warehouse_server/config/warehouse_zones.yaml`
-- Create: `operations/warehouse_server/ros2_ws/src/warehouse_overlay_server/{package.xml,setup.cfg,setup.py,resource/warehouse_overlay_server,warehouse_overlay_server/__init__.py,warehouse_overlay_server/publisher.py}`
-- Create: `operations/warehouse_server/ros2_ws/src/warehouse_overlay_server/test/test_publisher.py`
+- Create: `operations/monitoring/warehouse_server/{README.md,Dockerfile,entrypoint.sh}`
+- Create: `operations/monitoring/warehouse_server/config/warehouse_zones.yaml`
+- Create: `operations/monitoring/warehouse_server/ros2_ws/src/warehouse_overlay_server/{package.xml,setup.cfg,setup.py,resource/warehouse_overlay_server,warehouse_overlay_server/__init__.py,warehouse_overlay_server/publisher.py}`
+- Create: `operations/monitoring/warehouse_server/ros2_ws/src/warehouse_overlay_server/test/test_publisher.py`
 - Delete: `operations/fleet_bridge/config/warehouse_zones.yaml`
 - Delete: `operations/fleet_bridge/server/ros2_ws/src/foxglove_ros_worker/foxglove_ros_worker/warehouse_zone_publisher.py`
 - Delete: `operations/fleet_bridge/server/ros2_ws/src/foxglove_ros_worker/test/test_warehouse_zone_publisher.py`
@@ -168,29 +169,30 @@ def test_layout_keeps_every_operator_point(self):
     self.assertEqual(len(layout.points), 22)
 
 def test_compose_mounts_layout_read_only(self):
-    service = compose(WAREHOUSE_SERVER / 'docker-compose.yaml')['services']['warehouse-zone-publisher']
+    service = compose(MONITORING / 'docker-compose.yaml')['services']['warehouse-zone-publisher']
     self.assertEqual(service['environment']['WAREHOUSE_ZONES_CONFIG'], '/config/warehouse_zones.yaml')
 ```
 
 - [ ] **Step 2: 실패를 확인한다**
 
-Run: `PYTHONPATH=operations/warehouse_server/ros2_ws/src/warehouse_overlay_server python3 -m unittest discover -s operations/warehouse_server/ros2_ws/src/warehouse_overlay_server/test -v`
+Run: `PYTHONPATH=operations/monitoring/warehouse_server/ros2_ws/src/warehouse_overlay_server python3 -m unittest discover -s operations/monitoring/warehouse_server/ros2_ws/src/warehouse_overlay_server/test -v`
 
 Expected: `warehouse_overlay_server`가 없어 실패한다.
 
 - [ ] **Step 3: publisher, config, image, Compose를 새 bundle로 옮긴다**
 
 ```python
-# operations/warehouse_server/ros2_ws/src/warehouse_overlay_server/setup.py
+# operations/monitoring/warehouse_server/ros2_ws/src/warehouse_overlay_server/setup.py
 entry_points={'console_scripts': [
     'warehouse_zone_publisher = warehouse_overlay_server.publisher:main',
 ]}
 ```
 
 ```yaml
-# operations/warehouse_server/docker-compose.yaml
+# operations/monitoring/docker-compose.yaml
 services:
   warehouse-zone-publisher:
+    build: {context: ./warehouse_server, dockerfile: Dockerfile}
     network_mode: host
     ipc: host
     environment:
@@ -200,17 +202,19 @@ services:
 
 - [ ] **Step 4: warehouse tests를 green으로 만든다**
 
-Run: `PYTHONPATH=operations/warehouse_server/ros2_ws/src/warehouse_overlay_server python3 -m unittest discover -s operations/warehouse_server/ros2_ws/src/warehouse_overlay_server/test -v`
+Run: `PYTHONPATH=operations/monitoring/warehouse_server/ros2_ws/src/warehouse_overlay_server python3 -m unittest discover -s operations/monitoring/warehouse_server/ros2_ws/src/warehouse_overlay_server/test -v`
 
 Expected: PASS.
 
-### Task 4: monitoring bundle에 Foxglove Bridge와 asset-server를 모은다
+### Task 4: Monitoring bundle에 Foxglove, asset, map, warehouse를 모은다
 
 **Files:**
 - Create: `operations/monitoring/{.env.example,README.md,docker-compose.yaml}`
 - Create: `operations/monitoring/foxglove/{Dockerfile,entrypoint.sh}`
 - Create: `operations/monitoring/config/server_foxglove.yaml`
 - Create: `operations/monitoring/assets/{Dockerfile,serve_assets.py,hiwonder_mecanum_forklift/**}`
+- Create: `operations/monitoring/map_server/**`
+- Create: `operations/monitoring/warehouse_server/**`
 - Create: `operations/monitoring/test/test_monitoring_bundle.py`
 - Delete: `operations/fleet_bridge/config/server_foxglove.yaml`
 - Delete: `operations/fleet_bridge/tools/foxglove_bridge_ctl.sh`
@@ -226,7 +230,9 @@ Expected: PASS.
 ```python
 def test_monitoring_owns_bridge_and_asset_services(self):
     services = compose(MONITORING / 'docker-compose.yaml')['services']
-    self.assertEqual(set(services), {'foxglove-bridge', 'asset-server'})
+    self.assertEqual(set(services), {
+        'foxglove-bridge', 'asset-server', 'map-publisher', 'warehouse-zone-publisher',
+    })
     self.assertEqual(services['foxglove-bridge']['network_mode'], 'host')
     self.assertEqual(services['asset-server']['command'][0], 'python3')
 
@@ -253,6 +259,12 @@ services:
     ipc: host
   asset-server:
     build: {context: ./assets, dockerfile: Dockerfile}
+    network_mode: host
+  map-publisher:
+    build: {context: ./map_server, dockerfile: Dockerfile}
+    network_mode: host
+  warehouse-zone-publisher:
+    build: {context: ./warehouse_server, dockerfile: Dockerfile}
     network_mode: host
 ```
 
@@ -362,8 +374,6 @@ Expected: old directories와 files가 남아 실패한다.
 # operations/compose.local.yaml
 include:
   - ./fleet_bridge/docker-compose.yaml
-  - ./map_server/docker-compose.yaml
-  - ./warehouse_server/docker-compose.yaml
   - ./monitoring/docker-compose.yaml
   - ./fleet_manager/docker-compose.yaml
   - ./inventory_db/docker-compose.yaml
@@ -387,12 +397,12 @@ Expected: PASS.
 
 - [ ] **Step 1: 이동된 Python test suites를 실행한다**
 
-Run: `PYTHONPATH=operations/fleet_bridge/common/fleet_bridge_config python3 -m unittest discover -s operations/fleet_bridge/common/fleet_bridge_config/test -p 'test_*.py' -v && PYTHONPATH=operations/fleet_bridge/common/fleet_bridge_config:operations/fleet_bridge/server/ros2_ws/src/fleet_bridge_worker python3 -m unittest discover -s operations/fleet_bridge/server/ros2_ws/src/fleet_bridge_worker/test -p 'test_*.py' -v && PYTHONPATH=operations/map_server/ros2_ws/src/central_map_server python3 -m unittest discover -s operations/map_server/ros2_ws/src/central_map_server/test -p 'test_*.py' -v && PYTHONPATH=operations/warehouse_server/ros2_ws/src/warehouse_overlay_server python3 -m unittest discover -s operations/warehouse_server/ros2_ws/src/warehouse_overlay_server/test -p 'test_*.py' -v && python3 -m unittest discover -s operations/monitoring/test -p 'test_*.py' -v && python3 -m unittest discover -s operations/test -p 'test_*.py' -v`
+Run: `PYTHONPATH=operations/fleet_bridge/common/fleet_bridge_config python3 -m unittest discover -s operations/fleet_bridge/common/fleet_bridge_config/test -p 'test_*.py' -v && PYTHONPATH=operations/fleet_bridge/common/fleet_bridge_config:operations/fleet_bridge/server/ros2_ws/src/fleet_bridge_worker python3 -m unittest discover -s operations/fleet_bridge/server/ros2_ws/src/fleet_bridge_worker/test -p 'test_*.py' -v && PYTHONPATH=operations/monitoring/map_server/ros2_ws/src/central_map_server python3 -m unittest discover -s operations/monitoring/map_server/ros2_ws/src/central_map_server/test -p 'test_*.py' -v && PYTHONPATH=operations/monitoring/warehouse_server/ros2_ws/src/warehouse_overlay_server python3 -m unittest discover -s operations/monitoring/warehouse_server/ros2_ws/src/warehouse_overlay_server/test -p 'test_*.py' -v && python3 -m unittest discover -s operations/monitoring/test -p 'test_*.py' -v && python3 -m unittest discover -s operations/test -p 'test_*.py' -v`
 
 Expected: PASS except documented optional local FastAPI/ROS integration cases.
 
 - [ ] **Step 2: Compose rendering과 diff를 검토한다**
 
-Run: `for service in fleet_bridge map_server warehouse_server monitoring; do docker compose --env-file "operations/$service/.env.example" -f "operations/$service/docker-compose.yaml" config --quiet; done && git diff --check && git status --short`
+Run: `docker compose --env-file operations/fleet_bridge/.env.example -f operations/fleet_bridge/docker-compose.yaml config --quiet && docker compose --env-file operations/monitoring/.env.example -f operations/monitoring/docker-compose.yaml config --quiet && git diff --check && git status --short`
 
 Expected: Compose render and whitespace check PASS; user-owned modifications remain unstaged.

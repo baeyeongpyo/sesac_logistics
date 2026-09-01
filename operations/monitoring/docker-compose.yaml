@@ -49,3 +49,65 @@ services:
     command:
       [python3, /app/serve_assets.py, --port, "${ASSET_PORT:-8088}", --bind,
        "${ASSET_BIND_ADDRESS:-0.0.0.0}", --directory, /assets]
+
+  map-publisher:
+    image: ${MAP_SERVER_IMAGE:-mentorpi-map-server:humble}
+    build:
+      context: ./map_server
+      dockerfile: Dockerfile
+    network_mode: host
+    ipc: host
+    restart: unless-stopped
+    stop_signal: SIGINT
+    stop_grace_period: 10s
+    environment:
+      ROS_DOMAIN_ID: ${SERVER_ROS_DOMAIN_ID:-225}
+      ROS_LOCALHOST_ONLY: "1"
+      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+      FASTDDS_BUILTIN_TRANSPORTS: ${FASTDDS_BUILTIN_TRANSPORTS:-DEFAULT}
+      MAP_YAML: ${MAP_YAML:-/maps/map_0825.yaml}
+      MAP_USE_SIM_TIME: ${MAP_USE_SIM_TIME:-false}
+    volumes:
+      - type: bind
+        source: ${MAP_DIRECTORY:-./map_server/maps}
+        target: /maps
+        read_only: true
+        bind:
+          create_host_path: false
+    command:
+      - ros2
+      - run
+      - central_map_server
+      - central_map_publisher
+      - --ros-args
+      - -p
+      - "use_sim_time:=${MAP_USE_SIM_TIME:-false}"
+
+  warehouse-zone-publisher:
+    image: ${WAREHOUSE_SERVER_IMAGE:-mentorpi-warehouse-server:humble}
+    build:
+      context: ./warehouse_server
+      dockerfile: Dockerfile
+    network_mode: host
+    ipc: host
+    restart: unless-stopped
+    stop_signal: SIGINT
+    stop_grace_period: 10s
+    environment:
+      ROS_DOMAIN_ID: ${SERVER_ROS_DOMAIN_ID:-225}
+      ROS_LOCALHOST_ONLY: "1"
+      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+      FASTDDS_BUILTIN_TRANSPORTS: ${FASTDDS_BUILTIN_TRANSPORTS:-DEFAULT}
+      WAREHOUSE_ZONES_CONFIG: /config/warehouse_zones.yaml
+    volumes:
+      - type: bind
+        source: ./warehouse_server/config/warehouse_zones.yaml
+        target: /config/warehouse_zones.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+    command:
+      - ros2
+      - run
+      - warehouse_overlay_server
+      - warehouse_zone_publisher
