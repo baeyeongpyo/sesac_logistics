@@ -6,7 +6,6 @@ services:
       ORCHESTRATOR_DB_PATH: ${ORCHESTRATOR_DB_PATH:-/data/orchestrator.db}
       INVENTORY_URL: ${INVENTORY_URL:-http://host.docker.internal:8081}
       FLEET_MANAGER_URL: ${FLEET_MANAGER_URL:-http://host.docker.internal:8090}
-      FLEET_BRIDGE_URL: ${FLEET_BRIDGE_URL:-http://host.docker.internal:8080}
       ORCHESTRATOR_EVENT_URL: ${ORCHESTRATOR_EVENT_URL:-}
       EVENT_RETRY_INTERVAL_SEC: ${EVENT_RETRY_INTERVAL_SEC:-2}
     ports:

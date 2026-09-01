@@ -73,18 +73,16 @@ def _record_event(source: str, event: EventEnvelope, request: Request) -> None:
 
 
 def _runtime_service_factory(store: OrchestratorStore) -> Any:
-    from .clients import HttpFleetBridgeClient, HttpFleetManagerClient, HttpInventoryClient
+    from .clients import HttpFleetManagerClient, HttpInventoryClient
     from .service import OrchestratorService
 
+    fleet_manager = HttpFleetManagerClient(
+        os.getenv("FLEET_MANAGER_URL", "http://host.docker.internal:8090")
+    )
     return OrchestratorService(
         store,
         HttpInventoryClient(os.getenv("INVENTORY_URL", "http://host.docker.internal:8081")),
-        HttpFleetManagerClient(
-            os.getenv("FLEET_MANAGER_URL", "http://host.docker.internal:8090")
-        ),
-        HttpFleetBridgeClient(
-            os.getenv("FLEET_BRIDGE_URL", "http://host.docker.internal:8080")
-        ),
+        fleet_manager,
     )
 
 

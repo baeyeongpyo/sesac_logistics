@@ -23,11 +23,7 @@ class InventoryGateway(Protocol):
 
 class FleetGateway(Protocol):
     def list_vehicles(self) -> list[dict[str, Any]]: ...
-
-
-class FleetBridgeGateway(Protocol):
     def navigate(self, robot_id: str, payload: dict[str, Any]) -> None: ...
-
     def auto_dock(self, robot_id: str, payload: dict[str, Any]) -> None: ...
 
 
@@ -37,12 +33,10 @@ class OrchestratorService:
         store: OrchestratorStore,
         inventory: InventoryGateway,
         fleet: FleetGateway,
-        bridge: FleetBridgeGateway,
     ) -> None:
         self._store = store
         self._inventory = inventory
         self._fleet = fleet
-        self._bridge = bridge
 
     def handle_recorded_event(self, source: str, event: EventEnvelope) -> None:
         """A durable event is only a trigger; reconciliation uses current ledgers."""
@@ -223,7 +217,7 @@ class OrchestratorService:
             payload_type=str(operation["payload_type"]),
         )
         self._deliver_command(
-            operation_id, robot_id, command_type, payload, self._bridge.navigate
+            operation_id, robot_id, command_type, payload, self._fleet.navigate
         )
 
     def _auto_dock_for_operation(self, operation: dict[str, Any], *, purpose: str) -> None:
@@ -255,7 +249,7 @@ class OrchestratorService:
             robot_id,
             f"AUTO_DOCK_{purpose}",
             payload,
-            self._bridge.auto_dock,
+            self._fleet.auto_dock,
         )
 
     def _deliver_command(

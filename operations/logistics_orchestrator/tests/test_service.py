@@ -94,17 +94,13 @@ class FakeInventory:
 
 
 class FakeFleet:
-    def __init__(self, vehicles: list[dict]) -> None:
+    def __init__(self, vehicles: list[dict], *, timeout: bool = False) -> None:
         self.vehicles = vehicles
+        self.timeout = timeout
+        self.commands: list[tuple[str, str, dict]] = []
 
     def list_vehicles(self) -> list[dict]:
         return self.vehicles
-
-
-class FakeBridge:
-    def __init__(self, *, timeout: bool = False) -> None:
-        self.timeout = timeout
-        self.commands: list[tuple[str, str, dict]] = []
 
     def navigate(self, robot_id: str, payload: dict) -> None:
         if self.timeout:
@@ -131,14 +127,12 @@ class OrchestratorServiceTest(unittest.TestCase):
         # This catches a ready vehicle remaining idle while Docker Fresh cargo is available.
         inventory = FakeInventory(stocks=[_stock("docker", "FRESH", 1)], active_operations=[])
         fleet = FakeFleet([{"robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"}])
-        bridge = FakeBridge()
-
-        OrchestratorService(self.store, inventory, fleet, bridge).reconcile()
+        OrchestratorService(self.store, inventory, fleet).reconcile()
 
         self.assertEqual(inventory.created[0]["source_zone_id"], "docker")
         self.assertEqual(inventory.created[0]["destination_zone_id"], "p1")
-        self.assertEqual(bridge.commands[0][0:2], ("navigate", "robot_1"))
-        self.assertEqual(bridge.commands[0][2]["purpose"], "PICK")
+        self.assertEqual(fleet.commands[0][0:2], ("navigate", "robot_1"))
+        self.assertEqual(fleet.commands[0][2]["purpose"], "PICK")
 
     def test_navigation_success_for_to_pick_sends_pick_auto_dock(self) -> None:
         # This catches arriving at source without starting the physical PICK action.
@@ -146,11 +140,9 @@ class OrchestratorServiceTest(unittest.TestCase):
         fleet = FakeFleet(
             [{"robot_id": "robot_1", "state": "WAIT", "detail": "NAVIGATION_SUCCEEDED", "operation_id": "operation-1"}]
         )
-        bridge = FakeBridge()
+        OrchestratorService(self.store, inventory, fleet).reconcile()
 
-        OrchestratorService(self.store, inventory, fleet, bridge).reconcile()
-
-        command = bridge.commands[0]
+        command = fleet.commands[0]
         self.assertEqual(command[0:2], ("auto_dock", "robot_1"))
         self.assertEqual(command[2]["operation"], "PICK")
         self.assertEqual(command[2]["location"], "DOCKER")
@@ -161,14 +153,12 @@ class OrchestratorServiceTest(unittest.TestCase):
         fleet = FakeFleet(
             [{"robot_id": "robot_1", "state": "WAIT", "detail": "AUTO_DOCK_PICK_COMPLETED", "operation_id": "operation-1"}]
         )
-        bridge = FakeBridge()
-
-        OrchestratorService(self.store, inventory, fleet, bridge).reconcile()
+        OrchestratorService(self.store, inventory, fleet).reconcile()
 
         self.assertEqual(inventory.pick_completion_keys, ["operation-1:pick"])
-        self.assertEqual(bridge.commands[0][0], "navigate")
-        self.assertEqual(bridge.commands[0][2]["purpose"], "PLACE")
-        self.assertEqual(bridge.commands[0][2]["x"], 1.0)
+        self.assertEqual(fleet.commands[0][0], "navigate")
+        self.assertEqual(fleet.commands[0][2]["purpose"], "PLACE")
+        self.assertEqual(fleet.commands[0][2]["x"], 1.0)
 
     def test_place_complete_commits_inventory_without_duplicate_vehicle_command(self) -> None:
         # This catches a completed placement retaining robot cargo or reissuing a stale command.
@@ -176,50 +166,47 @@ class OrchestratorServiceTest(unittest.TestCase):
         fleet = FakeFleet(
             [{"robot_id": "robot_1", "state": "WAIT", "detail": "AUTO_DOCK_PLACE_COMPLETED", "operation_id": "operation-1"}]
         )
-        bridge = FakeBridge()
-
-        OrchestratorService(self.store, inventory, fleet, bridge).reconcile()
+        OrchestratorService(self.store, inventory, fleet).reconcile()
 
         self.assertEqual(inventory.place_completion_keys, ["operation-1:place"])
-        self.assertEqual(bridge.commands, [])
+        self.assertEqual(fleet.commands, [])
 
     def test_fail_does_not_command_until_operator_ready_then_resumes_active_operation(self) -> None:
         # This catches automatic movement while a human recovery acknowledgement is still absent.
         inventory = FakeInventory(stocks=[_stock("docker", "FRESH", 1, 1)], active_operations=[_operation()])
         fleet = FakeFleet([{"robot_id": "robot_1", "state": "FAIL", "detail": "NAVIGATION_FAILED"}])
-        bridge = FakeBridge()
-        service = OrchestratorService(self.store, inventory, fleet, bridge)
+        service = OrchestratorService(self.store, inventory, fleet)
 
         service.reconcile()
         fleet.vehicles[0] = {"robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"}
         service.reconcile()
 
-        self.assertEqual(bridge.commands[0][0], "navigate")
-        self.assertEqual(bridge.commands[0][2]["purpose"], "PICK")
+        self.assertEqual(fleet.commands[0][0], "navigate")
+        self.assertEqual(fleet.commands[0][2]["purpose"], "PICK")
 
     def test_invalid_inventory_environment_records_error_and_sends_no_command(self) -> None:
         # This catches commanding a vehicle to an unconfigured physical zone.
         inventory = FakeInventory(stocks=[_stock("docker", "FRESH", 1)], active_operations=[])
         inventory.zones = _zones(disabled={"f1"})
         fleet = FakeFleet([{"robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"}])
-        bridge = FakeBridge()
+        OrchestratorService(self.store, inventory, fleet).reconcile()
 
-        OrchestratorService(self.store, inventory, fleet, bridge).reconcile()
-
-        self.assertEqual(bridge.commands, [])
+        self.assertEqual(fleet.commands, [])
         self.assertIn("f1 disabled", self.store.status()["errors"][0]["message"])
 
     def test_navigation_timeout_is_delivery_unknown_and_is_not_sent_again(self) -> None:
         # This catches a timed-out Nav2 request being replayed before vehicle state confirms it.
         inventory = FakeInventory(stocks=[_stock("docker", "FRESH", 1)], active_operations=[])
-        fleet = FakeFleet([{"robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"}])
-        bridge = FakeBridge(timeout=True)
-        service = OrchestratorService(self.store, inventory, fleet, bridge)
+        fleet = FakeFleet(
+            [{"robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"}],
+            timeout=True,
+        )
+        service = OrchestratorService(self.store, inventory, fleet)
 
         service.reconcile()
         service.reconcile()
 
-        self.assertEqual(bridge.commands, [])
+        self.assertEqual(fleet.commands, [])
         self.assertEqual(self.store.status()["command_counts"], {"DELIVERY_UNKNOWN": 1})
 
 

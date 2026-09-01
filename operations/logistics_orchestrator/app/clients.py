@@ -63,10 +63,20 @@ class HttpFleetManagerClient(_HttpClient):
     def list_vehicles(self) -> list[dict[str, Any]]:
         return self._get("/api/v1/vehicles")
 
-
-class HttpFleetBridgeClient(_HttpClient):
     def navigate(self, robot_id: str, payload: dict[str, Any]) -> None:
-        self._post(f"/api/v1/vehicle-command/{robot_id}/navigation/goals", payload)
+        self._post_command(
+            f"/api/v1/vehicles/{robot_id}/commands/navigation/goals", payload
+        )
 
     def auto_dock(self, robot_id: str, payload: dict[str, Any]) -> None:
-        self._post(f"/api/v1/vehicle-command/{robot_id}/auto-dock", payload)
+        self._post_command(
+            f"/api/v1/vehicles/{robot_id}/commands/auto-dock", payload
+        )
+
+    def _post_command(self, path: str, payload: dict[str, Any]) -> None:
+        try:
+            self._post(path, payload)
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code == 503:
+                raise TimeoutError(error.response.text) from error
+            raise

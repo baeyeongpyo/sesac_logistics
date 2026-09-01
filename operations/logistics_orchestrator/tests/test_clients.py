@@ -4,7 +4,6 @@ import unittest
 import httpx
 
 from logistics_orchestrator.app.clients import (
-    HttpFleetBridgeClient,
     HttpFleetManagerClient,
     HttpInventoryClient,
 )
@@ -27,8 +26,8 @@ class HttpClientContractTest(unittest.TestCase):
         self.assertEqual(paths, ["/api/v1/zones", "/api/v1/stocks", "/api/v1/operations/active"])
         self.assertEqual(snapshot, {"zones": [], "stocks": [], "active_operations": []})
 
-    def test_bridge_navigation_uses_the_relay_endpoint_and_body(self) -> None:
-        # This catches bypassing Fleet Bridge or losing operation identity on Nav2 commands.
+    def test_fleet_manager_navigation_uses_the_command_endpoint_and_body(self) -> None:
+        # This catches bypassing Fleet Manager or losing operation identity on Nav2 commands.
         received: dict = {}
 
         def respond(request: httpx.Request) -> httpx.Response:
@@ -37,13 +36,47 @@ class HttpClientContractTest(unittest.TestCase):
             return httpx.Response(202)
 
         client = httpx.Client(transport=httpx.MockTransport(respond))
-        bridge = HttpFleetBridgeClient("http://bridge", client=client)
+        fleet = HttpFleetManagerClient("http://fleet", client=client)
         command = {"operation_id": "operation-1", "purpose": "PICK", "frame_id": "map", "x": 1, "y": 2, "yaw": 0}
 
-        bridge.navigate("robot_1", command)
+        fleet.navigate("robot_1", command)
 
-        self.assertEqual(received["path"], "/api/v1/vehicle-command/robot_1/navigation/goals")
+        self.assertEqual(
+            received["path"],
+            "/api/v1/vehicles/robot_1/commands/navigation/goals",
+        )
         self.assertEqual(received["body"], command)
+
+    def test_fleet_manager_auto_dock_uses_the_command_endpoint_and_body(self) -> None:
+        received: dict = {}
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            received["path"] = request.url.path
+            received["body"] = json.loads(request.content)
+            return httpx.Response(202)
+
+        client = httpx.Client(transport=httpx.MockTransport(respond))
+        fleet = HttpFleetManagerClient("http://fleet", client=client)
+        command = {"operation_id": "operation-1", "operation": "PICK"}
+
+        fleet.auto_dock("robot_1", command)
+
+        self.assertEqual(
+            received["path"],
+            "/api/v1/vehicles/robot_1/commands/auto-dock",
+        )
+        self.assertEqual(received["body"], command)
+
+    def test_fleet_manager_command_service_unavailable_is_delivery_unknown(self) -> None:
+        client = httpx.Client(
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(503, json={"detail": "bridge timed out"})
+            )
+        )
+        fleet = HttpFleetManagerClient("http://fleet", client=client)
+
+        with self.assertRaises(TimeoutError):
+            fleet.navigate("robot_1", {"operation_id": "operation-1"})
 
     def test_fleet_manager_returns_latest_vehicle_snapshots(self) -> None:
         # This catches deciding from an event payload instead of the Fleet Manager ledger.

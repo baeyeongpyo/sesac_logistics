@@ -21,7 +21,7 @@ class OrchestratorComposeContractTest(unittest.TestCase):
         self.assertIn("ORCHESTRATOR_DB_PATH", service["environment"])
         self.assertIn("INVENTORY_URL", service["environment"])
         self.assertIn("FLEET_MANAGER_URL", service["environment"])
-        self.assertIn("FLEET_BRIDGE_URL", service["environment"])
+        self.assertNotIn("FLEET_BRIDGE_URL", service["environment"])
         self.assertEqual(service["volumes"][0]["type"], "bind")
         self.assertEqual(
             service["volumes"][0]["source"],
