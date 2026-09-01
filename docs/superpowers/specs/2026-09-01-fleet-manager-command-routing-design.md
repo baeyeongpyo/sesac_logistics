@@ -100,6 +100,9 @@ Fleet Bridge 설정에 둔다. MentorPi Bridge는 `robot_id`로 이 주소를 �
 - 이번 범위에서는 Fleet Manager에 별도 명령 outbox나 자동 재시도를 추가하지
   않는다. Bridge 전달 여부가 불명확한 명령을 Manager가 중복 실행하는 위험을
   피하기 위함이다.
+- Fleet Manager command API의 503은 Bridge 전달 완료 여부를 확인할 수 없다는
+  뜻으로 취급한다. Orchestrator의 command client는 이 응답을 timeout과 동일하게
+  `DELIVERY_UNKNOWN`으로 기록하며 즉시 재전송하지 않는다.
 - Fleet Bridge의 상태 보고 경로는 유지한다. 결과 상태는 Fleet Manager에
   기록되고 기존 이벤트 outbox를 통해 Orchestrator에 전달된다.
 - Manager가 역할을 지원하지 않는 차량을 거부하면 Orchestrator는 기존 오류
