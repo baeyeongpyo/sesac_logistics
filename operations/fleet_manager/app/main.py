@@ -1,7 +1,20 @@
 from contextlib import asynccontextmanager
 import os
+from pathlib import Path
+from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi import Body, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.responses import JSONResponse
+
+from .commands import (
+    BridgeCommandClient,
+    BridgeCommandGateway,
+    BridgeUnavailableError,
+    UnknownVehicleError,
+    UnsupportedCapabilityError,
+    VehicleRegistry,
+    load_vehicle_registry,
+)
 
 from .fleet import (
     FleetEventDispatcher,
@@ -16,16 +29,33 @@ def _store(request: Request) -> VehicleStateStore:
     return request.app.state.store
 
 
+def _registry(request: Request) -> VehicleRegistry:
+    return request.app.state.vehicle_registry
+
+
+def _bridge_client(request: Request) -> BridgeCommandGateway:
+    return request.app.state.bridge_client
+
+
 def create_app(
     database_path: str,
     *,
     orchestrator_event_url: str | None = None,
     retry_interval_sec: float = 2.0,
+    vehicle_registry_path: str | Path | None = None,
+    bridge_client: BridgeCommandGateway | None = None,
 ) -> FastAPI:
+    registry_path = vehicle_registry_path or (
+        Path(__file__).resolve().parents[1] / "config" / "vehicles.yaml"
+    )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         store = VehicleStateStore(database_path)
+        command_client = bridge_client or BridgeCommandClient()
         app.state.store = store
+        app.state.vehicle_registry = load_vehicle_registry(registry_path)
+        app.state.bridge_client = command_client
         destination_url = (orchestrator_event_url or "").strip()
         dispatcher = (
             FleetEventDispatcher(
@@ -40,6 +70,9 @@ def create_app(
         yield
         if dispatcher is not None:
             dispatcher.stop()
+        close = getattr(command_client, "close", None)
+        if callable(close):
+            close()
         store.close()
 
     app = FastAPI(title="Fleet Manager API", version="1.0.0", lifespan=lifespan)
@@ -86,7 +119,66 @@ def create_app(
             )
         return snapshot
 
+    @app.post("/api/v1/vehicles/{robot_id}/commands/navigation/goals")
+    def navigate_vehicle(
+        robot_id: str,
+        payload: dict[str, Any] = Body(...),
+        request: Request = None,
+    ) -> Response:
+        return _relay_command(
+            request,
+            robot_id,
+            "navigate",
+            f"/api/v1/vehicle-command/{robot_id}/navigation/goals",
+            payload,
+        )
+
+    @app.post("/api/v1/vehicles/{robot_id}/commands/auto-dock")
+    def auto_dock_vehicle(
+        robot_id: str,
+        payload: dict[str, Any] = Body(...),
+        request: Request = None,
+    ) -> Response:
+        return _relay_command(
+            request,
+            robot_id,
+            "auto_dock",
+            f"/api/v1/vehicle-command/{robot_id}/auto-dock",
+            payload,
+        )
+
     return app
+
+
+def _relay_command(
+    request: Request,
+    robot_id: str,
+    capability: str,
+    bridge_path: str,
+    payload: dict[str, Any],
+) -> Response:
+    try:
+        vehicle = _registry(request).require(robot_id, capability)
+    except UnknownVehicleError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"unknown vehicle: {robot_id}",
+        ) from error
+    except UnsupportedCapabilityError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    try:
+        relay = _bridge_client(request).relay(vehicle, bridge_path, payload)
+    except BridgeUnavailableError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(error),
+        ) from error
+    if relay.body is None:
+        return Response(status_code=relay.status_code)
+    return JSONResponse(status_code=relay.status_code, content=relay.body)
 
 
 app = create_app(

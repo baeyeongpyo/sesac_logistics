@@ -1,0 +1,10 @@
+models:
+  - id: mentorpi
+    bridge_url: http://command-api:8080
+    capabilities: [navigate, auto_dock, stop, report_status]
+
+vehicles:
+  - id: robot_1
+    model: mentorpi
+  - id: robot_2
+    model: mentorpi
