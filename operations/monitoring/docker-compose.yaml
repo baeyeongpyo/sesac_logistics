@@ -1,0 +1,51 @@
+services:
+  foxglove-bridge:
+    image: ${MONITORING_FOXGLOVE_IMAGE:-mentorpi-monitoring-foxglove:humble}
+    build:
+      context: ./foxglove
+      dockerfile: Dockerfile
+    network_mode: host
+    ipc: host
+    restart: unless-stopped
+    stop_signal: SIGINT
+    stop_grace_period: 10s
+    environment:
+      ROS_DOMAIN_ID: ${SERVER_ROS_DOMAIN_ID:-225}
+      ROS_LOCALHOST_ONLY: "1"
+      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+      FASTDDS_BUILTIN_TRANSPORTS: ${FASTDDS_BUILTIN_TRANSPORTS:-DEFAULT}
+    volumes:
+      - type: bind
+        source: ./config/server_foxglove.yaml
+        target: /config/server_foxglove.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+    command:
+      - ros2
+      - run
+      - foxglove_bridge
+      - foxglove_bridge
+      - --ros-args
+      - --params-file
+      - /config/server_foxglove.yaml
+
+  asset-server:
+    image: ${MONITORING_ASSET_IMAGE:-mentorpi-monitoring-assets:latest}
+    build:
+      context: ./assets
+      dockerfile: Dockerfile
+    network_mode: host
+    restart: unless-stopped
+    stop_signal: SIGINT
+    stop_grace_period: 10s
+    volumes:
+      - type: bind
+        source: ${ASSET_DIRECTORY:-./assets}
+        target: /assets
+        read_only: true
+        bind:
+          create_host_path: false
+    command:
+      [python3, /app/serve_assets.py, --port, "${ASSET_PORT:-8088}", --bind,
+       "${ASSET_BIND_ADDRESS:-0.0.0.0}", --directory, /assets]

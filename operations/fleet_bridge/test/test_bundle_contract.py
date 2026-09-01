@@ -6,7 +6,7 @@ import yaml
 
 
 BUNDLE = Path(__file__).resolve().parents[1]
-PINNED_COMMIT = '41f96cc6053632a472d9a821989952771b1117f2'
+MONITORING = BUNDLE.parent / 'monitoring'
 MENTORPI_COMMIT = 'fb6d9969e935eb0e31966185158e33347951e761'
 VEHICLE_MESSAGE_PACKAGES = (
     'ros-humble-bond',
@@ -31,19 +31,15 @@ class DockerImageContractTest(unittest.TestCase):
             with self.subTest(relative=relative):
                 self.assertFalse((BUNDLE / relative).exists())
 
-    def test_server_image_is_humble_multistage_and_pins_bridge_source(self):
+    def test_server_image_is_humble_multistage_and_excludes_monitoring_bridge(self):
         content = (BUNDLE / 'server/Dockerfile').read_text(encoding='utf-8')
 
         self.assertGreaterEqual(content.count('FROM ros:humble-ros-base-jammy'), 2)
         self.assertNotIn('jazzy', content.lower())
-        self.assertIn(PINNED_COMMIT, content)
-        self.assertIn('checkout "${FOXGLOVE_BRIDGE_COMMIT}"', content)
+        self.assertNotIn('ros-foxglove-bridge.git', content)
+        self.assertNotIn('FOXGLOVE_BRIDGE_COMMIT', content)
         self.assertIn('colcon build', content)
         self.assertIn('rmw-fastrtps-cpp', content)
-        self.assertGreaterEqual(
-            content.count('ros-humble-resource-retriever'),
-            2,
-        )
         self.assertGreaterEqual(content.count('ros-humble-rosbag2'), 2)
         self.assertGreaterEqual(content.count('ros-humble-action-msgs'), 2)
 
@@ -67,7 +63,7 @@ class DockerImageContractTest(unittest.TestCase):
     def test_server_image_can_resolve_every_vehicle_message_package(self):
         dockerfile = (BUNDLE / 'server/Dockerfile').read_text(encoding='utf-8')
         package_xml = (
-            BUNDLE / 'server/ros2_ws/src/foxglove_ros_worker/package.xml'
+            BUNDLE / 'server/ros2_ws/src/fleet_bridge_worker/package.xml'
         ).read_text(encoding='utf-8')
 
         for package in VEHICLE_MESSAGE_PACKAGES:
@@ -99,7 +95,7 @@ class DockerImageContractTest(unittest.TestCase):
 class ConfigurationContractTest(unittest.TestCase):
     def test_server_foxglove_allows_an_eight_mib_client_send_buffer(self):
         document = yaml.safe_load(
-            (BUNDLE / 'config/server_foxglove.yaml').read_text(encoding='utf-8'),
+            (MONITORING / 'config/server_foxglove.yaml').read_text(encoding='utf-8'),
         )
         parameters = document['foxglove_bridge']['ros__parameters']
 
@@ -107,7 +103,7 @@ class ConfigurationContractTest(unittest.TestCase):
 
     def test_server_foxglove_is_observation_only_and_namespaced(self):
         document = yaml.safe_load(
-            (BUNDLE / 'config/server_foxglove.yaml').read_text(encoding='utf-8'),
+            (MONITORING / 'config/server_foxglove.yaml').read_text(encoding='utf-8'),
         )
         parameters = document['foxglove_bridge']['ros__parameters']
 
@@ -138,7 +134,7 @@ class ConfigurationContractTest(unittest.TestCase):
 
     def test_server_foxglove_exposes_the_central_warehouse_zone_overlay(self):
         document = yaml.safe_load(
-            (BUNDLE / 'config/server_foxglove.yaml').read_text(encoding='utf-8'),
+            (MONITORING / 'config/server_foxglove.yaml').read_text(encoding='utf-8'),
         )
         whitelist = document['foxglove_bridge']['ros__parameters']['topic_whitelist']
 
@@ -149,7 +145,7 @@ class ConfigurationContractTest(unittest.TestCase):
 
     def test_server_foxglove_exposes_every_namespaced_vehicle_topic(self):
         document = yaml.safe_load(
-            (BUNDLE / 'config/server_foxglove.yaml').read_text(encoding='utf-8'),
+            (MONITORING / 'config/server_foxglove.yaml').read_text(encoding='utf-8'),
         )
         whitelist = document['foxglove_bridge']['ros__parameters']['topic_whitelist']
 
@@ -177,7 +173,7 @@ class ConfigurationContractTest(unittest.TestCase):
 
     def test_server_foxglove_matches_every_best_effort_republished_topic(self):
         foxglove = yaml.safe_load(
-            (BUNDLE / 'config/server_foxglove.yaml').read_text(encoding='utf-8'),
+            (MONITORING / 'config/server_foxglove.yaml').read_text(encoding='utf-8'),
         )
         patterns = foxglove['foxglove_bridge']['ros__parameters'][
             'best_effort_qos_topic_whitelist'
@@ -249,21 +245,12 @@ class ReadmeContractTest(unittest.TestCase):
             'battery',
             'worker_rate',
             'qos',
-            'ping',
-            'docker stats',
             'ros2 topic hz',
-            'Domain Bridge',
-            'ws://<server-ip>:8765',
             'http://<server-ip>:8080/docs',
             'GET /api/v1/vehicle-command/{robot_id}/vehicle-status',
             'POST /api/v1/vehicle-command/{robot_id}/localization/initial-pose',
-            'clientPublish',
             'POST /api/v1/vehicle-command/{robot_id}/stop',
             '8766',
-            'ascamera/camera_publisher/rgb0/image',
-            '/goal_pose',
-            '/map',
-            'replay_rate_hz',
         ):
             with self.subTest(required=required):
                 self.assertIn(required, content)

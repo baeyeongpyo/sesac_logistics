@@ -1,0 +1,1 @@
+"""Cross-bundle operations contracts."""

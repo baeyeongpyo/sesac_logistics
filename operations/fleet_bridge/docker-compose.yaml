@@ -31,7 +31,7 @@ x-worker-service: &worker-service
       source: ./config/telemetry.yaml
       target: /config/telemetry.yaml
       read_only: true
-  command: [ros2, run, foxglove_ros_worker, foxglove_ros_worker]
+  command: [ros2, run, fleet_bridge_worker, fleet_bridge_worker]
 
 services:
   worker-robot-1:
@@ -72,7 +72,7 @@ services:
         source: ./config/fleet.yaml
         target: /config/fleet.yaml
         read_only: true
-    command: [ros2, run, foxglove_ros_worker, fleet_command_api]
+    command: [ros2, run, fleet_bridge_worker, fleet_command_api]
 
   telemetry-writer:
     image: ${SERVER_IMAGE:-mentorpi-fleet-bridge-server:humble}
@@ -108,93 +108,4 @@ services:
         read_only: false
         bind:
           create_host_path: false
-    command: [ros2, run, foxglove_ros_worker, fleet_telemetry_writer]
-
-  server-foxglove:
-    image: ${SERVER_IMAGE:-mentorpi-fleet-bridge-server:humble}
-    build:
-      context: .
-      dockerfile: server/Dockerfile
-    network_mode: host
-    ipc: host
-    restart: unless-stopped
-    stop_signal: SIGINT
-    stop_grace_period: 10s
-    environment:
-      ROS_DOMAIN_ID: ${SERVER_ROS_DOMAIN_ID:-225}
-      ROS_LOCALHOST_ONLY: "1"
-      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
-      FASTDDS_BUILTIN_TRANSPORTS: ${FASTDDS_BUILTIN_TRANSPORTS:-DEFAULT}
-    volumes:
-      - type: bind
-        source: ./config/server_foxglove.yaml
-        target: /config/server_foxglove.yaml
-        read_only: true
-    command:
-      - ros2
-      - run
-      - foxglove_bridge
-      - foxglove_bridge
-      - --ros-args
-      - --params-file
-      - /config/server_foxglove.yaml
-
-  map-publisher:
-    image: ${SERVER_IMAGE:-mentorpi-fleet-bridge-server:humble}
-    build:
-      context: .
-      dockerfile: server/Dockerfile
-    network_mode: host
-    ipc: host
-    restart: unless-stopped
-    stop_signal: SIGINT
-    stop_grace_period: 10s
-    environment:
-      ROS_DOMAIN_ID: ${SERVER_ROS_DOMAIN_ID:-225}
-      ROS_LOCALHOST_ONLY: "1"
-      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
-      FASTDDS_BUILTIN_TRANSPORTS: ${FASTDDS_BUILTIN_TRANSPORTS:-DEFAULT}
-      MAP_YAML: ${MAP_YAML:-/maps/map_0825.yaml}
-      MAP_USE_SIM_TIME: ${MAP_USE_SIM_TIME:-false}
-    volumes:
-      - type: bind
-        source: ${MAP_DIRECTORY:-./maps}
-        target: /maps
-        read_only: true
-        bind:
-          create_host_path: false
-    command:
-      - ros2
-      - run
-      - foxglove_ros_worker
-      - fleet_map_publisher
-      - --ros-args
-      - -p
-      - "use_sim_time:=${MAP_USE_SIM_TIME:-false}"
-
-  warehouse-zone-publisher:
-    image: ${SERVER_IMAGE:-mentorpi-fleet-bridge-server:humble}
-    build:
-      context: .
-      dockerfile: server/Dockerfile
-    network_mode: host
-    ipc: host
-    restart: unless-stopped
-    stop_signal: SIGINT
-    stop_grace_period: 10s
-    environment:
-      ROS_DOMAIN_ID: ${SERVER_ROS_DOMAIN_ID:-225}
-      ROS_LOCALHOST_ONLY: "1"
-      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
-      FASTDDS_BUILTIN_TRANSPORTS: ${FASTDDS_BUILTIN_TRANSPORTS:-DEFAULT}
-      WAREHOUSE_ZONES_CONFIG: /config/warehouse_zones.yaml
-    volumes:
-      - type: bind
-        source: ./config/warehouse_zones.yaml
-        target: /config/warehouse_zones.yaml
-        read_only: true
-    command:
-      - ros2
-      - run
-      - foxglove_ros_worker
-      - warehouse_zone_publisher
+    command: [ros2, run, fleet_bridge_worker, fleet_telemetry_writer]

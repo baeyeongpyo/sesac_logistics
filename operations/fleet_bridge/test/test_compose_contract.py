@@ -55,60 +55,6 @@ class ServerComposeContractTest(unittest.TestCase):
                 self.assertEqual(worker['ipc'], 'host')
                 self.assertEqual(worker['stop_signal'], 'SIGINT')
 
-    def test_server_bridge_exposes_only_host_port_and_read_only_config(self):
-        bridge = compose_config('docker-compose.yaml')['services']['server-foxglove']
-
-        self.assertEqual(bridge['network_mode'], 'host')
-        self.assertEqual(bridge['ipc'], 'host')
-        self.assertEqual(bridge['environment']['ROS_DOMAIN_ID'], '225')
-        self.assertEqual(bridge['stop_signal'], 'SIGINT')
-        self.assertNotIn('ports', bridge)
-        config_mount = next(
-            mount for mount in bridge['volumes']
-            if mount['target'] == '/config/server_foxglove.yaml'
-        )
-        self.assertTrue(config_mount['read_only'])
-
-    def test_fleet_manager_publishes_the_central_map_directly(self):
-        services = compose_config('docker-compose.yaml')['services']
-        environment = environment_values()
-        map_publisher = services['map-publisher']
-
-        self.assertNotIn('map-server', services)
-        self.assertNotIn('central-topic-republisher', services)
-        self.assertEqual(map_publisher['network_mode'], 'host')
-        self.assertEqual(map_publisher['ipc'], 'host')
-        self.assertEqual(map_publisher['environment'], {
-            'FASTDDS_BUILTIN_TRANSPORTS': 'DEFAULT',
-            'MAP_USE_SIM_TIME': 'false',
-            'MAP_YAML': '/maps/map_0825.yaml',
-            'RMW_IMPLEMENTATION': 'rmw_fastrtps_cpp',
-            'ROS_DOMAIN_ID': '225',
-            'ROS_LOCALHOST_ONLY': '1',
-        })
-        self.assertEqual(
-            map_publisher['command'],
-            [
-                'ros2', 'run', 'foxglove_ros_worker', 'fleet_map_publisher',
-                '--ros-args', '-p', 'use_sim_time:=false',
-            ],
-        )
-        self.assertEqual(
-            map_publisher['build']['context'],
-            str(BUNDLE),
-        )
-        self.assertEqual(map_publisher['build']['dockerfile'], 'server/Dockerfile')
-        self.assertEqual(map_publisher['image'], environment['SERVER_IMAGE'])
-        map_mount = next(
-            mount for mount in map_publisher['volumes']
-            if mount['target'] == '/maps'
-        )
-        self.assertEqual(
-            map_mount['source'],
-            str(BUNDLE / 'maps'),
-        )
-        self.assertTrue(map_mount['read_only'])
-
     def test_command_api_publishes_configured_port_without_host_network(self):
         api = compose_config('docker-compose.yaml')['services']['command-api']
         environment = environment_values()
@@ -137,7 +83,7 @@ class ServerComposeContractTest(unittest.TestCase):
         )
         self.assertEqual(
             api['command'],
-            ['ros2', 'run', 'foxglove_ros_worker', 'fleet_command_api'],
+            ['ros2', 'run', 'fleet_bridge_worker', 'fleet_command_api'],
         )
         config_mount = next(
             mount for mount in api['volumes']
@@ -173,7 +119,7 @@ class ServerComposeContractTest(unittest.TestCase):
         })
         self.assertEqual(
             writer['command'],
-            ['ros2', 'run', 'foxglove_ros_worker', 'fleet_telemetry_writer'],
+            ['ros2', 'run', 'fleet_bridge_worker', 'fleet_telemetry_writer'],
         )
         self.assertEqual(writer['image'], environment['SERVER_IMAGE'])
         data_mount = next(
@@ -186,28 +132,6 @@ class ServerComposeContractTest(unittest.TestCase):
         self.assertEqual(data_mount['source'], str(database_directory.resolve()))
         self.assertFalse(data_mount.get('read_only', False))
         self.assertFalse(data_mount['bind']['create_host_path'])
-
-    def test_warehouse_zone_publisher_runs_with_the_editable_layout_config(self):
-        publisher = compose_config('docker-compose.yaml')['services'][
-            'warehouse-zone-publisher'
-        ]
-
-        self.assertEqual(publisher['network_mode'], 'host')
-        self.assertEqual(publisher['ipc'], 'host')
-        self.assertEqual(publisher['environment']['ROS_DOMAIN_ID'], '225')
-        self.assertEqual(
-            publisher['environment']['WAREHOUSE_ZONES_CONFIG'],
-            '/config/warehouse_zones.yaml',
-        )
-        self.assertEqual(
-            publisher['command'],
-            ['ros2', 'run', 'foxglove_ros_worker', 'warehouse_zone_publisher'],
-        )
-        config_mount = next(
-            mount for mount in publisher['volumes']
-            if mount['target'] == '/config/warehouse_zones.yaml'
-        )
-        self.assertTrue(config_mount['read_only'])
 
 
 if __name__ == '__main__':
