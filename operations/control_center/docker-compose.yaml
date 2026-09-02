@@ -1,0 +1,25 @@
+services:
+  control-center:
+    build:
+      context: .
+    environment:
+      CONTROL_CENTER_DATA_DIRECTORY: /data
+      CONTROL_CENTER_MAP_DIRECTORY: /maps
+      FLEET_BRIDGE_COMMAND_URL: ${FLEET_BRIDGE_COMMAND_URL:-http://host.docker.internal:8080}
+      CONTROL_CENTER_REQUEST_TIMEOUT_SEC: ${CONTROL_CENTER_REQUEST_TIMEOUT_SEC:-3}
+    ports:
+      - "${CONTROL_CENTER_HOST:-0.0.0.0}:${CONTROL_CENTER_PORT:-8084}:8080"
+    volumes:
+      - type: bind
+        source: ${CONTROL_CENTER_DATA_DIRECTORY:-../data}
+        target: /data
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CONTROL_CENTER_MAP_DIRECTORY:-../monitoring/map_server/maps}
+        target: /maps
+        read_only: true
+        bind:
+          create_host_path: false
+    restart: unless-stopped

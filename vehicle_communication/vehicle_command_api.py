@@ -16,6 +16,10 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
+MAX_MANUAL_ROTATION_DEGREES = 10.0
+MAX_MANUAL_ROTATION_RADIANS = math.radians(MAX_MANUAL_ROTATION_DEGREES)
+
+
 class CommandValidationError(ValueError):
     pass
 
@@ -147,10 +151,12 @@ class VehicleCommandService:
         initial_pose_yaw_variance=0.0685,
         vehicle_status=None,
         status_reporter=None,
+        max_linear_y=None,
     ):
         self.velocity = velocity
         self.navigation = navigation
         self.max_linear_x = max_linear_x
+        self.max_linear_y = max_linear_x if max_linear_y is None else max_linear_y
         self.max_angular_z = max_angular_z
         self.max_hold_ms = max_hold_ms
         if initial_pose_position_variance <= 0 or initial_pose_yaw_variance <= 0:
@@ -227,10 +233,12 @@ class VehicleCommandService:
             return dict(self._status)
 
     def command(self, payload):
-        self._validate_fields(payload, {'linear_x', 'angular_z', 'hold_ms'})
+        self._validate_fields(payload, {'linear_x', 'linear_y', 'angular_z', 'hold_ms'})
         linear_x = self._bounded_number(payload, 'linear_x', self.max_linear_x)
+        linear_y = self._optional_bounded_number(payload, 'linear_y', self.max_linear_y)
         angular_z = self._bounded_number(payload, 'angular_z', self.max_angular_z)
         hold_ms = self._hold_ms(payload)
+        self._validate_manual_rotation(angular_z, hold_ms)
 
         with self._lock:
             active_operation = self._active_navigation_operation
@@ -260,7 +268,7 @@ class VehicleCommandService:
             self._manual_generation += 1
             generation = self._manual_generation
             self._cancel_manual_timer()
-            self.velocity.publish(linear_x, angular_z)
+            self.velocity.publish(linear_x, linear_y, angular_z)
             self._set_status(
                 self._status['operation_id'],
                 'MANUAL',
@@ -278,12 +286,34 @@ class VehicleCommandService:
         return {
             'state': 'MANUAL',
             'linear_x': linear_x,
+            'linear_y': linear_y,
             'angular_z': angular_z,
             'hold_ms': hold_ms,
         }
 
     def navigation_goal(self, payload):
         goal = self._goal(payload, {'operation_id', 'purpose'})
+        return self._start_navigation(
+            payload,
+            lambda attempt_id: self.navigation.submit_goal(
+                attempt_id,
+                goal,
+                self._on_navigation_terminal,
+            ),
+        )
+
+    def navigation_waypoints(self, payload):
+        waypoints = self._waypoints(payload)
+        return self._start_navigation(
+            payload,
+            lambda attempt_id: self.navigation.submit_waypoints(
+                attempt_id,
+                waypoints,
+                self._on_navigation_terminal,
+            ),
+        )
+
+    def _start_navigation(self, payload, submit):
         operation_id = self._operation_id(payload.get('operation_id'))
         purpose = self._navigation_purpose(payload.get('purpose'))
         attempt_id = str(uuid.uuid4())
@@ -309,7 +339,7 @@ class VehicleCommandService:
             self._manual_restore_status = None
 
         try:
-            response = self.navigation.submit_goal(attempt_id, goal, self._on_navigation_terminal)
+            response = submit(attempt_id)
         except NavigationUnavailableError:
             response = {'accepted': False, 'error': 'NAVIGATION_SERVER_UNAVAILABLE'}
 
@@ -488,7 +518,7 @@ class VehicleCommandService:
             auto_dock_active = self._auto_dock_active
             status_before_stop = dict(self._status)
 
-        self.velocity.publish(0.0, 0.0)
+        self.velocity.publish(0.0, 0.0, 0.0)
 
         cancel_requested = False
         if navigation_attempt is not None:
@@ -598,7 +628,7 @@ class VehicleCommandService:
             if generation != self._manual_generation:
                 return
             self._manual_timer = None
-            self.velocity.publish(0.0, 0.0)
+            self.velocity.publish(0.0, 0.0, 0.0)
             restored = self._manual_restore_status or {
                 'operation_id': None,
                 'previous_operation_id': self._status['previous_operation_id'],
@@ -708,6 +738,18 @@ class VehicleCommandService:
             'yaw': self._finite_number(payload, 'yaw'),
         }
 
+    def _waypoints(self, payload):
+        self._validate_fields(payload, {'operation_id', 'purpose', 'waypoints'})
+        raw_waypoints = payload.get('waypoints')
+        if not isinstance(raw_waypoints, list) or not raw_waypoints:
+            raise CommandValidationError('waypoints must be a non-empty array')
+        waypoints = []
+        for index, waypoint in enumerate(raw_waypoints):
+            if not isinstance(waypoint, dict):
+                raise CommandValidationError(f'waypoints[{index}] must be an object')
+            waypoints.append(self._goal(waypoint))
+        return waypoints
+
     def _auto_dock_payload(self, payload):
         self._validate_fields(
             payload,
@@ -774,6 +816,11 @@ class VehicleCommandService:
             raise CommandValidationError(f'{field} must be between {-maximum} and {maximum}')
         return value
 
+    def _optional_bounded_number(self, payload, field, maximum):
+        if field not in payload:
+            return 0.0
+        return self._bounded_number(payload, field, maximum)
+
     def _finite_number(self, payload, field):
         value = payload.get(field)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -790,6 +837,13 @@ class VehicleCommandService:
         if value < 1 or value > self.max_hold_ms:
             raise CommandValidationError(f'hold_ms must be between 1 and {self.max_hold_ms}')
         return value
+
+    @staticmethod
+    def _validate_manual_rotation(angular_z, hold_ms):
+        if abs(angular_z) * hold_ms / 1000 > MAX_MANUAL_ROTATION_RADIANS:
+            raise CommandValidationError(
+                'angular_z and hold_ms must not exceed 10 degrees per command',
+            )
 
 
 def openapi_document(service):
@@ -910,8 +964,18 @@ def openapi_document(service):
                                     'minimum': -service.max_linear_x,
                                     'maximum': service.max_linear_x,
                                 },
+                                'linear_y': {
+                                    'type': 'number',
+                                    'default': 0.0,
+                                    'minimum': -service.max_linear_y,
+                                    'maximum': service.max_linear_y,
+                                },
                                 'angular_z': {
                                     'type': 'number',
+                                    'description': (
+                                        'One command is limited to 10 degrees: '
+                                        'abs(angular_z) * hold_ms / 1000 <= 0.174533.'
+                                    ),
                                     'minimum': -service.max_angular_z,
                                     'maximum': service.max_angular_z,
                                 },
@@ -950,6 +1014,42 @@ def openapi_document(service):
                     'responses': {
                         '202': {'description': 'Navigation goal accepted'},
                         '422': {'description': 'Invalid goal'},
+                        '503': {'description': 'Navigation unavailable'},
+                    },
+                },
+            },
+            '/v1/navigation/waypoints': {
+                'post': {
+                    'requestBody': {
+                        'required': True,
+                        'content': {'application/json': {'schema': {
+                            'type': 'object',
+                            'additionalProperties': False,
+                            'required': ['waypoints'],
+                            'properties': {
+                                'operation_id': {'type': 'string', 'format': 'uuid'},
+                                'purpose': {'type': 'string', 'enum': ['PICK', 'PLACE']},
+                                'waypoints': {
+                                    'type': 'array',
+                                    'minItems': 1,
+                                    'items': {
+                                        'type': 'object',
+                                        'additionalProperties': False,
+                                        'required': ['x', 'y', 'yaw'],
+                                        'properties': {
+                                            'frame_id': {'type': 'string', 'default': 'map'},
+                                            'x': {'type': 'number'},
+                                            'y': {'type': 'number'},
+                                            'yaw': {'type': 'number'},
+                                        },
+                                    },
+                                },
+                            },
+                        }}},
+                    },
+                    'responses': {
+                        '202': {'description': 'FollowWaypoints route accepted'},
+                        '422': {'description': 'Invalid waypoint route'},
                         '503': {'description': 'Navigation unavailable'},
                     },
                 },
@@ -1045,6 +1145,9 @@ def create_http_server(host, port, service):
                 if path == '/v1/navigation/goals':
                     self._write_json(202, service.navigation_goal(self._read_json()))
                     return
+                if path == '/v1/navigation/waypoints':
+                    self._write_json(202, service.navigation_waypoints(self._read_json()))
+                    return
                 if path == '/v1/auto-dock':
                     self._write_json(202, service.auto_dock_command(self._read_json()))
                     return
@@ -1127,6 +1230,7 @@ class RosVehicleAdapter:
         robot_id,
         cmd_vel_topic,
         action_name,
+        follow_waypoints_action_name,
         action_server_timeout_sec,
         goal_response_timeout_sec,
         cancel_response_timeout_sec,
@@ -1139,7 +1243,7 @@ class RosVehicleAdapter:
             import rclpy
             from action_msgs.msg import GoalStatus
             from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
-            from nav2_msgs.action import NavigateToPose
+            from nav2_msgs.action import FollowWaypoints, NavigateToPose
             from rclpy.action import ActionClient
             from rclpy.context import Context
             from rclpy.executors import SingleThreadedExecutor
@@ -1161,6 +1265,7 @@ class RosVehicleAdapter:
         self._pose_with_covariance_stamped_type = PoseWithCovarianceStamped
         self._twist_type = Twist
         self._navigate_to_pose_type = NavigateToPose
+        self._follow_waypoints_type = FollowWaypoints
         self._action_client_type = ActionClient
         self._uint16_type = UInt16
         self._string_type = String
@@ -1216,6 +1321,11 @@ class RosVehicleAdapter:
             self._node,
             self._navigate_to_pose_type,
             action_name,
+        )
+        self._waypoints_client = self._action_client_type(
+            self._node,
+            self._follow_waypoints_type,
+            follow_waypoints_action_name,
         )
         self._executor = SingleThreadedExecutor(context=self._context)
         self._executor.add_node(self._node)
@@ -1281,9 +1391,10 @@ class RosVehicleAdapter:
         message.pose.covariance[35] = yaw_variance
         self._initial_pose_publisher.publish(message)
 
-    def publish(self, linear_x, angular_z):
+    def publish(self, linear_x, linear_y, angular_z):
         message = self._twist_type()
         message.linear.x = linear_x
+        message.linear.y = linear_y
         message.angular.z = angular_z
         self._publisher.publish(message)
 
@@ -1301,9 +1412,30 @@ class RosVehicleAdapter:
 
         request = self._navigate_to_pose_type.Goal()
         request.pose = self._pose_from_goal(goal)
+        return self._submit_action_goal(
+            self._goal_client,
+            operation_id,
+            request,
+            on_terminal,
+        )
+
+    def submit_waypoints(self, operation_id, waypoints, on_terminal):
+        if not self._waypoints_client.wait_for_server(timeout_sec=self._action_server_timeout_sec):
+            return {'accepted': False, 'error': 'NAVIGATION_SERVER_UNAVAILABLE'}
+
+        request = self._follow_waypoints_type.Goal()
+        request.poses = [self._pose_from_goal(waypoint) for waypoint in waypoints]
+        return self._submit_action_goal(
+            self._waypoints_client,
+            operation_id,
+            request,
+            on_terminal,
+        )
+
+    def _submit_action_goal(self, action_client, operation_id, request, on_terminal):
         try:
             goal_handle = self._wait_for_future(
-                self._goal_client.send_goal_async(request),
+                action_client.send_goal_async(request),
                 self._goal_response_timeout_sec,
                 'NAVIGATION_GOAL_RESPONSE_TIMEOUT',
             )
@@ -1343,7 +1475,7 @@ class RosVehicleAdapter:
                 return
             self._closed = True
         try:
-            self.publish(0.0, 0.0)
+            self.publish(0.0, 0.0, 0.0)
         except Exception:
             pass
         self._executor.shutdown()
@@ -1380,6 +1512,11 @@ class RosVehicleAdapter:
                 self._goal_status.STATUS_CANCELED: 'CANCELLED',
             }
             terminal_state = mapping.get(result.status, 'FAILED')
+            if (
+                terminal_state == 'COMPLETED'
+                and getattr(getattr(result, 'result', None), 'missed_waypoints', ())
+            ):
+                terminal_state = 'FAILED'
         except Exception:
             terminal_state = 'FAILED'
         with self._lock:
@@ -1398,6 +1535,7 @@ def parse_args(argv=None):
     parser.add_argument('--robot-id', required=True)
     parser.add_argument('--cmd-vel-topic', default='/cmd_vel')
     parser.add_argument('--action-name', default='/navigate_to_pose')
+    parser.add_argument('--follow-waypoints-action-name', default='/follow_waypoints')
     parser.add_argument('--battery-topic', default='/ros_robot_controller/battery')
     parser.add_argument('--battery-stale-sec', type=float, default=3.0)
     parser.add_argument('--initial-pose-topic', default='/initialpose')
@@ -1407,8 +1545,9 @@ def parse_args(argv=None):
     parser.add_argument('--auto-dock-status-topic')
     parser.add_argument('--auto-dock-stop-topic')
     parser.add_argument('--auto-dock-drive-ready-topic')
-    parser.add_argument('--max-linear-x', type=float, default=0.10)
-    parser.add_argument('--max-angular-z', type=float, default=0.50)
+    parser.add_argument('--max-linear-x', type=float, default=1.0)
+    parser.add_argument('--max-linear-y', type=float, default=1.0)
+    parser.add_argument('--max-angular-z', type=float, default=1.0)
     parser.add_argument('--max-hold-ms', type=int, default=1000)
     parser.add_argument('--action-server-timeout-sec', type=float, default=1.0)
     parser.add_argument('--goal-response-timeout-sec', type=float, default=3.0)
@@ -1425,6 +1564,7 @@ def create_ros_vehicle_adapter(arguments):
         robot_id=arguments.robot_id,
         cmd_vel_topic=arguments.cmd_vel_topic,
         action_name=arguments.action_name,
+        follow_waypoints_action_name=arguments.follow_waypoints_action_name,
         action_server_timeout_sec=arguments.action_server_timeout_sec,
         goal_response_timeout_sec=arguments.goal_response_timeout_sec,
         cancel_response_timeout_sec=arguments.cancel_response_timeout_sec,
@@ -1457,6 +1597,7 @@ def run_server(arguments, adapter_factory=None, http_server_factory=create_http_
         initial_pose=adapter,
         auto_dock=adapter,
         max_linear_x=arguments.max_linear_x,
+        max_linear_y=getattr(arguments, 'max_linear_y', arguments.max_linear_x),
         max_angular_z=arguments.max_angular_z,
         max_hold_ms=arguments.max_hold_ms,
         initial_pose_position_variance=arguments.initial_pose_position_variance,

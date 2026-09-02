@@ -4,6 +4,7 @@ name: logistics
 include:
   - ./fleet_bridge/docker-compose.yaml
   - ./monitoring/docker-compose.yaml
+  - ./control_center/docker-compose.yaml
   - ./fleet_manager/docker-compose.yaml
   - ./inventory_db/docker-compose.yaml
   - ./logistics_orchestrator/docker-compose.yaml

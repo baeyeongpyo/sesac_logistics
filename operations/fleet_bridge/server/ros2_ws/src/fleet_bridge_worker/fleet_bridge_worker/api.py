@@ -383,6 +383,7 @@ def create_app(
                         'example': {
                             'state': 'MANUAL',
                             'linear_x': 0.2,
+                            'linear_y': 0.0,
                             'angular_z': 0.0,
                             'hold_ms': 500,
                         },
@@ -404,6 +405,7 @@ def create_app(
                     'description': '0.2 m/s로 500 ms 동안 직진합니다.',
                     'value': {
                         'linear_x': 0.2,
+                        'linear_y': 0.0,
                         'angular_z': 0.0,
                         'hold_ms': 500,
                     },
@@ -463,6 +465,59 @@ def create_app(
             robot_id,
             'POST',
             '/v1/navigation/goals',
+            payload,
+        )
+
+    @app.post(
+        '/api/v1/vehicle-command/{robot_id}/navigation/waypoints',
+        tags=['vehicle-command relay'],
+        summary='Nav2 다중 waypoint 주행 요청 전달',
+        description=(
+            '선택한 차량의 `/follow_waypoints` action에 map 좌표계 waypoint 배열을 전달합니다. '
+            '차량이 각 waypoint 처리와 완료 상태를 관리하며, Fleet Manager는 요청 본문을 변경하지 않습니다.'
+        ),
+        responses={
+            202: {
+                'description': '차량이 Nav2 waypoint 주행을 수락했습니다.',
+                'content': {
+                    'application/json': {
+                        'example': {
+                            'operation_id': '1c3e8b56-7c4d-4d9e-98ac-ced38f8c8a58',
+                            'attempt_id': '4a01a8cf-ea1f-4b83-bceb-1f7f42d769be',
+                            'state': 'DRIVE',
+                        },
+                    },
+                },
+            },
+            422: {'description': '차량이 waypoint 배열 또는 좌표 형식을 거부했습니다.'},
+            503: {'description': '차량 Nav2 action server 또는 차량 API를 사용할 수 없습니다.'},
+            **_relay_error_responses(),
+        },
+    )
+    async def vehicle_navigation_waypoints(
+        robot_id: RobotId,
+        payload: Any = Body(
+            default=None,
+            description='차량-native Nav2 FollowWaypoints 요청입니다.',
+            openapi_examples={
+                'sample': {
+                    'summary': 'map 좌표계 다중 waypoint 주행',
+                    'value': {
+                        'operation_id': '73d5b9af-5a12-4f34-a96c-5de116df1e8e',
+                        'purpose': 'PICK',
+                        'waypoints': [
+                            {'frame_id': 'map', 'x': 1.5, 'y': 0.0, 'yaw': 0.0},
+                            {'frame_id': 'map', 'x': 2.0, 'y': 0.5, 'yaw': 1.57},
+                        ],
+                    },
+                },
+            },
+        ),
+    ) -> JSONResponse:
+        return await relay_vehicle_command(
+            robot_id,
+            'POST',
+            '/v1/navigation/waypoints',
             payload,
         )
 

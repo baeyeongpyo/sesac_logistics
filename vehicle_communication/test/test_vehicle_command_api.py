@@ -50,14 +50,15 @@ class RecordingVelocity:
     def __init__(self):
         self.messages = []
 
-    def publish(self, linear_x, angular_z):
-        self.messages.append((linear_x, angular_z))
+    def publish(self, *values):
+        self.messages.append(values)
 
 
 class FakeNavigation:
     def __init__(self, available=True):
         self.available = available
         self.goals = []
+        self.waypoints = []
         self.cancel_requests = []
         self._callbacks = {}
 
@@ -65,6 +66,13 @@ class FakeNavigation:
         if not self.available:
             return {'accepted': False, 'error': 'NAVIGATION_SERVER_UNAVAILABLE'}
         self.goals.append((operation_id, goal))
+        self._callbacks[operation_id] = on_terminal
+        return {'accepted': True}
+
+    def submit_waypoints(self, operation_id, waypoints, on_terminal):
+        if not self.available:
+            return {'accepted': False, 'error': 'NAVIGATION_SERVER_UNAVAILABLE'}
+        self.waypoints.append((operation_id, waypoints))
         self._callbacks[operation_id] = on_terminal
         return {'accepted': True}
 
@@ -211,8 +219,9 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             navigation=self.navigation,
             initial_pose=self.initial_pose_publisher,
             auto_dock=self.auto_dock,
-            max_linear_x=0.10,
-            max_angular_z=0.50,
+            max_linear_x=1.0,
+            max_linear_y=1.0,
+            max_angular_z=1.0,
             max_hold_ms=1000,
             vehicle_status=self.vehicle_status,
             status_reporter=self.status_reporter,
@@ -248,6 +257,27 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             payload['purpose'] = purpose
         return post_json(
             f'{self.base_url}/v1/navigation/goals',
+            payload,
+        )
+
+    def navigation_waypoints(self, operation_id=None, purpose=None):
+        _, operation = self.get_json('/v1/operation-status')
+        if operation['state'] == 'INIT':
+            idle_status, idle = self.mark_idle()
+            self.assertEqual(idle_status, 200)
+            self.assertEqual(idle['state'], 'IDLE')
+        payload = {
+            'waypoints': [
+                {'frame_id': 'map', 'x': 1.50, 'y': 0.0, 'yaw': 0.0},
+                {'frame_id': 'map', 'x': 2.00, 'y': 0.5, 'yaw': 1.57},
+            ],
+        }
+        if operation_id is not None:
+            payload['operation_id'] = operation_id
+        if purpose is not None:
+            payload['purpose'] = purpose
+        return post_json(
+            f'{self.base_url}/v1/navigation/waypoints',
             payload,
         )
 
@@ -348,6 +378,38 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         self.navigation.complete(drive['attempt_id'], 'COMPLETED')
         _, operation_status = self.get_json('/v1/operation-status')
         self.assertEqual(operation_status['previous_operation_id'], INVENTORY_OPERATION_ID)
+
+    def test_waypoint_navigation_submits_all_poses_to_follow_waypoints(self):
+        """A route must use FollowWaypoints without changing legacy goal handling."""
+        status, drive = self.navigation_waypoints()
+
+        self.assertEqual(status, 202)
+        self.assertEqual(drive, {
+            'operation_id': drive['operation_id'],
+            'attempt_id': drive['attempt_id'],
+            'state': 'DRIVE',
+        })
+        self.assertIsInstance(uuid.UUID(drive['operation_id']), uuid.UUID)
+        self.assertIsInstance(uuid.UUID(drive['attempt_id']), uuid.UUID)
+        self.assertEqual(self.navigation.goals, [])
+        self.assertEqual(self.navigation.waypoints, [(
+            drive['attempt_id'],
+            [
+                {'frame_id': 'map', 'x': 1.5, 'y': 0.0, 'yaw': 0.0},
+                {'frame_id': 'map', 'x': 2.0, 'y': 0.5, 'yaw': 1.57},
+            ],
+        )])
+
+        self.navigation.complete(drive['attempt_id'], 'COMPLETED')
+
+        _, operation = self.get_json('/v1/operation-status')
+        self.assertEqual(operation, {
+            'operation_id': None,
+            'previous_operation_id': drive['operation_id'],
+            'state': 'IDLE',
+            'previous_state': 'DRIVE',
+            'detail': 'NAVIGATION_SUCCEEDED',
+        })
 
     def test_nav2_reports_drive_only_after_goal_acceptance(self):
         reporter = RecordingStatusReporter()
@@ -623,6 +685,15 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         self.assertEqual(health, {'status': 'ok'})
         self.assertEqual(openapi_status, 200)
         self.assertEqual(openapi['openapi'], '3.0.3')
+        velocity_schema = openapi['paths']['/v1/cmd-vel']['post']['requestBody'][
+            'content'
+        ]['application/json']['schema']
+        self.assertEqual(velocity_schema['properties']['linear_y'], {
+            'type': 'number',
+            'default': 0.0,
+            'minimum': -1.0,
+            'maximum': 1.0,
+        })
         self.assertEqual(
             set(openapi['paths']),
             {
@@ -633,6 +704,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
                 '/v1/operation/idle',
                 '/v1/cmd-vel',
                 '/v1/navigation/goals',
+                '/v1/navigation/waypoints',
                 '/v1/auto-dock',
                 '/v1/navigation/cancel',
                 '/v1/localization/initial-pose',
@@ -811,7 +883,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             'state': 'CANCELLED',
             'cancel_requested': False,
         })
-        self.assertEqual(self.velocity.messages[-1], (0.0, 0.0))
+        self.assertEqual(self.velocity.messages[-1], (0.0, 0.0, 0.0))
         self.assertEqual(self.navigation.cancel_requests, [body['attempt_id']])
         _, operation_status = self.get_json('/v1/operation-status')
         self.assertEqual(operation_status, {
@@ -843,7 +915,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             'state': 'CANCELLED',
             'cancel_requested': False,
         })
-        self.assertEqual(self.velocity.messages[-1], (0.0, 0.0))
+        self.assertEqual(self.velocity.messages[-1], (0.0, 0.0, 0.0))
         self.assertEqual(self.service.operation_status(), {
             'operation_id': body['operation_id'],
             'previous_operation_id': None,
@@ -895,25 +967,26 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             'detail': 'NAVIGATION_SERVER_UNAVAILABLE',
         })
 
-    def test_manual_velocity_is_bounded_and_expires_to_idle(self):
-        """Removing command bounds or the hold-expiry zero must fail direct control safety."""
+    def test_manual_velocity_supports_bounded_lateral_motion_and_expires_to_idle(self):
+        """A lateral command must publish linear.y and expire with a complete zero Twist."""
         self.mark_idle()
         status, body = post_json(
             f'{self.base_url}/v1/cmd-vel',
-            {'linear_x': 0.05, 'angular_z': -0.25, 'hold_ms': 20},
+            {'linear_x': 0.0, 'linear_y': 0.1, 'angular_z': -0.25, 'hold_ms': 20},
         )
 
         self.assertEqual(status, 202)
         self.assertEqual(body, {
             'state': 'MANUAL',
-            'linear_x': 0.05,
+            'linear_x': 0.0,
+            'linear_y': 0.1,
             'angular_z': -0.25,
             'hold_ms': 20,
         })
         deadline = time.monotonic() + 1
         while len(self.velocity.messages) < 2 and time.monotonic() < deadline:
             time.sleep(0.01)
-        self.assertEqual(self.velocity.messages, [(0.05, -0.25), (0.0, 0.0)])
+        self.assertEqual(self.velocity.messages, [(0.0, 0.1, -0.25), (0.0, 0.0, 0.0)])
         _, operation_status = self.get_json('/v1/operation-status')
         self.assertEqual(operation_status, {
             'operation_id': None,
@@ -922,6 +995,30 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             'previous_state': 'INIT',
             'detail': 'MANUAL_COMMAND_EXPIRED',
         })
+
+    def test_manual_velocity_accepts_the_configured_one_meter_per_second_limit(self):
+        """The vehicle API must expose the dashboard's 1.0 m/s translational limit."""
+        status, body = post_json(
+            f'{self.base_url}/v1/cmd-vel',
+            {'linear_x': 1.0, 'linear_y': -1.0, 'angular_z': 0.0, 'hold_ms': 20},
+        )
+
+        self.assertEqual(status, 202)
+        self.assertEqual(body['linear_x'], 1.0)
+        self.assertEqual(body['linear_y'], -1.0)
+
+    def test_manual_velocity_rejects_a_turn_larger_than_ten_degrees(self):
+        """One cmd_vel request must not rotate a vehicle more than ten degrees."""
+        status, body = post_json(
+            f'{self.base_url}/v1/cmd-vel',
+            {'linear_x': 0.0, 'linear_y': 0.0, 'angular_z': 1.0, 'hold_ms': 300},
+        )
+
+        self.assertEqual(status, 422)
+        self.assertEqual(body, {
+            'error': 'angular_z and hold_ms must not exceed 10 degrees per command',
+        })
+        self.assertEqual(self.velocity.messages, [])
 
     def test_manual_velocity_cancels_an_active_navigation_before_direct_control(self):
         """Allowing manual velocity while Nav2 stays active must fail control handoff safety."""
@@ -961,17 +1058,22 @@ class VehicleCommandApiCliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         for option in (
             '--host', '--port', '--robot-id', '--cmd-vel-topic', '--action-name',
+            '--follow-waypoints-action-name',
             '--battery-topic', '--battery-stale-sec',
             '--initial-pose-topic', '--initial-pose-position-variance',
             '--initial-pose-yaw-variance',
             '--auto-dock-arrival-topic', '--auto-dock-status-topic',
             '--auto-dock-stop-topic', '--auto-dock-drive-ready-topic',
-            '--max-linear-x', '--max-angular-z', '--max-hold-ms',
+            '--max-linear-x', '--max-linear-y', '--max-angular-z', '--max-hold-ms',
             '--action-server-timeout-sec', '--goal-response-timeout-sec',
             '--cancel-response-timeout-sec',
             '--fleet-status-relay-url',
         ):
             self.assertIn(option, result.stdout)
+        arguments = self.module.parse_args(['--robot-id', 'robot_2'])
+        self.assertEqual(arguments.max_linear_x, 1.0)
+        self.assertEqual(arguments.max_linear_y, 1.0)
+        self.assertEqual(arguments.max_angular_z, 1.0)
 
     def test_direct_runner_reports_init_to_the_configured_status_relay(self):
         adapter = ClosingFakeAdapter()
@@ -982,6 +1084,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             robot_id='robot_2',
             cmd_vel_topic='/cmd_vel',
             action_name='/navigate_to_pose',
+            follow_waypoints_action_name='/follow_waypoints',
             battery_topic='/ros_robot_controller/battery',
             battery_stale_sec=3.0,
             initial_pose_topic='/initialpose',
@@ -1047,6 +1150,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             robot_id='robot_2',
             cmd_vel_topic='/cmd_vel',
             action_name='/navigate_to_pose',
+            follow_waypoints_action_name='/follow_waypoints',
             battery_topic='/ros_robot_controller/battery',
             battery_stale_sec=3.0,
             initial_pose_topic='/initialpose',
@@ -1072,7 +1176,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
 
         self.assertTrue(http_server.served)
         self.assertTrue(http_server.closed)
-        self.assertEqual(adapter.messages, [(0.0, 0.0)])
+        self.assertEqual(adapter.messages, [(0.0, 0.0, 0.0)])
         self.assertTrue(adapter.closed)
 
     def test_sigterm_runs_the_same_safe_shutdown_path_as_keyboard_interrupt(self):
@@ -1090,6 +1194,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             robot_id='robot_2',
             cmd_vel_topic='/cmd_vel',
             action_name='/navigate_to_pose',
+            follow_waypoints_action_name='/follow_waypoints',
             battery_topic='/ros_robot_controller/battery',
             battery_stale_sec=3.0,
             initial_pose_topic='/initialpose',
@@ -1125,7 +1230,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
 
         self.assertTrue(http_server.served)
         self.assertTrue(http_server.closed)
-        self.assertEqual(adapter.messages, [(0.0, 0.0)])
+        self.assertEqual(adapter.messages, [(0.0, 0.0, 0.0)])
         self.assertTrue(adapter.closed)
 
     def test_default_runner_expands_cli_arguments_for_ros_adapter(self):
@@ -1138,6 +1243,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             robot_id='robot_2',
             cmd_vel_topic='/cmd_vel',
             action_name='/navigate_to_pose',
+            follow_waypoints_action_name='/follow_waypoints',
             battery_topic='/ros_robot_controller/battery',
             battery_stale_sec=3.0,
             initial_pose_topic='/initialpose',
@@ -1160,6 +1266,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             robot_id,
             cmd_vel_topic,
             action_name,
+            follow_waypoints_action_name,
             action_server_timeout_sec,
             goal_response_timeout_sec,
             cancel_response_timeout_sec,
@@ -1172,6 +1279,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
                 'robot_id': robot_id,
                 'cmd_vel_topic': cmd_vel_topic,
                 'action_name': action_name,
+                'follow_waypoints_action_name': follow_waypoints_action_name,
                 'action_server_timeout_sec': action_server_timeout_sec,
                 'goal_response_timeout_sec': goal_response_timeout_sec,
                 'cancel_response_timeout_sec': cancel_response_timeout_sec,
@@ -1198,6 +1306,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             'robot_id': 'robot_2',
             'cmd_vel_topic': '/cmd_vel',
             'action_name': '/navigate_to_pose',
+            'follow_waypoints_action_name': '/follow_waypoints',
             'action_server_timeout_sec': 1.0,
             'goal_response_timeout_sec': 3.0,
             'cancel_response_timeout_sec': 3.0,
@@ -1206,6 +1315,38 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             'auto_dock_stop_topic': None,
             'auto_dock_drive_ready_topic': None,
         })
+
+
+class RosVehicleAdapterResultTest(unittest.TestCase):
+    def test_follow_waypoints_missed_waypoint_is_a_failed_navigation(self):
+        """Nav2 may succeed overall while reporting individual waypoint failures."""
+        module = load_server_module()
+        adapter = module.RosVehicleAdapter.__new__(module.RosVehicleAdapter)
+        adapter._goal_status = SimpleNamespace(
+            STATUS_SUCCEEDED=4,
+            STATUS_CANCELED=5,
+        )
+        adapter._lock = threading.Lock()
+        goal_handle = object()
+        adapter._goal_handles = {'attempt-1': goal_handle}
+        terminal = []
+
+        class ResultFuture:
+            def result(self):
+                return SimpleNamespace(
+                    status=4,
+                    result=SimpleNamespace(missed_waypoints=[1]),
+                )
+
+        adapter._on_navigation_result(
+            'attempt-1',
+            goal_handle,
+            lambda attempt_id, state: terminal.append((attempt_id, state)),
+            ResultFuture(),
+        )
+
+        self.assertEqual(terminal, [('attempt-1', 'FAILED')])
+        self.assertEqual(adapter._goal_handles, {})
 
 
 if __name__ == '__main__':

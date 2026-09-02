@@ -48,3 +48,5 @@ docs/superpowers/
 !.env.*.example
 !.env.example
 .venv
+
+.db

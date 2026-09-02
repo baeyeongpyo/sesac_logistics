@@ -3,8 +3,9 @@
 ## 목적과 실행 방식
 
 `vehicle_command_api.py`는 이미 차량에서 실행 중인 전역 Nav2 action
-`/navigate_to_pose`, 전역 속도 토픽 `/cmd_vel`, Auto Dock ROS topic에 HTTP 요청을
-연결한다.
+`/navigate_to_pose`와 `/follow_waypoints`, 전역 속도 토픽 `/cmd_vel`, Auto Dock ROS
+topic에 HTTP 요청을 연결한다. 기존 단일 목표 `/navigate_to_pose`와 `/goal_pose`
+운용은 변경하지 않는다.
 
 이 프로세스는 Nav2를 새로 실행하지 않는다. 따라서 실차에서 다음처럼 전역
 `/bt_navigator`, `/planner_server`, `/controller_server`가 이미 보이는 경우에
@@ -12,7 +13,7 @@
 
 ```bash
 ros2 node list --no-daemon | grep -E 'bt_navigator|planner_server|controller_server'
-ros2 action list -t | grep '/navigate_to_pose'
+ros2 action list -t | grep -E '/navigate_to_pose|/follow_waypoints'
 ```
 
 `vehicle_navigation.launch.py`는 `robot_id` namespace 안에 별도 Nav2 node를
@@ -59,7 +60,7 @@ ros2 topic echo /cmd_vel
 
 curl -i -X POST http://127.0.0.1:8082/v1/cmd-vel \
   -H 'Content-Type: application/json' \
-  --data '{"linear_x":0.05,"angular_z":0.0,"hold_ms":500}'
+  --data '{"linear_x":0.05,"linear_y":0.0,"angular_z":0.0,"hold_ms":500}'
 ```
 
 성공 기준은 HTTP `202`, 비영(非零) `Twist` 한 건, 500 ms 뒤의 0속도 `Twist` 한 건이다.
@@ -123,8 +124,9 @@ Foxglove Bridge의 허용 topic, QoS, 서비스/파라미터 차단, 압축 설�
 | `--auto-dock-status-topic` | `/{robot_id}/auto_dock/status` | Auto Dock 상태 JSON 구독 토픽 |
 | `--auto-dock-stop-topic` | `/{robot_id}/auto_dock/stop` | Auto Dock 중단 `std_msgs/msg/Empty` 발행 토픽 |
 | `--auto-dock-drive-ready-topic` | `/{robot_id}/auto_dock/drive_ready` | Auto Dock 실제 완료 `std_msgs/msg/Empty` 구독 토픽 |
-| `--max-linear-x` | `0.10` | 수동 전진/후진 최대 속도 (m/s) |
-| `--max-angular-z` | `0.50` | 수동 회전 최대 속도 (rad/s) |
+| `--max-linear-x` | `1.0` | 수동 전진/후진 최대 속도 (m/s) |
+| `--max-linear-y` | `1.0` | 수동 횡이동 최대 속도 (m/s) |
+| `--max-angular-z` | `1.0` | 수동 회전 최대 속도 (rad/s) |
 | `--max-hold-ms` | `1000` | 수동 속도 유지 최대 시간 (ms) |
 | `--action-server-timeout-sec` | `1.0` | Nav2 action server 탐색 대기 시간 |
 | `--goal-response-timeout-sec` | `3.0` | goal 수락 응답 대기 시간 |
@@ -148,14 +150,18 @@ curl -sS http://192.168.100.20:8082/openapi.json | python3 -m json.tool
 ```bash
 curl -i -X POST http://192.168.100.20:8082/v1/cmd-vel \
   -H 'Content-Type: application/json' \
-  --data '{"linear_x": 0.05, "angular_z": 0.0, "hold_ms": 500}'
+  --data '{"linear_x": 0.05, "linear_y": 0.0, "angular_z": 0.0, "hold_ms": 500}'
 ```
 
-성공하면 `202`와 `MANUAL` 상태를 반환한다. hold 시간이 지나면 API는 0속도를
+`linear_y`는 좌측 횡이동이 양수인 ROS `Twist.linear.y` 값이며, 생략하면 `0.0`으로
+처리해 기존 전진·후진·회전 클라이언트와 호환된다. 성공하면 `202`와 `MANUAL` 상태를 반환한다. hold 시간이 지나면 API는 0속도를
 한 번 발행하고 명령 전 상태로 복귀한다. `MANUAL`은 물류 작업 상태가 아닌
 유지보수 상태이므로 `INIT`에서는 다시 `INIT`으로, `IDLE`에서는 다시 `IDLE`로
 돌아간다. 수동 명령을 받기 전에 활성 Nav2 목표가 있으면 해당 목표의 cancel을
 먼저 요청한다.
+
+회전 명령은 `abs(angular_z) × hold_ms / 1000`이 10°를 넘으면 거부한다. 따라서
+수동 회전 버튼은 선택한 회전 속도에 따라 유지 시간을 계산해 한 번에 최대 10°만 회전한다.
 
 ### Nav2 목표 전송
 
@@ -171,6 +177,24 @@ curl -i -X POST http://192.168.100.20:8082/v1/navigation/goals \
 전 주행에서는 선택 사항이지만 `PICK_COMPLETE`의 적재 상태에서는 반드시 `PLACE`여야
 한다. `frame_id`는 생략하면 `map`이며, 다른 frame은 거부한다. 차량은 `INIT`에서
 DRIVE를 받지 않으므로 초기 위치 확인 뒤 아래 `operation/idle` 요청을 먼저 수행해야 한다.
+
+### Nav2 다중 waypoint 전송
+
+다중 waypoint는 기존 단일 목표 endpoint와 별도로 `/follow_waypoints` action에
+전달한다. 모든 waypoint는 `map` frame이어야 하며, action 수락·취소·완료 상태는
+단일 Nav2 목표와 동일한 차량 작업 상태로 관리된다.
+
+```bash
+curl -i -X POST http://192.168.100.20:8082/v1/navigation/waypoints \
+  -H 'Content-Type: application/json' \
+  --data '{"operation_id":"73d5b9af-5a12-4f34-a96c-5de116df1e8e","purpose":"PICK","waypoints":[{"frame_id":"map","x":1.50,"y":0.0,"yaw":0.0},{"frame_id":"map","x":2.00,"y":0.5,"yaw":1.57}]}'
+```
+
+`waypoints`는 비어 있을 수 없고, waypoint 하나당 `x`, `y`, `yaw`가 필요하다.
+기본 action 이름은 `/follow_waypoints`이며, 다른 이름을 써야 하면
+`--follow-waypoints-action-name`으로 바꾼다. Nav2가 action 자체를 성공으로
+완료하더라도 `missed_waypoints`를 반환하면 차량은 이 요청을 `FAILED`로 전이하며,
+운영자 확인 전 다음 Pick·Place 작업을 진행하지 않는다.
 
 ### 작업 상태 조회
 

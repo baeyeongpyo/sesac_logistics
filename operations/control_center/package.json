@@ -1,0 +1,8 @@
+{
+  "name": "operations-control-center",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test static/dashboard.test.js"
+  }
+}

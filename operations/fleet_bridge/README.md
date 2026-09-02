@@ -52,6 +52,8 @@ Swagger UI는 `http://<server-ip>:8080/docs`에서 제공한다. Fleet Bridge는
 
 - `GET /api/v1/vehicle-command/{robot_id}/vehicle-status`
 - `POST /api/v1/vehicle-command/{robot_id}/localization/initial-pose`
+- `POST /api/v1/vehicle-command/{robot_id}/navigation/goals`
+- `POST /api/v1/vehicle-command/{robot_id}/navigation/waypoints`
 - `POST /api/v1/vehicle-command/{robot_id}/stop`
 
 ## 확인 및 테스트

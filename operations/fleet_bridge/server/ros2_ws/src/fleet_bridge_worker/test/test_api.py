@@ -228,6 +228,7 @@ class CommandApiTest(unittest.TestCase):
             }, '/v1/operation/idle'),
             ('POST', '/cmd-vel', {
                 'linear_x': 0.1,
+                'linear_y': 0.1,
                 'angular_z': 0.0,
                 'hold_ms': 300,
             }, '/v1/cmd-vel'),
@@ -237,6 +238,13 @@ class CommandApiTest(unittest.TestCase):
                 'y': 0.0,
                 'yaw': 0.0,
             }, '/v1/navigation/goals'),
+            ('POST', '/navigation/waypoints', {
+                'operation_id': '73d5b9af-5a12-4f34-a96c-5de116df1e8e',
+                'waypoints': [
+                    {'x': 1.5, 'y': 0.0, 'yaw': 0.0},
+                    {'x': 2.0, 'y': 0.5, 'yaw': 1.57},
+                ],
+            }, '/v1/navigation/waypoints'),
             ('POST', '/auto-dock', {
                 'operation_id': '73d5b9af-5a12-4f34-a96c-5de116df1e8e',
                 'operation': 'PICK',
@@ -382,6 +390,7 @@ class CommandApiTest(unittest.TestCase):
         expected_examples = {
             '/cmd-vel': {
                 'linear_x': 0.2,
+                'linear_y': 0.0,
                 'angular_z': 0.0,
                 'hold_ms': 500,
             },

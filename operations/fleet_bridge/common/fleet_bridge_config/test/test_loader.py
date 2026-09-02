@@ -56,6 +56,9 @@ VALID_TELEMETRY = {
 VEHICLE_TOPIC_PATTERN = re.compile(
     r'^(?P<topic>/\S+) \[(?P<message_type>[A-Za-z][A-Za-z0-9_]*/msg/[A-Za-z][A-Za-z0-9_]*)\]$',
 )
+VEHICLE_ACTION_PATTERN = re.compile(
+    r'^(?P<action>/\S+) \[(?P<action_type>[A-Za-z][A-Za-z0-9_]*/action/[A-Za-z][A-Za-z0-9_]*)\]$',
+)
 EXPECTED_VEHICLE_TOPIC_COUNT = 76
 
 
@@ -72,6 +75,22 @@ def load_vehicle_topic_snapshot():
                 f'invalid vehicle topic snapshot line {line_number}: {raw_line!r}',
             )
         entries.append((match['topic'], match['message_type']))
+    return entries
+
+
+def load_vehicle_action_snapshot():
+    snapshot_path = BUNDLE / 'config/tmp/vehicle_node_action'
+    entries = []
+    for line_number, raw_line in enumerate(
+        snapshot_path.read_text(encoding='utf-8').splitlines(),
+        start=1,
+    ):
+        match = VEHICLE_ACTION_PATTERN.fullmatch(raw_line)
+        if match is None:
+            raise AssertionError(
+                f'invalid vehicle action snapshot line {line_number}: {raw_line!r}',
+            )
+        entries.append((match['action'], match['action_type']))
     return entries
 
 
@@ -599,6 +618,12 @@ class ConfigLoaderTest(unittest.TestCase):
                 for source, message_type in snapshot
             },
         )
+
+    def test_repository_vehicle_action_snapshot_tracks_follow_waypoints_separately(self):
+        """Actions must not be inserted into the telemetry topic snapshot."""
+        self.assertEqual(load_vehicle_action_snapshot(), [
+            ('/follow_waypoints', 'nav2_msgs/action/FollowWaypoints'),
+        ])
 
 
 if __name__ == '__main__':
