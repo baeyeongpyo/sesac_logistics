@@ -71,6 +71,12 @@ private:
 
   std::size_t last_corner_index_ =
     std::numeric_limits<std::size_t>::max();
+
+  bool first_cycle_for_goal_ = true; //이 Goal에 대해 computeVelocityCommands()가 처음 실행되는 건가?
+
+  bool started_inside_final_zone_ = false; //이 Goal을 처음 받았을 때부터 로봇이 Goal 40cm 안에 있었나?
+
+  bool final_yaw_aligned_ = false;
 };
 
 }  // namespace orthogonal_controller
