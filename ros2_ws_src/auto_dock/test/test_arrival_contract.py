@@ -3072,7 +3072,7 @@ def test_nearest_recheck_waits_for_visual_before_insertion(monkeypatch):
     fake.latest_detection = {"source_stamp_ns": 101}
     fake.nearest_step_settle_until = 10.0
     fake.nearest_step_source_stamp_ns = 100
-    fake.nearest_step_wait_started_at = 9.0
+    fake.nearest_step_wait_started_at = 10.0
     fake.nearest_step_count = 1
     fake.nearest_step_verified = False
     fake.valid_measurement = lambda: (None, None, "no_selected_candidate")
@@ -3098,6 +3098,43 @@ def test_nearest_recheck_waits_for_visual_before_insertion(monkeypatch):
     assert fake.nearest_step_verified is False
     assert fake.insertion_start_due_at is None
     assert fake.last_status[1] == "nearest_waiting_visual_reacquire"
+
+
+def test_nearest_recheck_lost_target_resumes_lateral_search(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.target_type = "NEAREST"
+    fake.target_entity_id = 21
+    fake.target_world = {"x": 0.20, "y": 0.0, "yaw": 0.0}
+    fake.target_last_center_error = 0.0
+    fake.dock_lateral_yaw_entity_id = 21
+    fake.nearest_step_settle_until = 10.0
+    fake.nearest_step_wait_started_at = 9.0
+    fake.nearest_step_source_stamp_ns = 100
+    fake.nearest_step_verified = False
+    fake.candidate_stop_due_at = None
+    fake.candidate_confirmation_started_at = None
+    fake.candidate_retry_not_before = 0.0
+    fake.latest_detection = {"source_stamp_ns": 101}
+    fake.valid_measurement = lambda: (None, None, "identity_missing")
+    fake.tracked_partial_measurement = lambda: (
+        None, None, "tracked_partial_missing"
+    )
+    fake.number = lambda key, default, *_args: default
+    fake.stop_drive = lambda *_args: None
+    fake.publish_status = lambda *args, **kwargs: setattr(
+        fake, "last_status", (args, kwargs)
+    )
+    monkeypatch.setattr(
+        "auto_dock.auto_dock_node.time.monotonic", lambda: 10.0
+    )
+
+    AutoDockNode.tick_docking(fake)
+
+    assert fake.state == "search"
+    assert fake.target_entity_id is None
+    assert fake.target_world is None
+    assert fake.dock_lateral_yaw_entity_id is None
+    assert fake.last_status[0][1] == "nearest_visual_lost_resume_lateral_search"
 
 
 def test_aligned_top_pair_at_nine_cm_can_start_insertion(monkeypatch):

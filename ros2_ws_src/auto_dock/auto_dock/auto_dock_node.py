@@ -5011,6 +5011,40 @@ class AutoDockNode(Node):
             if not fresh_frame or candidate is None:
                 if getattr(self, "nearest_step_wait_started_at", None) is None:
                     self.nearest_step_wait_started_at = now
+                wait_sec = now - self.nearest_step_wait_started_at
+                number = getattr(self, "number", None)
+                reacquire_timeout = (
+                    number(
+                        "nearest_visual_reacquire_timeout_sec", 0.80, 0.20, 3.0
+                    )
+                    if callable(number) else 0.80
+                )
+                if (
+                    fresh_frame
+                    and candidate is None
+                    and wait_sec >= reacquire_timeout
+                ):
+                    lost_entity_id = self.target_entity_id
+                    self.stop_drive(5)
+                    self.target_world = None
+                    self.target_entity_id = None
+                    self.target_last_center_error = None
+                    self.dock_lateral_yaw_entity_id = None
+                    self.nearest_step_settle_until = None
+                    self.nearest_step_wait_started_at = None
+                    self.nearest_step_source_stamp_ns = None
+                    self.nearest_step_verified = False
+                    self.candidate_stop_due_at = None
+                    self.candidate_confirmation_started_at = None
+                    self.candidate_retry_not_before = 0.0
+                    self.state = "search"
+                    self.publish_status(
+                        "running", "nearest_visual_lost_resume_lateral_search",
+                        measurement_reason=reason,
+                        lost_entity_id=lost_entity_id,
+                        reacquire_timeout_sec=reacquire_timeout,
+                    )
+                    return
                 self.publish_status(
                     "waiting", (
                         "nearest_waiting_fresh_recheck"
@@ -5019,7 +5053,8 @@ class AutoDockNode(Node):
                     ),
                     measurement_reason=reason,
                     fresh_frame=fresh_frame,
-                    wait_sec=round(now - self.nearest_step_wait_started_at, 2),
+                    wait_sec=round(wait_sec, 2),
+                    reacquire_timeout_sec=reacquire_timeout,
                 )
                 return
             self.nearest_step_settle_until = None
