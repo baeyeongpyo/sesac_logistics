@@ -80,3 +80,9 @@ class Pallet3MissionRequest(BaseModel):
     robot_id: str = Field(min_length=1)
     bypass_pick: bool = False
     new_mission: bool = False
+
+
+class Pallet3ManualPickRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operator_confirmed: bool

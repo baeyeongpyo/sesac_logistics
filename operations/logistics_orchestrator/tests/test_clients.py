@@ -26,6 +26,26 @@ class HttpClientContractTest(unittest.TestCase):
         self.assertEqual(paths, ["/api/v1/zones", "/api/v1/stocks", "/api/v1/operations/active"])
         self.assertEqual(snapshot, {"zones": [], "stocks": [], "active_operations": []})
 
+    def test_inventory_pallet_state_reads_the_robot_specific_endpoint(self) -> None:
+        # This catches manual PICK being approved without checking Inventory's load ledger.
+        paths: list[str] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.path)
+            return httpx.Response(
+                200,
+                json={"robot_id": "robot_1", "has_pallet": False, "payload_type": None},
+            )
+
+        client = httpx.Client(transport=httpx.MockTransport(respond))
+        inventory = HttpInventoryClient("http://inventory", client=client)
+
+        pallet_state = inventory.pallet_state("robot_1")
+
+        self.assertEqual(paths, ["/api/v1/robots/robot_1/pallet-state"])
+        self.assertEqual(pallet_state["robot_id"], "robot_1")
+        self.assertFalse(pallet_state["has_pallet"])
+
     def test_fleet_manager_navigation_uses_the_command_endpoint_and_body(self) -> None:
         # This catches bypassing Fleet Manager or losing operation identity on Nav2 commands.
         received: dict = {}

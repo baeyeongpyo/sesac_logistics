@@ -48,6 +48,13 @@ def _operation(status: str = "TO_PICK") -> dict:
     }
 
 
+def _pallet3_operation(status: str = "TO_PICK") -> dict:
+    return {
+        **_operation(status),
+        "destination_zone_id": "p3",
+    }
+
+
 class FakeInventory:
     def __init__(self, *, stocks: list[dict], active_operations: list[dict]) -> None:
         self.zones = _zones()
@@ -56,6 +63,7 @@ class FakeInventory:
         self.created: list[dict] = []
         self.pick_completion_keys: list[str] = []
         self.place_completion_keys: list[str] = []
+        self.pallet_states: dict[str, dict] = {}
 
     def snapshot(self) -> dict:
         return {
@@ -78,11 +86,22 @@ class FakeInventory:
         self.active_operations.append(operation)
         return operation
 
+    def pallet_state(self, robot_id: str) -> dict:
+        return self.pallet_states.get(
+            robot_id,
+            {"robot_id": robot_id, "has_pallet": False, "payload_type": None},
+        )
+
     def complete_pick(self, operation_id: str, robot_id: str, idempotency_key: str) -> None:
         self.pick_completion_keys.append(idempotency_key)
         for operation in self.active_operations:
             if operation["operation_id"] == operation_id:
                 operation["status"] = "TO_PLACE"
+                self.pallet_states[robot_id] = {
+                    "robot_id": robot_id,
+                    "has_pallet": True,
+                    "payload_type": operation["payload_type"],
+                }
 
     def complete_place(self, operation_id: str, robot_id: str, idempotency_key: str) -> None:
         self.place_completion_keys.append(idempotency_key)
@@ -91,6 +110,11 @@ class FakeInventory:
             for operation in self.active_operations
             if operation["operation_id"] != operation_id
         ]
+        self.pallet_states[robot_id] = {
+            "robot_id": robot_id,
+            "has_pallet": False,
+            "payload_type": None,
+        }
 
 
 class FakeFleet:
@@ -163,7 +187,7 @@ class OrchestratorServiceTest(unittest.TestCase):
         command = fleet.commands[0]
         self.assertEqual(command[0:2], ("auto_dock", "robot_1"))
         self.assertEqual(command[2]["operation"], "PICK")
-        self.assertEqual(command[2]["location"], "DOCKER")
+        self.assertEqual(command[2]["location"], "DOCK_1")
 
     def test_pick_complete_commits_inventory_once_then_navigates_to_destination(self) -> None:
         # This catches moving to PLACE before the Inventory source decrement is durable.
@@ -226,6 +250,24 @@ class OrchestratorServiceTest(unittest.TestCase):
 
         self.assertEqual(fleet.commands, [])
         self.assertEqual(self.store.status()["command_counts"], {"DELIVERY_UNKNOWN": 1})
+
+    def test_manual_pallet3_pick_commits_inventory_once_without_vehicle_command(self) -> None:
+        # This catches treating manual loading as a route-only POC that never changes stock.
+        inventory = FakeInventory(stocks=[], active_operations=[_pallet3_operation()])
+        fleet = FakeFleet([
+            {"robot_id": "robot_1", "state": "INIT", "detail": "VEHICLE_BOOTED"}
+        ])
+        service = OrchestratorService(self.store, inventory, fleet)
+
+        workflow = service.confirm_pallet3_manual_pick("operation-1", True)
+        replayed = service.confirm_pallet3_manual_pick("operation-1", True)
+
+        self.assertEqual(workflow.operation_id, "operation-1")
+        self.assertEqual(replayed.operation_id, "operation-1")
+        self.assertEqual(inventory.pick_completion_keys, ["operation-1:manual-pick"])
+        self.assertEqual(inventory.active_operations[0]["status"], "TO_PLACE")
+        self.assertTrue(inventory.pallet_state("robot_1")["has_pallet"])
+        self.assertEqual(fleet.commands, [])
 
     def test_pallet3_mission_runs_waypoints_then_confirmed_unload_reverse_and_return(self) -> None:
         inventory = FakeInventory(stocks=[], active_operations=[])

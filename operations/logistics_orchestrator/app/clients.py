@@ -42,6 +42,9 @@ class HttpInventoryClient(_HttpClient):
     def create_operation(self, body: dict[str, Any]) -> dict[str, Any]:
         return self._post("/api/v1/operations", body)
 
+    def pallet_state(self, robot_id: str) -> dict[str, Any]:
+        return self._get(f"/api/v1/robots/{robot_id}/pallet-state")
+
     def complete_pick(
         self, operation_id: str, robot_id: str, idempotency_key: str
     ) -> None:

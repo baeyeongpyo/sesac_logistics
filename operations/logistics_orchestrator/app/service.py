@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from .models import EventEnvelope, Pallet3Mission
+from .models import EventEnvelope, Pallet3Mission, Pallet3OperationWorkflow
 from .planner import InventorySnapshot, select_next_transfer, validate_required_zones
 from .store import OrchestratorStore
 
@@ -20,6 +20,8 @@ class InventoryGateway(Protocol):
         self, operation_id: str, robot_id: str, idempotency_key: str
     ) -> None: ...
 
+    def pallet_state(self, robot_id: str) -> dict[str, Any]: ...
+
 
 class FleetGateway(Protocol):
     def list_vehicles(self) -> list[dict[str, Any]]: ...
@@ -35,6 +37,10 @@ class Pallet3MissionConflictError(ValueError):
     pass
 
 
+class Pallet3OperationConflictError(ValueError):
+    pass
+
+
 OUTBOUND_PALLET3_WAYPOINTS = [
     {"frame_id": "map", "x": -0.440, "y": -0.900, "yaw": 0.0},
     {"frame_id": "map", "x": -0.420, "y": -2.000, "yaw": -1.5707963267948966},
@@ -46,6 +52,10 @@ RETURN_DOCK1_WAYPOINTS = [
     {"frame_id": "map", "x": -0.440, "y": -0.900, "yaw": 0.0},
     {"frame_id": "map", "x": 0.085, "y": -0.905, "yaw": 0.0},
 ]
+
+AUTO_DOCK_LOCATION_BY_ZONE_ID = {
+    "docker": "DOCK_1",
+}
 
 
 class OrchestratorService:
@@ -63,6 +73,62 @@ class OrchestratorService:
         """A durable event is only a trigger; reconciliation uses current ledgers."""
         del source, event
         self.reconcile()
+
+    def confirm_pallet3_manual_pick(
+        self, operation_id: str, operator_confirmed: bool
+    ) -> Pallet3OperationWorkflow:
+        if not operator_confirmed:
+            raise Pallet3OperationConflictError("operator_confirmed must be true")
+        inventory = self._inventory.snapshot()
+        operation = next(
+            (
+                item
+                for item in inventory["active_operations"]
+                if str(item.get("operation_id")) == operation_id
+            ),
+            None,
+        )
+        if operation is None:
+            raise KeyError(f"unknown active operation: {operation_id}")
+        if not _is_pallet3_operation(operation):
+            raise Pallet3OperationConflictError(
+                "operation is not a docker to pallet 3 transfer"
+            )
+        robot_id = str(operation.get("robot_id") or "").strip()
+        if not robot_id:
+            raise Pallet3OperationConflictError("operation has no assigned robot")
+        workflow, _created = self._store.create_or_get_pallet3_workflow(
+            operation_id, robot_id
+        )
+        if workflow.manual_pick_confirmed_at is not None:
+            if str(operation.get("status")) == "TO_PLACE":
+                return workflow
+            raise Pallet3OperationConflictError(
+                "manual pick was recorded but operation is not ready to place"
+            )
+        if str(operation.get("status")) != "TO_PICK":
+            raise Pallet3OperationConflictError(
+                "operation is not ready for pallet 3 manual pick"
+            )
+        pallet_state = self._inventory.pallet_state(robot_id)
+        if bool(pallet_state.get("has_pallet")):
+            raise Pallet3OperationConflictError("robot already carries a pallet")
+        if self._store.has_command(operation_id, "NAV_TO_PICK") or self._store.has_command(
+            operation_id, "AUTO_DOCK_PICK"
+        ):
+            raise Pallet3OperationConflictError("automatic pick has already started")
+        try:
+            self._inventory.complete_pick(
+                operation_id, robot_id, f"{operation_id}:manual-pick"
+            )
+        except Exception as error:
+            self._store.set_error("pallet3_manual_pick", str(error))
+            raise
+        self._store.clear_error("pallet3_manual_pick")
+        workflow, _confirmed = self._store.confirm_pallet3_manual_pick(operation_id)
+        if workflow is None:
+            raise RuntimeError(f"pallet 3 workflow disappeared: {operation_id}")
+        return workflow
 
     def start_pallet3_mission(
         self,
@@ -461,7 +527,9 @@ class OrchestratorService:
             "operation_id": operation_id,
             "operation": purpose,
             "product_type": str(operation["payload_type"]),
-            "location": zone_id.upper(),
+            "location": AUTO_DOCK_LOCATION_BY_ZONE_ID.get(
+                zone_id.lower(), zone_id.upper()
+            ),
             "target": {"type": "NEAREST"},
         }
         phase = "PICK_SENT" if purpose == "PICK" else "PLACE_SENT"
@@ -513,6 +581,13 @@ def _zone_by_id(zones: list[dict[str, Any]], zone_id: str) -> dict[str, Any]:
         if str(zone["zone_id"]).lower() == zone_id.lower():
             return zone
     raise ValueError(f"configured zone disappeared: {zone_id}")
+
+
+def _is_pallet3_operation(operation: dict[str, Any]) -> bool:
+    return (
+        str(operation.get("source_zone_id", "")).lower() == "docker"
+        and str(operation.get("destination_zone_id", "")).lower() == "p3"
+    )
 
 
 def _poc_vehicle_report_matches(

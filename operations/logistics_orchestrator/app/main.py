@@ -6,7 +6,13 @@ from typing import Any, Callable
 
 from fastapi import FastAPI, HTTPException, Request, Response, status
 
-from .models import EventEnvelope, Pallet3Mission, Pallet3MissionRequest
+from .models import (
+    EventEnvelope,
+    Pallet3ManualPickRequest,
+    Pallet3Mission,
+    Pallet3MissionRequest,
+    Pallet3OperationWorkflow,
+)
 from .store import OrchestratorStore
 
 
@@ -43,6 +49,27 @@ def create_app(
         if service is not None:
             service.reconcile()
         return {"accepted": True}
+
+    @app.post(
+        "/api/v1/operations/{operation_id}/pallet-3/bypass-pick",
+        response_model=Pallet3OperationWorkflow,
+    )
+    def confirm_pallet3_manual_pick(
+        operation_id: str, body: Pallet3ManualPickRequest, request: Request
+    ) -> Pallet3OperationWorkflow:
+        service = _require_service(request)
+        try:
+            return service.confirm_pallet3_manual_pick(
+                operation_id, body.operator_confirmed
+            )
+        except KeyError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+            ) from error
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail=str(error)
+            ) from error
 
     @app.post(
         "/api/v1/poc/pallet-3-missions",

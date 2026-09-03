@@ -137,6 +137,39 @@ class OrchestratorApiTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 503)
 
+    def test_pallet3_manual_pick_route_forwards_the_operation_confirmation(self) -> None:
+        # This catches the manual-load confirmation creating a separate POC mission.
+        calls: list[tuple[str, bool]] = []
+
+        class RecordingPallet3OperationService:
+            def __init__(self, store) -> None:
+                self.store = store
+
+            def confirm_pallet3_manual_pick(
+                self, operation_id: str, operator_confirmed: bool
+            ):
+                calls.append((operation_id, operator_confirmed))
+                workflow, _created = self.store.create_or_get_pallet3_workflow(
+                    operation_id, "robot_1"
+                )
+                self.store.confirm_pallet3_manual_pick(operation_id)
+                return self.store.get_pallet3_workflow(workflow.operation_id)
+
+        app = create_app(
+            str(Path(self.temporary_directory.name) / "manual-pick.db"),
+            service_factory=lambda store: RecordingPallet3OperationService(store),
+        )
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/operations/operation-1/pallet-3/bypass-pick",
+                json={"operator_confirmed": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls, [("operation-1", True)])
+        self.assertEqual(response.json()["operation_id"], "operation-1")
+        self.assertIsNotNone(response.json()["manual_pick_confirmed_at"])
+
     def test_pallet3_poc_forwards_explicit_pick_bypass_to_the_runtime_service(self) -> None:
         # This catches silently rejecting or dropping the explicit POC-only PICK bypass.
         calls: list[tuple[str, bool]] = []
