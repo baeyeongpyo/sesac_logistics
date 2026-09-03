@@ -107,8 +107,6 @@ Inventory 작업 생성 (docker -> p3, TO_PICK, 재고 예약)
 
 ```text
 Pallet 3 출발 waypoint 성공
-  -> 하역 확인 대기
-  -> 하역 확인 API
   -> Fork DOWN 명령
   -> FORK_DOWN_COMPLETE
   -> Inventory PLACE 완료 (p3 +1, 작업 COMPLETED, 차량 비적재)
@@ -119,23 +117,18 @@ Pallet 3 출발 waypoint 성공
   -> workflow COMPLETED
 ```
 
-하역 확인 API도 operation ID를 사용한다.
-
-```text
-POST /api/v1/operations/{operation_id}/pallet-3/unload-confirmations
-```
-
-이 API는 해당 workflow가 Pallet 3 도착 후 하역 대기일 때만 Fork DOWN을 한 번
-발행한다. `FORK_DOWN_COMPLETE`와 operation ID가 모두 일치할 때만 Inventory
-PLACE 완료와 후진을 진행한다.
+Pallet 3 출발 waypoint의 Nav2 성공과 operation ID가 일치하면 Orchestrator는
+Fork DOWN을 한 번 자동 전송한다. 작업자 하역 확인 API는 제공하지 않는다.
+`FORK_DOWN_COMPLETE`와 operation ID가 모두 일치할 때만 Inventory PLACE 완료와
+후진을 진행한다. 따라서 p3 재고 증가는 waypoint 도착이나 Fork DOWN 명령이
+아니라 실제 Fork DOWN 완료가 유일한 근거다.
 
 ## 레시피 단계와 복구
 
-workflow phase는 `PICK_PENDING`, `OUTBOUND_SENT`,
-`AWAIT_UNLOAD_CONFIRMATION`, `FORK_DOWN_SENT`, `REVERSE_SENT`,
-`RETURN_SENT`, `COMPLETED`, `FAILED`를 사용한다. `PICK_PENDING`은 일반
-Auto Dock PICK을 기다리거나 수동 PICK 확인 뒤 차량의 `WAIT`을 기다리는
-단계다.
+workflow phase는 `PICK_PENDING`, `OUTBOUND_SENT`, `FORK_DOWN_SENT`,
+`REVERSE_SENT`, `RETURN_SENT`, `COMPLETED`, `FAILED`를 사용한다.
+`PICK_PENDING`은 일반 Auto Dock PICK을 기다리거나 수동 PICK 확인 뒤 차량의
+`WAIT`을 기다리는 단계다.
 
 Fleet가 `FAIL`이면 기존과 같이 operation recovery marker를 저장하고 새로운
 차량 명령을 보내지 않는다. 운영자가 차량을 `idle`로 복구해 `WAIT`이 되면
@@ -144,8 +137,6 @@ Inventory 상태와 workflow phase를 다시 대조한다.
 - `TO_PICK`이면 docker 접근 및 Auto Dock PICK 단계부터 재개한다.
 - `TO_PLACE`와 `PICK_PENDING` 또는 `OUTBOUND_SENT`이면 Pallet 3 출발
   waypoint부터 재개한다.
-- `AWAIT_UNLOAD_CONFIRMATION`이면 명령을 재발행하지 않고 하역 확인을
-  다시 기다린다.
 - `FORK_DOWN_SENT`, `REVERSE_SENT`, `RETURN_SENT`에서 실패한 경우에는
   이전 명령의 실제 수행 여부가 불명확하므로 자동 재발행하지 않는다. 해당
   workflow를 `FAILED`로 남기고 stop을 요청한다.
@@ -190,7 +181,7 @@ Operations Control Center는 이미 Inventory의 `transport_operations`를 읽�
    `-0.18` / `1000 ms` 후진을 전송한다.
 6. Fleet FAIL 뒤 `idle -> WAIT` 복구는 `TO_PICK` 또는 `TO_PLACE`의 실제
    Inventory 상태에 맞는 안전한 단계만 재개한다.
-7. 중복 bypass, PICK/PLACE 완료, Fleet 이벤트, 하역 확인은 재고와 차량
-   명령을 중복 처리하지 않는다.
+7. Pallet 3 도착 Nav2 성공은 Fork DOWN을 정확히 한 번 자동 전송하며,
+   중복 Nav2/Fleet 이벤트는 재고나 차량 명령을 중복 처리하지 않는다.
 8. 기존 legacy POC 미션과 일반 docker/p3 작업은 같은 차량에 동시에
    명령을 보내지 않는다.
