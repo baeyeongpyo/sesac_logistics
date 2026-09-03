@@ -46,3 +46,22 @@ class OperationStep(BaseModel):
     destination_zone_id: str
     payload_type: str
     updated_at: datetime
+
+
+class Pallet3Mission(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    mission_id: str
+    robot_id: str
+    phase: str
+    failure_detail: str | None
+    created_at: datetime
+    updated_at: datetime
+    unload_confirmed_at: datetime | None
+    completed_at: datetime | None
+
+
+class Pallet3MissionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    robot_id: str = Field(min_length=1)

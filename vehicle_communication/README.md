@@ -117,6 +117,8 @@ Foxglove Bridge의 허용 topic, QoS, 서비스/파라미터 차단, 압축 설�
 | `--robot-id` | 없음(필수) | 이 API 인스턴스가 제어하는 차량 식별자 |
 | `--battery-topic` | `/ros_robot_controller/battery` | `std_msgs/msg/UInt16` 배터리 원시값 토픽 |
 | `--fork-command-topic` | `/fork/command` | 포크 상승·하강 `std_msgs/msg/String` 명령 발행 토픽 |
+| `--fork-state-topic` | `/fork/state` | 포크 완료·오류 `std_msgs/msg/String` 상태 수신 토픽 |
+| `--fork-state-timeout-sec` | `15.0` | POC 포크 명령 뒤 완료 상태를 기다리는 최대 시간(초) |
 | `--battery-stale-sec` | `3.0` | 이 시간보다 오래된 배터리값을 stale로 표시 (초) |
 | `--initial-pose-topic` | `/initialpose` | AMCL 초기 위치 발행 토픽 |
 | `--initial-pose-position-variance` | `0.25` | initial pose X/Y covariance 대각값 (m²) |
@@ -175,6 +177,17 @@ curl -i -X POST http://192.168.100.20:8082/v1/fork/down
 ```
 
 기본 토픽이 다른 차량은 API 실행 시 `--fork-command-topic <topic>`으로 변경한다.
+
+Pallet 3 POC에서는 `operation_id`를 함께 보내면 API가 `/fork/state`의 JSON
+`{"state":"DOWN_COMPLETE","error":""}`를 기다린 뒤 Fleet Bridge에
+`source: FORK`, `detail: FORK_DOWN_COMPLETE` 상태를 전달한다. 오류·형식 오류·타임아는
+같은 작업 ID에 `FAIL`로 전달한다.
+
+```bash
+curl -i -X POST http://192.168.100.20:8082/v1/fork/down \
+  -H 'Content-Type: application/json' \
+  --data '{"operation_id":"3e829a02-7601-4b9f-afdf-3dbd84737828"}'
+```
 
 ### Nav2 목표 전송
 

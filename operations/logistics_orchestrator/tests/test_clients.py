@@ -67,6 +67,36 @@ class HttpClientContractTest(unittest.TestCase):
         )
         self.assertEqual(received["body"], command)
 
+    def test_fleet_manager_poc_controls_use_only_fleet_manager_command_endpoints(self) -> None:
+        received: list[tuple[str, dict]] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            received.append((request.url.path, json.loads(request.content)))
+            return httpx.Response(202)
+
+        client = httpx.Client(transport=httpx.MockTransport(respond))
+        fleet = HttpFleetManagerClient("http://fleet", client=client)
+        mission_id = "3e829a02-7601-4b9f-afdf-3dbd84737828"
+        fleet.navigate_waypoints("robot_1", {"operation_id": mission_id, "waypoints": []})
+        fleet.fork_down("robot_1", {"operation_id": mission_id})
+        fleet.command_velocity(
+            "robot_1",
+            {"operation_id": mission_id, "linear_x": -0.18, "angular_z": 0.0, "hold_ms": 1000},
+        )
+        fleet.stop("robot_1")
+
+        self.assertEqual(
+            received,
+            [
+                ("/api/v1/vehicles/robot_1/commands/navigation/waypoints", {"operation_id": mission_id, "waypoints": []}),
+                ("/api/v1/vehicles/robot_1/commands/fork/down", {"operation_id": mission_id}),
+                ("/api/v1/vehicles/robot_1/commands/cmd-vel", {
+                    "operation_id": mission_id, "linear_x": -0.18, "angular_z": 0.0, "hold_ms": 1000,
+                }),
+                ("/api/v1/vehicles/robot_1/commands/stop", {}),
+            ],
+        )
+
     def test_fleet_manager_command_service_unavailable_is_delivery_unknown(self) -> None:
         client = httpx.Client(
             transport=httpx.MockTransport(

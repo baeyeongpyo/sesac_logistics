@@ -73,6 +73,24 @@ class HttpFleetManagerClient(_HttpClient):
             f"/api/v1/vehicles/{robot_id}/commands/auto-dock", payload
         )
 
+    def navigate_waypoints(self, robot_id: str, payload: dict[str, Any]) -> None:
+        self._post_command(
+            f"/api/v1/vehicles/{robot_id}/commands/navigation/waypoints", payload
+        )
+
+    def fork_down(self, robot_id: str, payload: dict[str, Any]) -> None:
+        self._post_command(
+            f"/api/v1/vehicles/{robot_id}/commands/fork/down", payload
+        )
+
+    def command_velocity(self, robot_id: str, payload: dict[str, Any]) -> None:
+        self._post_command(
+            f"/api/v1/vehicles/{robot_id}/commands/cmd-vel", payload
+        )
+
+    def stop(self, robot_id: str) -> None:
+        self._post_command(f"/api/v1/vehicles/{robot_id}/commands/stop", {})
+
     def _post_command(self, path: str, payload: dict[str, Any]) -> None:
         try:
             self._post(path, payload)

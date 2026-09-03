@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from .models import EventEnvelope
+from .models import EventEnvelope, Pallet3Mission
 from .planner import InventorySnapshot, select_next_transfer, validate_required_zones
 from .store import OrchestratorStore
 
@@ -25,6 +25,27 @@ class FleetGateway(Protocol):
     def list_vehicles(self) -> list[dict[str, Any]]: ...
     def navigate(self, robot_id: str, payload: dict[str, Any]) -> None: ...
     def auto_dock(self, robot_id: str, payload: dict[str, Any]) -> None: ...
+    def navigate_waypoints(self, robot_id: str, payload: dict[str, Any]) -> None: ...
+    def fork_down(self, robot_id: str, payload: dict[str, Any]) -> None: ...
+    def command_velocity(self, robot_id: str, payload: dict[str, Any]) -> None: ...
+    def stop(self, robot_id: str) -> None: ...
+
+
+class Pallet3MissionConflictError(ValueError):
+    pass
+
+
+OUTBOUND_PALLET3_WAYPOINTS = [
+    {"frame_id": "map", "x": -0.440, "y": -0.900, "yaw": 0.0},
+    {"frame_id": "map", "x": -0.420, "y": -2.000, "yaw": -1.5707963267948966},
+    {"frame_id": "map", "x": -0.420, "y": -2.400, "yaw": -1.5707963267948966},
+]
+
+RETURN_DOCK1_WAYPOINTS = [
+    {"frame_id": "map", "x": -0.420, "y": -2.000, "yaw": -1.5707963267948966},
+    {"frame_id": "map", "x": -0.440, "y": -0.900, "yaw": 0.0},
+    {"frame_id": "map", "x": 0.085, "y": -0.905, "yaw": 0.0},
+]
 
 
 class OrchestratorService:
@@ -43,10 +64,83 @@ class OrchestratorService:
         del source, event
         self.reconcile()
 
+    def start_pallet3_mission(self, robot_id: str) -> Pallet3Mission:
+        robot_id = robot_id.strip()
+        if not robot_id:
+            raise ValueError("robot_id must be a non-empty string")
+        try:
+            vehicles = self._fleet.list_vehicles()
+        except Exception as error:
+            self._store.set_error("pallet3_vehicle_snapshot", str(error))
+            raise
+        vehicle = next(
+            (item for item in vehicles if str(item.get("robot_id")) == robot_id),
+            None,
+        )
+        if vehicle is None:
+            raise KeyError(f"unknown vehicle: {robot_id}")
+        if str(vehicle.get("state")) != "WAIT":
+            raise Pallet3MissionConflictError("vehicle must be WAIT after dock pickup")
+        self._store.clear_error("pallet3_vehicle_snapshot")
+        mission, created = self._store.create_or_get_pallet3_mission(robot_id)
+        if created:
+            self._deliver_pallet3_command(
+                mission,
+                "POC_OUTBOUND_WAYPOINTS",
+                {
+                    "operation_id": mission.mission_id,
+                    "purpose": "PLACE",
+                    "waypoints": OUTBOUND_PALLET3_WAYPOINTS,
+                },
+                self._fleet.navigate_waypoints,
+            )
+        return self._store.get_pallet3_mission(mission.mission_id) or mission
+
+    def confirm_pallet3_unload(self, mission_id: str) -> Pallet3Mission:
+        mission, transitioned = self._store.confirm_pallet3_unload(mission_id)
+        if mission is None:
+            raise KeyError(f"unknown pallet 3 mission: {mission_id}")
+        if not transitioned:
+            if mission.phase in {
+                "FORK_DOWN_SENT",
+                "REVERSE_SENT",
+                "RETURN_SENT",
+                "COMPLETED",
+            }:
+                return mission
+            raise Pallet3MissionConflictError(
+                "unload confirmation is allowed only after pallet 3 arrival"
+            )
+        self._deliver_pallet3_command(
+            mission,
+            "POC_FORK_DOWN",
+            {"operation_id": mission.mission_id},
+            self._fleet.fork_down,
+        )
+        return self._store.get_pallet3_mission(mission.mission_id) or mission
+
     def reconcile(self) -> None:
         try:
-            inventory = self._inventory.snapshot()
             vehicles = self._fleet.list_vehicles()
+        except Exception as error:
+            self._store.set_error("fleet_snapshot", str(error))
+            return
+
+        self._store.clear_error("fleet_snapshot")
+        vehicles_by_robot = {
+            str(vehicle["robot_id"]): vehicle
+            for vehicle in vehicles
+            if vehicle.get("robot_id")
+        }
+        active_poc_robot_ids: set[str] = set()
+        for mission in self._store.list_active_pallet3_missions():
+            active_poc_robot_ids.add(mission.robot_id)
+            vehicle = vehicles_by_robot.get(mission.robot_id)
+            if vehicle is not None:
+                self._reconcile_pallet3_mission(mission, vehicle)
+
+        try:
+            inventory = self._inventory.snapshot()
         except Exception as error:
             self._store.set_error("snapshot", str(error))
             return
@@ -73,6 +167,8 @@ class OrchestratorService:
         }
         for vehicle in sorted(vehicles, key=lambda value: str(value["robot_id"])):
             robot_id = str(vehicle["robot_id"])
+            if robot_id in active_poc_robot_ids:
+                continue
             operation = active_by_robot.get(robot_id)
             vehicle_state = str(vehicle.get("state", ""))
             if vehicle_state == "FAIL":
@@ -87,6 +183,107 @@ class OrchestratorService:
                 self._assign_next_operation(robot_id, vehicle, snapshot)
             else:
                 self._continue_operation(robot_id, vehicle, operation, zones)
+
+    def _reconcile_pallet3_mission(
+        self, mission: Pallet3Mission, vehicle: dict[str, Any]
+    ) -> None:
+        if str(vehicle.get("state")) == "FAIL":
+            self._fail_pallet3_mission(
+                mission, str(vehicle.get("detail") or "VEHICLE_FAIL")
+            )
+            return
+        if mission.phase == "OUTBOUND_SENT":
+            if _poc_vehicle_report_matches(
+                vehicle, mission, source="NAV2", detail="NAVIGATION_SUCCEEDED"
+            ):
+                self._store.transition_pallet3_mission(
+                    mission.mission_id,
+                    "OUTBOUND_SENT",
+                    "AWAIT_UNLOAD_CONFIRMATION",
+                )
+            return
+        if mission.phase == "FORK_DOWN_SENT":
+            if _poc_vehicle_report_matches(
+                vehicle, mission, source="FORK", detail="FORK_DOWN_COMPLETE"
+            ):
+                next_mission, transitioned = self._store.transition_pallet3_mission(
+                    mission.mission_id,
+                    "FORK_DOWN_SENT",
+                    "REVERSE_SENT",
+                )
+                if transitioned and next_mission is not None:
+                    self._deliver_pallet3_command(
+                        next_mission,
+                        "POC_REVERSE",
+                        {
+                            "operation_id": next_mission.mission_id,
+                            "linear_x": -0.18,
+                            "linear_y": 0.0,
+                            "angular_z": 0.0,
+                            "hold_ms": 1000,
+                        },
+                        self._fleet.command_velocity,
+                    )
+            return
+        if mission.phase == "REVERSE_SENT":
+            if _poc_vehicle_report_matches(
+                vehicle, mission, source="API", detail="MANUAL_COMMAND_EXPIRED"
+            ):
+                next_mission, transitioned = self._store.transition_pallet3_mission(
+                    mission.mission_id,
+                    "REVERSE_SENT",
+                    "RETURN_SENT",
+                )
+                if transitioned and next_mission is not None:
+                    self._deliver_pallet3_command(
+                        next_mission,
+                        "POC_RETURN_WAYPOINTS",
+                        {
+                            "operation_id": next_mission.mission_id,
+                            "purpose": "PLACE",
+                            "waypoints": RETURN_DOCK1_WAYPOINTS,
+                        },
+                        self._fleet.navigate_waypoints,
+                    )
+            return
+        if mission.phase == "RETURN_SENT" and _poc_vehicle_report_matches(
+            vehicle, mission, source="NAV2", detail="NAVIGATION_SUCCEEDED"
+        ):
+            self._store.transition_pallet3_mission(
+                mission.mission_id,
+                "RETURN_SENT",
+                "COMPLETED",
+            )
+
+    def _deliver_pallet3_command(
+        self,
+        mission: Pallet3Mission,
+        command_type: str,
+        payload: dict[str, Any],
+        send: Any,
+    ) -> None:
+        command = self._deliver_command(
+            mission.mission_id,
+            mission.robot_id,
+            command_type,
+            payload,
+            send,
+        )
+        delivered = self._store.get_command(command.command_id)
+        if delivered is not None and delivered.status != "SENT":
+            detail = delivered.last_error or delivered.status
+            self._fail_pallet3_mission(mission, f"{command_type}:{detail}")
+
+    def _fail_pallet3_mission(self, mission: Pallet3Mission, detail: str) -> None:
+        failed = self._store.fail_pallet3_mission(mission.mission_id, detail)
+        if failed is not None and failed.phase == "FAILED":
+            self._deliver_command(
+                mission.mission_id,
+                mission.robot_id,
+                "POC_SAFETY_STOP",
+                {},
+                lambda robot_id, _payload: self._fleet.stop(robot_id),
+            )
 
     def _assign_next_operation(
         self,
@@ -259,7 +456,7 @@ class OrchestratorService:
         command_type: str,
         payload: dict[str, Any],
         send: Any,
-    ) -> None:
+    ) -> Any:
         command = self._store.enqueue_command(
             operation_id=operation_id,
             robot_id=robot_id,
@@ -267,7 +464,7 @@ class OrchestratorService:
             payload=payload,
         )
         if command.status != "PENDING":
-            return
+            return command
         try:
             send(robot_id, payload)
         except TimeoutError as error:
@@ -276,6 +473,7 @@ class OrchestratorService:
             self._store.mark_command_failed(command.command_id, str(error))
         else:
             self._store.mark_command_sent(command.command_id)
+        return command
 
 
 def _zone_by_id(zones: list[dict[str, Any]], zone_id: str) -> dict[str, Any]:
@@ -283,3 +481,18 @@ def _zone_by_id(zones: list[dict[str, Any]], zone_id: str) -> dict[str, Any]:
         if str(zone["zone_id"]).lower() == zone_id.lower():
             return zone
     raise ValueError(f"configured zone disappeared: {zone_id}")
+
+
+def _poc_vehicle_report_matches(
+    vehicle: dict[str, Any],
+    mission: Pallet3Mission,
+    *,
+    source: str,
+    detail: str,
+) -> bool:
+    return (
+        str(vehicle.get("state")) == "WAIT"
+        and str(vehicle.get("operation_id")) == mission.mission_id
+        and str(vehicle.get("source")) == source
+        and str(vehicle.get("detail")) == detail
+    )

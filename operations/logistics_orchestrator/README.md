@@ -49,6 +49,9 @@ GET  /api/v1/status
 POST /api/v1/reconcile
 POST /api/v1/events/fleet
 POST /api/v1/events/inventory
+POST /api/v1/poc/pallet-3-missions
+GET  /api/v1/poc/pallet-3-missions/{mission_id}
+POST /api/v1/poc/pallet-3-missions/{mission_id}/unload-confirmation
 ```
 
 `/healthz`는 Docker readiness용입니다. `/api/v1/status`는 inbox, command outbox,
@@ -93,3 +96,41 @@ PICK 완료는 Inventory `pick-completions`를 `{operation_id}:pick` 키로 한 
 
 차량 명령 HTTP timeout은 수락 여부를 알 수 없으므로 `DELIVERY_UNKNOWN`으로 남기고
 즉시 재전송하지 않습니다. 다음 실제 차량 보고나 수동 recovery가 있어야만 진행합니다.
+
+## Pallet 3 POC
+
+이 POC는 `dock_1`에서 물류를 이미 Pick한 뒤, 차량이 `WAIT`인 시점에만 시작합니다.
+Pick/Fork up과 Inventory 완료 처리는 자동으로 수행하지 않습니다. 활성 POC 차량은 일반
+재고 자동 배차에서 제외됩니다.
+
+```bash
+curl --fail-with-body -X POST http://127.0.0.1:8083/api/v1/poc/pallet-3-missions \
+  -H 'Content-Type: application/json' \
+  -d '{"robot_id":"robot_1"}'
+```
+
+응답의 `mission_id`로 상태를 조회합니다. 동일 차량에 활성 POC가 있으면 같은 미션을
+반환하므로 시작 요청을 재전송해도 Nav2 명령을 중복 발행하지 않습니다.
+
+```bash
+curl --fail-with-body http://127.0.0.1:8083/api/v1/poc/pallet-3-missions/{mission_id}
+curl --fail-with-body -X POST \
+  http://127.0.0.1:8083/api/v1/poc/pallet-3-missions/{mission_id}/unload-confirmation
+```
+
+미션은 아래 순서를 강제합니다.
+
+```text
+FOLLOW_WAYPOINTS(dock_1 → pallet_3)
+  → AWAIT_UNLOAD_CONFIRMATION
+  → fork DOWN
+  → /fork/state DOWN_COMPLETE
+  → cmd_vel(-0.18 m/s, 1000 ms) 및 정지 확인
+  → FOLLOW_WAYPOINTS(pallet_3 → dock_1)
+```
+
+출발 waypoint는 `(-0.440,-0.900) → (-0.420,-2.000) → (-0.420,-2.400)`이고,
+복귀 waypoint는 `(-0.420,-2.000) → (-0.440,-0.900) → (0.085,-0.905)`입니다.
+`DOWN_COMPLETE`와 후진 정지 보고는 모두 같은 `mission_id`여야 합니다. Fork 오류·타임아,
+Nav2 실패 또는 명령 전달 실패는 미션을 `FAILED`로 기록하고 Fleet Manager 경유 즉시 정지를
+요청합니다.

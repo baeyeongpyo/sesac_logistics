@@ -112,6 +112,24 @@ class FakeFleet:
             raise TimeoutError("timed out")
         self.commands.append(("auto_dock", robot_id, payload))
 
+    def navigate_waypoints(self, robot_id: str, payload: dict) -> None:
+        if self.timeout:
+            raise TimeoutError("timed out")
+        self.commands.append(("navigate_waypoints", robot_id, payload))
+
+    def fork_down(self, robot_id: str, payload: dict) -> None:
+        if self.timeout:
+            raise TimeoutError("timed out")
+        self.commands.append(("fork_down", robot_id, payload))
+
+    def command_velocity(self, robot_id: str, payload: dict) -> None:
+        if self.timeout:
+            raise TimeoutError("timed out")
+        self.commands.append(("command_velocity", robot_id, payload))
+
+    def stop(self, robot_id: str) -> None:
+        self.commands.append(("stop", robot_id, {}))
+
 
 class OrchestratorServiceTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -208,6 +226,135 @@ class OrchestratorServiceTest(unittest.TestCase):
 
         self.assertEqual(fleet.commands, [])
         self.assertEqual(self.store.status()["command_counts"], {"DELIVERY_UNKNOWN": 1})
+
+    def test_pallet3_mission_runs_waypoints_then_confirmed_unload_reverse_and_return(self) -> None:
+        inventory = FakeInventory(stocks=[], active_operations=[])
+        vehicle = {"robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"}
+        fleet = FakeFleet([vehicle])
+        service = OrchestratorService(self.store, inventory, fleet)
+
+        mission = service.start_pallet3_mission("robot_1")
+
+        self.assertEqual(mission.phase, "OUTBOUND_SENT")
+        self.assertEqual(fleet.commands[0][0:2], ("navigate_waypoints", "robot_1"))
+        self.assertEqual(
+            fleet.commands[0][2]["waypoints"],
+            [
+                {"frame_id": "map", "x": -0.44, "y": -0.9, "yaw": 0.0},
+                {"frame_id": "map", "x": -0.42, "y": -2.0, "yaw": -1.5707963267948966},
+                {"frame_id": "map", "x": -0.42, "y": -2.4, "yaw": -1.5707963267948966},
+            ],
+        )
+
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1", "state": "WAIT", "operation_id": mission.mission_id,
+            "source": "NAV2", "detail": "NAVIGATION_SUCCEEDED",
+        }
+        service.reconcile()
+        arrived = self.store.get_pallet3_mission(mission.mission_id)
+        self.assertEqual(arrived.phase, "AWAIT_UNLOAD_CONFIRMATION")
+        self.assertEqual(len(fleet.commands), 1)
+
+        after_confirmation = service.confirm_pallet3_unload(mission.mission_id)
+        self.assertEqual(after_confirmation.phase, "FORK_DOWN_SENT")
+        self.assertEqual(fleet.commands[-1], (
+            "fork_down", "robot_1", {"operation_id": mission.mission_id},
+        ))
+
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1", "state": "WAIT", "operation_id": mission.mission_id,
+            "source": "FORK", "detail": "FORK_DOWN_COMPLETE",
+        }
+        service.reconcile()
+        self.assertEqual(fleet.commands[-1], (
+            "command_velocity", "robot_1", {
+                "operation_id": mission.mission_id,
+                "linear_x": -0.18, "linear_y": 0.0, "angular_z": 0.0, "hold_ms": 1000,
+            },
+        ))
+
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1", "state": "WAIT", "operation_id": mission.mission_id,
+            "source": "API", "detail": "MANUAL_COMMAND_EXPIRED",
+        }
+        service.reconcile()
+        self.assertEqual(fleet.commands[-1][0:2], ("navigate_waypoints", "robot_1"))
+        self.assertEqual(
+            fleet.commands[-1][2]["waypoints"][-1],
+            {"frame_id": "map", "x": 0.085, "y": -0.905, "yaw": 0.0},
+        )
+
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1", "state": "WAIT", "operation_id": mission.mission_id,
+            "source": "NAV2", "detail": "NAVIGATION_SUCCEEDED",
+        }
+        service.reconcile()
+
+        self.assertEqual(self.store.get_pallet3_mission(mission.mission_id).phase, "COMPLETED")
+        self.assertEqual(inventory.pick_completion_keys, [])
+        self.assertEqual(inventory.place_completion_keys, [])
+
+    def test_pallet3_mission_requires_arrival_confirmation_and_ignores_stale_fork_event(self) -> None:
+        inventory = FakeInventory(stocks=[_stock("docker", "FRESH", 1)], active_operations=[])
+        fleet = FakeFleet([{"robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"}])
+        service = OrchestratorService(self.store, inventory, fleet)
+        mission = service.start_pallet3_mission("robot_1")
+
+        service.reconcile()
+
+        with self.assertRaisesRegex(ValueError, "unload confirmation"):
+            service.confirm_pallet3_unload(mission.mission_id)
+        self.assertEqual([command[0] for command in fleet.commands], ["navigate_waypoints"])
+
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1", "state": "WAIT", "operation_id": mission.mission_id,
+            "source": "NAV2", "detail": "NAVIGATION_SUCCEEDED",
+        }
+        service.reconcile()
+        service.confirm_pallet3_unload(mission.mission_id)
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1", "state": "WAIT", "operation_id": "other-operation",
+            "source": "FORK", "detail": "FORK_DOWN_COMPLETE",
+        }
+        service.reconcile()
+
+        self.assertEqual(self.store.get_pallet3_mission(mission.mission_id).phase, "FORK_DOWN_SENT")
+        self.assertEqual([command[0] for command in fleet.commands], ["navigate_waypoints", "fork_down"])
+
+    def test_pallet3_command_delivery_timeout_fails_and_requests_stop(self) -> None:
+        inventory = FakeInventory(stocks=[], active_operations=[])
+        fleet = FakeFleet(
+            [{"robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"}],
+            timeout=True,
+        )
+
+        mission = OrchestratorService(self.store, inventory, fleet).start_pallet3_mission("robot_1")
+
+        self.assertEqual(mission.phase, "FAILED")
+        self.assertIn("POC_OUTBOUND_WAYPOINTS", mission.failure_detail)
+        self.assertEqual(fleet.commands, [("stop", "robot_1", {})])
+
+    def test_pallet3_mission_fails_and_stops_on_fork_failure(self) -> None:
+        inventory = FakeInventory(stocks=[], active_operations=[])
+        fleet = FakeFleet([{"robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"}])
+        service = OrchestratorService(self.store, inventory, fleet)
+        mission = service.start_pallet3_mission("robot_1")
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1", "state": "WAIT", "operation_id": mission.mission_id,
+            "source": "NAV2", "detail": "NAVIGATION_SUCCEEDED",
+        }
+        service.reconcile()
+        service.confirm_pallet3_unload(mission.mission_id)
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1", "state": "FAIL", "operation_id": mission.mission_id,
+            "source": "FORK", "detail": "FORK_DOWN_TIMEOUT",
+        }
+        service.reconcile()
+
+        failed = self.store.get_pallet3_mission(mission.mission_id)
+        self.assertEqual(failed.phase, "FAILED")
+        self.assertEqual(failed.failure_detail, "FORK_DOWN_TIMEOUT")
+        self.assertEqual(fleet.commands[-1], ("stop", "robot_1", {}))
 
 
 if __name__ == "__main__":

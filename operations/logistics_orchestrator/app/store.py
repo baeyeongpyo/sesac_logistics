@@ -7,7 +7,7 @@ import sqlite3
 import threading
 from uuid import uuid4
 
-from .models import CommandRecord, EventEnvelope, OperationStep
+from .models import CommandRecord, EventEnvelope, OperationStep, Pallet3Mission
 
 
 class OrchestratorStore:
@@ -67,6 +67,19 @@ class OrchestratorStore:
                     robot_id TEXT NOT NULL,
                     marked_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS pallet3_poc_missions (
+                    mission_id TEXT PRIMARY KEY,
+                    robot_id TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    failure_detail TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    unload_confirmed_at TEXT,
+                    completed_at TEXT
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS pallet3_poc_active_robot
+                    ON pallet3_poc_missions (robot_id)
+                    WHERE phase NOT IN ('COMPLETED', 'FAILED');
                 """
             )
 
@@ -219,6 +232,128 @@ class OrchestratorStore:
                 "DELETE FROM operation_recoveries WHERE operation_id = ?", (operation_id,)
             )
 
+    def create_or_get_pallet3_mission(self, robot_id: str) -> tuple[Pallet3Mission, bool]:
+        timestamp = _format_time(_now())
+        with self._lock, self._connection:
+            active = self._connection.execute(
+                """
+                SELECT * FROM pallet3_poc_missions
+                WHERE robot_id = ? AND phase NOT IN ('COMPLETED', 'FAILED')
+                """,
+                (robot_id,),
+            ).fetchone()
+            if active is not None:
+                return _pallet3_mission_from_row(active), False
+            mission_id = str(uuid4())
+            self._connection.execute(
+                """
+                INSERT INTO pallet3_poc_missions (
+                    mission_id, robot_id, phase, failure_detail, created_at, updated_at,
+                    unload_confirmed_at, completed_at
+                ) VALUES (?, ?, 'OUTBOUND_SENT', NULL, ?, ?, NULL, NULL)
+                """,
+                (mission_id, robot_id, timestamp, timestamp),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM pallet3_poc_missions WHERE mission_id = ?", (mission_id,)
+            ).fetchone()
+        return _pallet3_mission_from_row(row), True
+
+    def get_pallet3_mission(self, mission_id: str) -> Pallet3Mission | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM pallet3_poc_missions WHERE mission_id = ?", (mission_id,)
+            ).fetchone()
+        return _pallet3_mission_from_row(row) if row is not None else None
+
+    def list_active_pallet3_missions(self) -> list[Pallet3Mission]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT * FROM pallet3_poc_missions
+                WHERE phase NOT IN ('COMPLETED', 'FAILED')
+                ORDER BY created_at
+                """
+            ).fetchall()
+        return [_pallet3_mission_from_row(row) for row in rows]
+
+    def confirm_pallet3_unload(
+        self, mission_id: str
+    ) -> tuple[Pallet3Mission | None, bool]:
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT * FROM pallet3_poc_missions WHERE mission_id = ?", (mission_id,)
+            ).fetchone()
+            if row is None:
+                return None, False
+            mission = _pallet3_mission_from_row(row)
+            if mission.phase != "AWAIT_UNLOAD_CONFIRMATION":
+                return mission, False
+            timestamp = _format_time(_now())
+            self._connection.execute(
+                """
+                UPDATE pallet3_poc_missions
+                SET phase = 'FORK_DOWN_SENT', unload_confirmed_at = ?, updated_at = ?
+                WHERE mission_id = ? AND phase = 'AWAIT_UNLOAD_CONFIRMATION'
+                """,
+                (timestamp, timestamp, mission_id),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM pallet3_poc_missions WHERE mission_id = ?", (mission_id,)
+            ).fetchone()
+        return _pallet3_mission_from_row(row), True
+
+    def transition_pallet3_mission(
+        self, mission_id: str, expected_phase: str, phase: str
+    ) -> tuple[Pallet3Mission | None, bool]:
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT * FROM pallet3_poc_missions WHERE mission_id = ?", (mission_id,)
+            ).fetchone()
+            if row is None:
+                return None, False
+            mission = _pallet3_mission_from_row(row)
+            if mission.phase != expected_phase:
+                return mission, False
+            timestamp = _format_time(_now())
+            completed_at = timestamp if phase == "COMPLETED" else None
+            self._connection.execute(
+                """
+                UPDATE pallet3_poc_missions
+                SET phase = ?, updated_at = ?, completed_at = COALESCE(?, completed_at)
+                WHERE mission_id = ? AND phase = ?
+                """,
+                (phase, timestamp, completed_at, mission_id, expected_phase),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM pallet3_poc_missions WHERE mission_id = ?", (mission_id,)
+            ).fetchone()
+        return _pallet3_mission_from_row(row), True
+
+    def fail_pallet3_mission(self, mission_id: str, detail: str) -> Pallet3Mission | None:
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT * FROM pallet3_poc_missions WHERE mission_id = ?", (mission_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            mission = _pallet3_mission_from_row(row)
+            if mission.phase in {"COMPLETED", "FAILED"}:
+                return mission
+            timestamp = _format_time(_now())
+            self._connection.execute(
+                """
+                UPDATE pallet3_poc_missions
+                SET phase = 'FAILED', failure_detail = ?, updated_at = ?
+                WHERE mission_id = ?
+                """,
+                (detail[:1000], timestamp, mission_id),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM pallet3_poc_missions WHERE mission_id = ?", (mission_id,)
+            ).fetchone()
+        return _pallet3_mission_from_row(row)
+
     def get_command(self, command_id: str) -> CommandRecord | None:
         with self._lock:
             row = self._connection.execute(
@@ -292,11 +427,15 @@ class OrchestratorStore:
             error_rows = self._connection.execute(
                 "SELECT error_key, message, updated_at FROM orchestrator_errors ORDER BY error_key"
             ).fetchall()
+            poc_rows = self._connection.execute(
+                "SELECT phase, COUNT(*) AS count FROM pallet3_poc_missions GROUP BY phase"
+            ).fetchall()
         return {
             "inbox_event_count": inbox_event_count,
             "step_count": step_count,
             "command_counts": {row["status"]: row["count"] for row in command_rows},
             "errors": [dict(row) for row in error_rows],
+            "pallet3_mission_counts": {row["phase"]: row["count"] for row in poc_rows},
         }
 
 
@@ -323,6 +462,19 @@ def _step_from_row(row: sqlite3.Row) -> OperationStep:
         destination_zone_id=row["destination_zone_id"],
         payload_type=row["payload_type"],
         updated_at=row["updated_at"],
+    )
+
+
+def _pallet3_mission_from_row(row: sqlite3.Row) -> Pallet3Mission:
+    return Pallet3Mission(
+        mission_id=row["mission_id"],
+        robot_id=row["robot_id"],
+        phase=row["phase"],
+        failure_detail=row["failure_detail"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        unload_confirmed_at=row["unload_confirmed_at"],
+        completed_at=row["completed_at"],
     )
 
 

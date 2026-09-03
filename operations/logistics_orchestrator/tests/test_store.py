@@ -45,6 +45,40 @@ class OrchestratorStoreTest(unittest.TestCase):
         self.assertEqual(saved.status, "DELIVERY_UNKNOWN")
         self.assertEqual(saved.last_error, "request timeout")
 
+    def test_pallet3_mission_is_idempotent_per_active_robot_and_persists_confirmation(self) -> None:
+        mission, created = self.store.create_or_get_pallet3_mission("robot_1")
+        repeated, repeated_created = self.store.create_or_get_pallet3_mission("robot_1")
+
+        self.assertTrue(created)
+        self.assertFalse(repeated_created)
+        self.assertEqual(repeated.mission_id, mission.mission_id)
+        arrived, transitioned = self.store.transition_pallet3_mission(
+            mission.mission_id,
+            "OUTBOUND_SENT",
+            "AWAIT_UNLOAD_CONFIRMATION",
+        )
+        confirmed, confirmation_transitioned = self.store.confirm_pallet3_unload(
+            mission.mission_id
+        )
+        confirmation_replay, replay_transitioned = self.store.confirm_pallet3_unload(
+            mission.mission_id
+        )
+
+        self.assertTrue(transitioned)
+        self.assertEqual(arrived.phase, "AWAIT_UNLOAD_CONFIRMATION")
+        self.assertTrue(confirmation_transitioned)
+        self.assertEqual(confirmed.phase, "FORK_DOWN_SENT")
+        self.assertIsNotNone(confirmed.unload_confirmed_at)
+        self.assertFalse(replay_transitioned)
+        self.assertEqual(confirmation_replay.phase, "FORK_DOWN_SENT")
+
+        self.store.close()
+        self.store = OrchestratorStore(self.database_path)
+
+        restored = self.store.get_pallet3_mission(mission.mission_id)
+        self.assertEqual(restored.phase, "FORK_DOWN_SENT")
+        self.assertIsNotNone(restored.unload_confirmed_at)
+
 
 if __name__ == "__main__":
     unittest.main()

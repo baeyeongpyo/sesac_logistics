@@ -4,9 +4,9 @@ from contextlib import asynccontextmanager
 import os
 from typing import Any, Callable
 
-from fastapi import FastAPI, Request, Response, status
+from fastapi import FastAPI, HTTPException, Request, Response, status
 
-from .models import EventEnvelope
+from .models import EventEnvelope, Pallet3Mission, Pallet3MissionRequest
 from .store import OrchestratorStore
 
 
@@ -45,6 +45,56 @@ def create_app(
         return {"accepted": True}
 
     @app.post(
+        "/api/v1/poc/pallet-3-missions",
+        response_model=Pallet3Mission,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def start_pallet3_mission(
+        body: Pallet3MissionRequest, request: Request
+    ) -> Pallet3Mission:
+        service = _require_service(request)
+        try:
+            return service.start_pallet3_mission(body.robot_id)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+            ) from error
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail=str(error)
+            ) from error
+
+    @app.get(
+        "/api/v1/poc/pallet-3-missions/{mission_id}",
+        response_model=Pallet3Mission,
+    )
+    def get_pallet3_mission(mission_id: str, request: Request) -> Pallet3Mission:
+        mission = _store(request).get_pallet3_mission(mission_id)
+        if mission is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"unknown pallet 3 mission: {mission_id}",
+            )
+        return mission
+
+    @app.post(
+        "/api/v1/poc/pallet-3-missions/{mission_id}/unload-confirmation",
+        response_model=Pallet3Mission,
+    )
+    def confirm_pallet3_unload(mission_id: str, request: Request) -> Pallet3Mission:
+        service = _require_service(request)
+        try:
+            return service.confirm_pallet3_unload(mission_id)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=str(error)
+            ) from error
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail=str(error)
+            ) from error
+
+    @app.post(
         "/api/v1/events/fleet",
         status_code=status.HTTP_204_NO_CONTENT,
         response_class=Response,
@@ -70,6 +120,16 @@ def _record_event(source: str, event: EventEnvelope, request: Request) -> None:
         service = request.app.state.service
         if service is not None:
             service.handle_recorded_event(source, event)
+
+
+def _require_service(request: Request) -> Any:
+    service = request.app.state.service
+    if service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="orchestrator service is unavailable",
+        )
+    return service
 
 
 def _runtime_service_factory(store: OrchestratorStore) -> Any:
