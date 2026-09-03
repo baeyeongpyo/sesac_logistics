@@ -351,6 +351,16 @@ class VehicleCommandService:
         if not isinstance(error, str):
             error = 'INVALID_FORK_STATE'
         if state == f'{command}_COMPLETE' and not error:
+            with self._lock:
+                if (
+                    self._status['operation_id'] == operation_id
+                    and self._status['state'] == 'PICK_COMPLETE'
+                    and command == 'DOWN'
+                ):
+                    self._complete_to_idle(
+                        'FORK_DOWN_COMPLETE',
+                        'PICK_COMPLETE',
+                    )
             self._report_fork_state(operation_id, f'FORK_{command}_COMPLETE', False)
             return
         detail = f'FORK_{command}_ERROR'

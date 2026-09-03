@@ -717,6 +717,30 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         self.assertEqual(self.status_reporter.reports[-1]['source'], 'FORK')
         self.assertEqual(self.status_reporter.reports[-1]['detail'], 'FORK_DOWN_COMPLETE')
 
+    def test_poc_fork_down_completion_releases_the_completed_auto_dock_pick(self):
+        """The pallet POC must not retain the old PICK operation after unloading."""
+        self.mark_idle()
+        self.auto_dock_command('PICK')
+        self.service.on_auto_dock_drive_ready()
+        self.status_reporter.reports.clear()
+
+        post_json(
+            f'{self.base_url}/v1/fork/down',
+            {'operation_id': INVENTORY_OPERATION_ID},
+        )
+        self.service.on_fork_state('{"state":"DOWN_COMPLETE","error":""}')
+
+        self.assertEqual(self.service.operation_status(), {
+            'operation_id': None,
+            'previous_operation_id': INVENTORY_OPERATION_ID,
+            'state': 'IDLE',
+            'previous_state': 'PICK_COMPLETE',
+            'detail': 'FORK_DOWN_COMPLETE',
+        })
+        self.assertEqual(self.status_reporter.reports[-1]['state'], 'WAIT')
+        self.assertEqual(self.status_reporter.reports[-1]['operation_id'], INVENTORY_OPERATION_ID)
+        self.assertEqual(self.status_reporter.reports[-1]['detail'], 'FORK_DOWN_COMPLETE')
+
     def test_fork_down_error_fails_the_pending_poc_mission(self):
         """An error must never be treated as the down-complete gate for reverse."""
         post_json(

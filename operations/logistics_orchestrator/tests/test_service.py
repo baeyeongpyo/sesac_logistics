@@ -229,13 +229,18 @@ class OrchestratorServiceTest(unittest.TestCase):
 
     def test_pallet3_mission_runs_waypoints_then_confirmed_unload_reverse_and_return(self) -> None:
         inventory = FakeInventory(stocks=[], active_operations=[])
-        vehicle = {"robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"}
+        vehicle = {
+            "robot_id": "robot_1", "state": "WAIT",
+            "operation_id": "73d5b9af-5a12-4f34-a96c-5de116df1e8e",
+            "source": "AUTO_DOCK", "detail": "AUTO_DOCK_PICK_COMPLETED",
+        }
         fleet = FakeFleet([vehicle])
         service = OrchestratorService(self.store, inventory, fleet)
 
         mission = service.start_pallet3_mission("robot_1")
 
         self.assertEqual(mission.phase, "OUTBOUND_SENT")
+        self.assertEqual(mission.mission_id, vehicle["operation_id"])
         self.assertEqual(fleet.commands[0][0:2], ("navigate_waypoints", "robot_1"))
         self.assertEqual(
             fleet.commands[0][2]["waypoints"],
@@ -296,7 +301,11 @@ class OrchestratorServiceTest(unittest.TestCase):
 
     def test_pallet3_mission_requires_arrival_confirmation_and_ignores_stale_fork_event(self) -> None:
         inventory = FakeInventory(stocks=[_stock("docker", "FRESH", 1)], active_operations=[])
-        fleet = FakeFleet([{"robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"}])
+        fleet = FakeFleet([{
+            "robot_id": "robot_1", "state": "WAIT",
+            "operation_id": "73d5b9af-5a12-4f34-a96c-5de116df1e8e",
+            "source": "AUTO_DOCK", "detail": "AUTO_DOCK_PICK_COMPLETED",
+        }])
         service = OrchestratorService(self.store, inventory, fleet)
         mission = service.start_pallet3_mission("robot_1")
 
@@ -324,7 +333,11 @@ class OrchestratorServiceTest(unittest.TestCase):
     def test_pallet3_command_delivery_timeout_fails_and_requests_stop(self) -> None:
         inventory = FakeInventory(stocks=[], active_operations=[])
         fleet = FakeFleet(
-            [{"robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"}],
+            [{
+                "robot_id": "robot_1", "state": "WAIT",
+                "operation_id": "73d5b9af-5a12-4f34-a96c-5de116df1e8e",
+                "source": "AUTO_DOCK", "detail": "AUTO_DOCK_PICK_COMPLETED",
+            }],
             timeout=True,
         )
 
@@ -336,7 +349,11 @@ class OrchestratorServiceTest(unittest.TestCase):
 
     def test_pallet3_mission_fails_and_stops_on_fork_failure(self) -> None:
         inventory = FakeInventory(stocks=[], active_operations=[])
-        fleet = FakeFleet([{"robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"}])
+        fleet = FakeFleet([{
+            "robot_id": "robot_1", "state": "WAIT",
+            "operation_id": "73d5b9af-5a12-4f34-a96c-5de116df1e8e",
+            "source": "AUTO_DOCK", "detail": "AUTO_DOCK_PICK_COMPLETED",
+        }])
         service = OrchestratorService(self.store, inventory, fleet)
         mission = service.start_pallet3_mission("robot_1")
         fleet.vehicles[0] = {

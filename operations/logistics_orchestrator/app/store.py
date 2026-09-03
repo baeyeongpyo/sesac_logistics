@@ -232,7 +232,9 @@ class OrchestratorStore:
                 "DELETE FROM operation_recoveries WHERE operation_id = ?", (operation_id,)
             )
 
-    def create_or_get_pallet3_mission(self, robot_id: str) -> tuple[Pallet3Mission, bool]:
+    def create_or_get_pallet3_mission(
+        self, robot_id: str, mission_id: str | None = None
+    ) -> tuple[Pallet3Mission, bool]:
         timestamp = _format_time(_now())
         with self._lock, self._connection:
             active = self._connection.execute(
@@ -244,7 +246,7 @@ class OrchestratorStore:
             ).fetchone()
             if active is not None:
                 return _pallet3_mission_from_row(active), False
-            mission_id = str(uuid4())
+            mission_id = mission_id or str(uuid4())
             self._connection.execute(
                 """
                 INSERT INTO pallet3_poc_missions (

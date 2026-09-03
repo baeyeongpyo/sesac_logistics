@@ -277,6 +277,16 @@ Auto Dock의 `READY` status는 완료가 아니다. fork, 후진, 준비 자세�
 `/{robot_id}/auto_dock/drive_ready`만 `PICK_COMPLETE` 또는 `PLACE_COMPLETE`으로
 판정한다. `PLACE_COMPLETE` 뒤에는 자동으로 `IDLE` snapshot으로 전환한다.
 
+POC에서 Auto Dock PICK 완료를 가상으로 확인해야 할 때는, PICK 명령이 이미 `PICKING` 상태로
+수락된 뒤에만 아래처럼 `std_msgs/msg/Empty`를 한 번 발행한다.
+
+```bash
+ros2 topic pub --once /robot_1/auto_dock/drive_ready std_msgs/msg/Empty "{}"
+```
+
+Pallet 3 POC의 `DOWN_COMPLETE`는 기존 PICK operation ID를 유지한 채 적재 상태를 `IDLE`로
+해제한다. 따라서 이후 1초 후진과 dock_1 복귀를 같은 작업 ID로 추적할 수 있다.
+
 ### 차량 상태 조회
 
 ```bash

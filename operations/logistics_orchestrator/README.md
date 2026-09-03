@@ -99,9 +99,20 @@ PICK 완료는 Inventory `pick-completions`를 `{operation_id}:pick` 키로 한 
 
 ## Pallet 3 POC
 
-이 POC는 `dock_1`에서 물류를 이미 Pick한 뒤, 차량이 `WAIT`인 시점에만 시작합니다.
-Pick/Fork up과 Inventory 완료 처리는 자동으로 수행하지 않습니다. 활성 POC 차량은 일반
-재고 자동 배차에서 제외됩니다.
+이 POC는 `dock_1`의 Auto Dock PICK가 `AUTO_DOCK_PICK_COMPLETED`를 보고한 뒤에만
+시작합니다. POC는 그 PICK의 `operation_id`를 그대로 사용하므로 차량의 적재 상태와
+Nav2·fork 상태를 같은 작업으로 연결합니다. Pick/Fork up과 Inventory 완료 처리는 자동으로
+수행하지 않습니다. 활성 POC 차량은 일반 재고 자동 배차에서 제외됩니다.
+
+하드웨어 없이 PICK 완료를 검증할 때에는, 먼저 실제 Auto Dock PICK 명령이 `PICKING` 상태로
+수락된 것을 확인한 뒤 차량 ROS 환경에서 다음 `std_msgs/msg/Empty` 한 건을 발행할 수 있습니다.
+
+```bash
+ros2 topic pub --once /robot_1/auto_dock/drive_ready std_msgs/msg/Empty "{}"
+```
+
+기본 topic 이름은 `/{robot_id}/auto_dock/drive_ready`입니다. Auto Dock PICK가 활성화되지 않은
+상태의 publish는 차량 API가 무시합니다.
 
 ```bash
 curl --fail-with-body -X POST http://127.0.0.1:8083/api/v1/poc/pallet-3-missions \

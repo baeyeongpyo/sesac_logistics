@@ -79,10 +79,23 @@ class OrchestratorService:
         )
         if vehicle is None:
             raise KeyError(f"unknown vehicle: {robot_id}")
-        if str(vehicle.get("state")) != "WAIT":
-            raise Pallet3MissionConflictError("vehicle must be WAIT after dock pickup")
+        if (
+            str(vehicle.get("state")) != "WAIT"
+            or str(vehicle.get("source")) != "AUTO_DOCK"
+            or str(vehicle.get("detail")) != "AUTO_DOCK_PICK_COMPLETED"
+        ):
+            raise Pallet3MissionConflictError(
+                "vehicle must report AUTO_DOCK_PICK_COMPLETED before the pallet 3 POC"
+            )
+        pick_operation_id = str(vehicle.get("operation_id") or "").strip()
+        if not pick_operation_id:
+            raise Pallet3MissionConflictError(
+                "AUTO_DOCK_PICK_COMPLETED must include the pickup operation_id"
+            )
         self._store.clear_error("pallet3_vehicle_snapshot")
-        mission, created = self._store.create_or_get_pallet3_mission(robot_id)
+        mission, created = self._store.create_or_get_pallet3_mission(
+            robot_id, pick_operation_id
+        )
         if created:
             self._deliver_pallet3_command(
                 mission,
