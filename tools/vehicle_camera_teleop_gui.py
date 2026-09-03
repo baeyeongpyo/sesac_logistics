@@ -15,16 +15,13 @@ import time
 import urllib.request
 from pathlib import Path
 
-# Select the vehicle DDS domain before rclpy is imported.
+# The server routes vehicles; use the default DDS domain without per-vehicle IDs.
 _bootstrap_parser = argparse.ArgumentParser(add_help=False)
 _bootstrap_parser.add_argument("--vehicle", type=int, choices=(1, 2))
 _bootstrap_parser.add_argument("--ros-domain-id", type=int, default=None)
 _bootstrap_args, _ = _bootstrap_parser.parse_known_args()
-_bootstrap_domain = _bootstrap_args.ros_domain_id
-if _bootstrap_domain is None and _bootstrap_args.vehicle in (1, 2):
-    _bootstrap_domain = 214 + _bootstrap_args.vehicle
-if _bootstrap_domain is not None:
-    os.environ["ROS_DOMAIN_ID"] = str(_bootstrap_domain)
+_bootstrap_domain = None
+os.environ.pop("ROS_DOMAIN_ID", None)
 
 # The vehicle container defaults to the POSIX locale, which makes Qt render
 # Korean UI text and notes incorrectly even though metadata is written as UTF-8.
@@ -51,8 +48,7 @@ if not os.environ.get("VEHICLE_GUI_ROS_READY"):
             setup_commands.append(f"source {shlex.quote(str(workspace_setup))}")
         environment = os.environ.copy()
         environment["VEHICLE_GUI_ROS_READY"] = "1"
-        if _bootstrap_domain is not None:
-            environment["ROS_DOMAIN_ID"] = str(_bootstrap_domain)
+        environment.pop("ROS_DOMAIN_ID", None)
         # Conda's Python and libstdc++ are incompatible with the system ROS 2
         # extension modules.  Prefer the OS Python whenever the GUI is started
         # from an activated Conda shell.
@@ -470,17 +466,16 @@ class DevControlClientNode(Node):
         )
         self.fork_state = {"state": "UNKNOWN", "error": ""}
         self.drive_ready_count = 0
-        robot_namespace = f"/robot_{args.vehicle}"
         self.fork_state_sub = self.create_subscription(
             String,
-            getattr(args, "fork_state_topic", f"{robot_namespace}/fork/state"),
+            getattr(args, "fork_state_topic", "/fork/state"),
             self.on_fork_state, 10,
         )
         self.drive_ready_sub = self.create_subscription(
             Empty,
             getattr(
                 args, "drive_ready_topic",
-                f"{robot_namespace}/auto_dock/drive_ready",
+                "/auto_dock/drive_ready",
             ),
             self.on_drive_ready, 10,
         )
@@ -6167,7 +6162,6 @@ class TeleopWindow(QMainWindow):
         self.replacement_command = [
             sys.executable, str(target),
             "--vehicle", str(self.args.vehicle),
-            "--ros-domain-id", str(self.args.ros_domain_id),
             "--config", str(self.args.pose_config),
             "--image-topic", str(self.args.tape_image_topic),
         ]
@@ -6239,9 +6233,8 @@ def main():
     parser.add_argument("--http-viewer-only", action="store_true")
     args = parser.parse_args()
     explicit_image_topic = bool(args.image_topic)
-    robot_namespace = f"/robot_{args.vehicle}"
     if not args.image_topic:
-        args.image_topic = f"{robot_namespace}/ascamera/camera_publisher/rgb0/image"
+        args.image_topic = "/ascamera/camera_publisher/rgb0/image"
     if not args.scan_topic:
         args.scan_topic = "/scan_raw"
     if not args.odom_topic:
@@ -6251,27 +6244,27 @@ def main():
     if not args.battery_topic:
         args.battery_topic = "/ros_robot_controller/battery"
     if not args.detection_topic:
-        args.detection_topic = f"{robot_namespace}/symbol_seg/detections"
+        args.detection_topic = "/symbol_seg/detections"
     if not args.cmd_vel_topic:
         args.cmd_vel_topic = "/controller/cmd_vel"
     if not args.fork_command_topic:
         args.fork_command_topic = "/fork/command"
     if not args.arrival_topic:
-        args.arrival_topic = f"{robot_namespace}/nav2/arrival"
+        args.arrival_topic = "/nav2/arrival"
     if not args.auto_dock_stop_topic:
-        args.auto_dock_stop_topic = f"{robot_namespace}/auto_dock/stop"
+        args.auto_dock_stop_topic = "/auto_dock/stop"
     if not args.auto_dock_status_topic:
-        args.auto_dock_status_topic = f"{robot_namespace}/auto_dock/status"
+        args.auto_dock_status_topic = "/auto_dock/status"
     if not args.dock_inventory_topic:
-        args.dock_inventory_topic = f"{robot_namespace}/dock/inventory"
+        args.dock_inventory_topic = "/dock/inventory"
     if not args.dock_inventory_reset_topic:
-        args.dock_inventory_reset_topic = f"{robot_namespace}/dock/inventory/reset"
+        args.dock_inventory_reset_topic = "/dock/inventory/reset"
     if not args.fork_state_topic:
-        args.fork_state_topic = f"{robot_namespace}/fork/state"
+        args.fork_state_topic = "/fork/state"
     if not args.drive_ready_topic:
-        args.drive_ready_topic = f"{robot_namespace}/auto_dock/drive_ready"
+        args.drive_ready_topic = "/auto_dock/drive_ready"
     if not args.entity_map_topic:
-        args.entity_map_topic = f"{robot_namespace}/tag_entity_map"
+        args.entity_map_topic = "/tag_entity_map"
     if args.secondary_image_topic and (args.secondary_video_url or args.webcam_1_video_url):
         parser.error("use only one of --secondary-image-topic and --secondary-video-url")
     if args.secondary_video_url and args.webcam_1_video_url:
@@ -6319,10 +6312,8 @@ def main():
     if args.disable_external_webcams is None:
         args.disable_external_webcams = True
 
-    args.ros_domain_id = (
-        214 + args.vehicle if args.ros_domain_id is None else args.ros_domain_id
-    )
-    os.environ["ROS_DOMAIN_ID"] = str(args.ros_domain_id)
+    args.ros_domain_id = None
+    os.environ.pop("ROS_DOMAIN_ID", None)
     os.environ["RMW_IMPLEMENTATION"] = "rmw_fastrtps_cpp"
     # Vehicle bringup currently uses normal Fast DDS discovery. Inheriting an
     # old/dead discovery-server setting isolates this GUI from every topic.

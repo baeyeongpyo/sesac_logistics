@@ -24,14 +24,8 @@ class ForkController(Node):
         self.declare_parameter("pose_config", "/shared/vehicle_pose_config.json")
 
         requested_vehicle = int(self.get_parameter("vehicle").value)
-        domain_vehicle = {215: 1, 216: 2}.get(
-            int(os.environ.get("ROS_DOMAIN_ID", "0") or 0)
-        )
-        self.vehicle = requested_vehicle or domain_vehicle
-        if self.vehicle not in (1, 2):
-            raise RuntimeError("vehicle must be 1/2, or ROS_DOMAIN_ID must be 215/216")
-        robot = f"/robot_{self.vehicle}"
-        state_topic = str(self.get_parameter("state_topic").value).strip() or f"{robot}/fork/state"
+        self.vehicle = requested_vehicle if requested_vehicle in (1, 2) else 0
+        state_topic = str(self.get_parameter("state_topic").value).strip() or "/fork/state"
 
         self.motor = Motor(forward=17, backward=18)
         self.lower_limit_switch = Button(27, pull_up=False, bounce_time=0.05)

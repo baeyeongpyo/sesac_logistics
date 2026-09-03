@@ -16,14 +16,7 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 def yolo_process(context):
     """Reuse a live YOLO ROS node, otherwise start the detector."""
-    requested_vehicle = int(LaunchConfiguration("vehicle").perform(context))
-    domain_id = int(os.environ.get("ROS_DOMAIN_ID", "0") or 0)
-    vehicle = requested_vehicle or {215: 1, 216: 2}.get(domain_id)
-    if vehicle not in (1, 2):
-        raise RuntimeError(
-            "vehicle cannot be inferred: ROS_DOMAIN_ID must be 215 or 216"
-        )
-    detection_topic = f"/robot_{vehicle}/symbol_seg/detections"
+    detection_topic = "/symbol_seg/detections"
     try:
         result = subprocess.run(
             ["ros2", "node", "list"],
@@ -49,7 +42,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             "vehicle", default_value="0",
-            description="0 maps ROS_DOMAIN_ID 215→vehicle 1 and 216→vehicle 2.",
+            description="Optional vehicle metadata only; topics are not namespaced.",
         ),
         DeclareLaunchArgument("pose_config", default_value="/shared/vehicle_pose_config.json"),
         DeclareLaunchArgument(

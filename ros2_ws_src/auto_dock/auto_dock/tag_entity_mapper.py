@@ -113,17 +113,11 @@ class TagEntityMapper(Node):
         self.declare_parameter("provisional_ttl_sec", 5.0)
 
         requested_vehicle = int(self.get_parameter("vehicle").value)
-        domain_vehicle = {215: 1, 216: 2}.get(
-            int(os.environ.get("ROS_DOMAIN_ID", "0") or 0)
-        )
-        self.vehicle = requested_vehicle or domain_vehicle
-        if self.vehicle not in (1, 2):
-            raise RuntimeError("vehicle cannot be inferred from vehicle/ROS_DOMAIN_ID")
-        robot = f"/robot_{self.vehicle}"
+        self.vehicle = requested_vehicle if requested_vehicle in (1, 2) else 0
         detection_topic = str(self.get_parameter("detection_topic").value).strip()
         output_topic = str(self.get_parameter("output_topic").value).strip()
-        self.detection_topic = detection_topic or f"{robot}/symbol_seg/detections"
-        self.output_topic = output_topic or f"{robot}/tag_entity_map"
+        self.detection_topic = detection_topic or "/symbol_seg/detections"
+        self.output_topic = output_topic or "/tag_entity_map"
         self.map_frame = str(self.get_parameter("map_frame").value)
         self.odom_frame = str(self.get_parameter("odom_frame").value)
         self.storage_path = Path(str(self.get_parameter("storage_path").value))

@@ -172,7 +172,6 @@ class TestPanelNode(Node):
         lidar_callback,
     ):
         super().__init__("auto_dock_test_panel")
-        robot = f"/robot_{vehicle}"
         self.log_callback = log_callback
         self.yolo_callback = yolo_callback
         self.status_callback = status_callback
@@ -180,11 +179,11 @@ class TestPanelNode(Node):
         self.odom_yaw = None
         self.imu_yaw = None
 
-        self.arrival_pub = self.create_publisher(String, f"{robot}/nav2/arrival", 10)
+        self.arrival_pub = self.create_publisher(String, "/nav2/arrival", 10)
         self.fork_command_pub = self.create_publisher(String, "/fork/command", 10)
-        self.stop_pub = self.create_publisher(Empty, f"{robot}/auto_dock/stop", 10)
+        self.stop_pub = self.create_publisher(Empty, "/auto_dock/stop", 10)
         self.load_state_pub = self.create_publisher(
-            String, f"{robot}/auto_dock/test/load_state", 10
+            String, "/auto_dock/test/load_state", 10
         )
         self.cmd_vel_pub = self.create_publisher(Twist, "/controller/cmd_vel", 10)
         self.controller_param_client = self.create_client(
@@ -195,8 +194,8 @@ class TestPanelNode(Node):
         status_qos.reliability = ReliabilityPolicy.RELIABLE
         status_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self.create_subscription(
-            String, f"{robot}/auto_dock/status",
-            lambda msg: self.received_status(f"{robot}/auto_dock/status", msg.data),
+            String, "/auto_dock/status",
+            lambda msg: self.received_status("/auto_dock/status", msg.data),
             status_qos,
         )
         self.create_subscription(
@@ -204,15 +203,15 @@ class TestPanelNode(Node):
             lambda msg: self.received("/fork/command", msg.data), 10,
         )
         self.create_subscription(
-            String, f"{robot}/fork/state",
-            lambda msg: self.received(f"{robot}/fork/state", msg.data), 10,
+            String, "/fork/state",
+            lambda msg: self.received("/fork/state", msg.data), 10,
         )
         self.create_subscription(
-            Empty, f"{robot}/auto_dock/drive_ready",
-            lambda _msg: self.received(f"{robot}/auto_dock/drive_ready", "<Empty>"), 10,
+            Empty, "/auto_dock/drive_ready",
+            lambda _msg: self.received("/auto_dock/drive_ready", "<Empty>"), 10,
         )
         self.create_subscription(
-            String, f"{robot}/symbol_seg/detections", self.received_yolo, 10,
+            String, "/symbol_seg/detections", self.received_yolo, 10,
         )
         self.create_subscription(LaserScan, "/scan_raw", self.received_lidar, 10)
         self.create_subscription(Odometry, "/odom_raw", self.received_odom, 20)
@@ -1413,7 +1412,8 @@ def parse_args():
 
 def main():
     args = parse_args()
-    os.environ["ROS_DOMAIN_ID"] = str(args.ros_domain_id or 214 + args.vehicle)
+    args.ros_domain_id = None
+    os.environ.pop("ROS_DOMAIN_ID", None)
     rclpy.init()
     root = tk.Tk()
     panel = TestPanel(root, args)

@@ -1311,16 +1311,7 @@ class AutoDockNode(Node):
         self.declare_parameter("control_port", 8091)
 
         requested_vehicle = int(self.get_parameter("vehicle").value)
-        domain_vehicle = {215: 1, 216: 2}.get(
-            int(os.environ.get("ROS_DOMAIN_ID", "0") or 0)
-        )
-        self.vehicle = requested_vehicle or domain_vehicle
-        if self.vehicle not in (1, 2):
-            raise RuntimeError(
-                "vehicle must be 1/2, or ROS_DOMAIN_ID must be 215 (vehicle 1) "
-                "or 216 (vehicle 2) when vehicle=0"
-            )
-        robot = f"/robot_{self.vehicle}"
+        self.vehicle = requested_vehicle if requested_vehicle in (1, 2) else 0
         self.pose_config_path = Path(str(self.get_parameter("pose_config").value))
         self.warning_tape_hsv_path = Path(str(
             self.get_parameter("warning_tape_hsv_config").value
@@ -1340,26 +1331,26 @@ class AutoDockNode(Node):
         )
         if temporary_search_speed > 0.0:
             self.config_overrides["search_linear_speed_m_s"] = temporary_search_speed
-        self.trigger_topic = self.topic_or_default("trigger_topic", f"{robot}/nav2/arrival")
-        self.status_topic = self.topic_or_default("status_topic", f"{robot}/auto_dock/status")
-        self.stop_topic = self.topic_or_default("stop_topic", f"{robot}/auto_dock/stop")
+        self.trigger_topic = self.topic_or_default("trigger_topic", "/nav2/arrival")
+        self.status_topic = self.topic_or_default("status_topic", "/auto_dock/status")
+        self.stop_topic = self.topic_or_default("stop_topic", "/auto_dock/stop")
         self.fork_state_topic = self.topic_or_default(
-            "fork_state_topic", f"{robot}/fork/state"
+            "fork_state_topic", "/fork/state"
         )
         self.drive_ready_topic = self.topic_or_default(
-            "drive_ready_topic", f"{robot}/auto_dock/drive_ready"
+            "drive_ready_topic", "/auto_dock/drive_ready"
         )
         self.test_load_state_topic = self.topic_or_default(
-            "test_load_state_topic", f"{robot}/auto_dock/test/load_state"
+            "test_load_state_topic", "/auto_dock/test/load_state"
         )
         self.detection_topic = self.topic_or_default(
-            "detection_topic", f"{robot}/symbol_seg/detections"
+            "detection_topic", "/symbol_seg/detections"
         )
         self.dock_inventory_topic = self.topic_or_default(
-            "dock_inventory_topic", f"{robot}/dock/inventory"
+            "dock_inventory_topic", "/dock/inventory"
         )
         self.dock_inventory_reset_topic = self.topic_or_default(
-            "dock_inventory_reset_topic", f"{robot}/dock/inventory/reset"
+            "dock_inventory_reset_topic", "/dock/inventory/reset"
         )
 
         self.config = {}
