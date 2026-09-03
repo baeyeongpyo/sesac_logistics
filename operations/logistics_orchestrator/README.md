@@ -16,6 +16,9 @@ Inventory 환경은 별도로 먼저 구성해야 합니다. Orchestrator는 zon
 생성·수정하지 않습니다. `docker`(24), `p1`~`p3`(각 1), `f1`~`f9`(각 1),
 `n1`~`n9`(각 1)가 모두 enabled여야 자동 명령을 보냅니다.
 
+`docker`는 Inventory의 출발 zone ID입니다. PICK Auto Dock 명령에서는 `docker`를
+물리 도크 식별자 `DOCK_1`로 명시적으로 매핑합니다.
+
 ## 실행
 
 ```bash
@@ -49,6 +52,7 @@ GET  /api/v1/status
 POST /api/v1/reconcile
 POST /api/v1/events/fleet
 POST /api/v1/events/inventory
+POST /api/v1/operations/{operation_id}/pallet-3/bypass-pick
 POST /api/v1/poc/pallet-3-missions
 GET  /api/v1/poc/pallet-3-missions/{mission_id}
 POST /api/v1/poc/pallet-3-missions/{mission_id}/unload-confirmation
@@ -93,11 +97,90 @@ PICK 완료는 Inventory `pick-completions`를 `{operation_id}:pick` 키로 한 
 - `orchestrator_steps`: `RESERVED`부터 `PLACE_COMMITTED`까지의 작업 단계
 - `command_outbox`: Fleet Manager 명령과 `PENDING`, `SENT`, `DELIVERY_UNKNOWN`, `FAILED` 결과
 - `operation_recoveries`: `FAIL` 후 운영자 `OPERATOR_READY`를 기다리는 작업
+- `pallet3_operation_workflows`: `docker -> p3` 작업의 waypoint·fork·후진·복귀 단계
 
 차량 명령 HTTP timeout은 수락 여부를 알 수 없으므로 `DELIVERY_UNKNOWN`으로 남기고
 즉시 재전송하지 않습니다. 다음 실제 차량 보고나 수동 recovery가 있어야만 진행합니다.
 
-## Pallet 3 POC
+## Pallet 3 일반 작업
+
+Pallet 3은 별도 POC 미션이 아니라 Inventory의 일반 `docker -> p3` 작업으로 실행합니다.
+Inventory가 발급한 `operation_id` 하나가 재고 예약, 차량 적재 상태, Fleet 명령 outbox와
+Pallet 3 workflow를 연결합니다. 따라서 Control Center에서도 다른 운송 작업과 동일하게
+표시됩니다.
+
+### 자동 적재
+
+차량이 비적재·활성 작업 없음 상태일 때 Inventory 작업을 생성하고 차량을 `idle`로 전환합니다.
+
+```bash
+curl --fail-with-body -X POST http://127.0.0.1:8081/api/v1/operations \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "robot_id":"robot_1",
+    "payload_type":"FRESH",
+    "source_zone_id":"docker",
+    "destination_zone_id":"p3",
+    "priority":0
+  }'
+
+curl --fail-with-body -X POST \
+  http://127.0.0.1:8080/api/v1/vehicle-command/robot_1/operation/idle \
+  -H 'Content-Type: application/json' \
+  -d '{"reason":"PALLET_3_OPERATION"}'
+```
+
+차량이 `WAIT` / `OPERATOR_READY`를 보고하면 아래 순서로 자동 진행합니다.
+
+```text
+docker 접근 Nav2
+  -> Auto Dock PICK(location=DOCK_1)
+  -> Inventory PICK 완료 (docker -1, 차량 적재, TO_PLACE)
+  -> Pallet 3 outbound waypoint
+  -> Fork DOWN
+  -> FORK_DOWN_COMPLETE
+  -> Inventory PLACE 완료 (p3 +1, 작업 COMPLETED, 차량 비적재)
+  -> cmd_vel(-0.18 m/s, 1000 ms)
+  -> dock_1 복귀 waypoint
+```
+
+### 수동 적재
+
+Auto Dock PICK를 쓰지 않을 때는 먼저 같은 Inventory 작업을 생성하고, 작업자가 실제로
+물류를 포크에 적재한 뒤 **차량을 `idle`로 전환하기 전에** 아래 API를 호출합니다.
+
+```bash
+curl --fail-with-body -X POST \
+  http://127.0.0.1:8083/api/v1/operations/{operation_id}/pallet-3/bypass-pick \
+  -H 'Content-Type: application/json' \
+  -d '{"operator_confirmed":true}'
+```
+
+이 요청은 차량이 비적재이고 작업이 `TO_PICK`이며 Docker 접근 Nav2/Auto Dock PICK 명령이
+아직 없을 때만 허용됩니다. 성공하면 `operation_id:manual-pick` 멱등 키로 Inventory PICK을
+기록하므로 docker 재고가 정확히 한 번 감소하고 작업은 `TO_PLACE`가 됩니다. 이어서 위의
+`operation/idle`을 호출하면 Docker 주행과 Auto Dock을 건너뛰고 Pallet 3 outbound waypoint부터
+시작합니다.
+
+Pallet 3 도착 뒤에는 별도 하역 확인 API가 없습니다. 일치하는 `operation_id`의
+`FORK_DOWN_COMPLETE`가 들어온 경우에만 p3 재고 반영과 후진·복귀가 진행됩니다. outbound
+waypoint는 `(-0.440,-0.900) -> (-0.420,-2.000) -> (-0.420,-2.400)`이고, 복귀 waypoint는
+`(-0.420,-2.000) -> (-0.440,-0.900) -> (0.085,-0.905)`입니다.
+
+### 복구
+
+Fleet가 `FAIL`이면 새 명령을 보내지 않습니다. 운영자가 `operation/idle`을 호출해 다시
+`WAIT` / `OPERATOR_READY`가 된 뒤에만 안전한 단계부터 재개합니다. 아직 PICK 전이면 Docker
+접근부터, PICK 완료 뒤 outbound 중이면 Pallet 3 waypoint부터 재시도합니다. Fork DOWN 명령,
+후진 또는 복귀 중 실패하면 실제 물리 수행 여부가 불명확하므로 자동 재발행하지 않고 stop과
+`FAILED` workflow를 남깁니다. 물류 상태를 현장에서 해소한 뒤에는 기존 작업을 초기화하지
+말고 새 Inventory `operation_id`로 다음 반복 작업을 생성합니다.
+
+## Legacy Pallet 3 POC
+
+아래 API는 이미 실행 중인 레거시 시연 미션을 마무리하기 위한 호환 경로입니다. 새 운영
+작업에는 사용하지 마십시오. 레거시 POC의 `mission_id`와 하역 확인은 위 일반 작업 흐름과
+별개입니다.
 
 이 POC는 `dock_1`의 Auto Dock PICK가 `AUTO_DOCK_PICK_COMPLETED`를 보고한 뒤에만
 시작합니다. POC는 그 PICK의 `operation_id`를 그대로 사용하므로 차량의 적재 상태와

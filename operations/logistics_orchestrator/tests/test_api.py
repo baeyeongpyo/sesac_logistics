@@ -170,6 +170,34 @@ class OrchestratorApiTest(unittest.TestCase):
         self.assertEqual(response.json()["operation_id"], "operation-1")
         self.assertIsNotNone(response.json()["manual_pick_confirmed_at"])
 
+    def test_pallet3_manual_pick_route_maps_missing_and_conflicting_operations(self) -> None:
+        class RejectingPallet3OperationService:
+            def confirm_pallet3_manual_pick(
+                self, operation_id: str, operator_confirmed: bool
+            ):
+                if operation_id == "missing":
+                    raise KeyError("unknown active operation: missing")
+                if not operator_confirmed:
+                    raise ValueError("operator_confirmed must be true")
+                raise AssertionError("unexpected request")
+
+        app = create_app(
+            str(Path(self.temporary_directory.name) / "manual-pick-errors.db"),
+            service_factory=lambda _: RejectingPallet3OperationService(),
+        )
+        with TestClient(app) as client:
+            missing = client.post(
+                "/api/v1/operations/missing/pallet-3/bypass-pick",
+                json={"operator_confirmed": True},
+            )
+            conflict = client.post(
+                "/api/v1/operations/operation-1/pallet-3/bypass-pick",
+                json={"operator_confirmed": False},
+            )
+
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(conflict.status_code, 409)
+
     def test_pallet3_poc_forwards_explicit_pick_bypass_to_the_runtime_service(self) -> None:
         # This catches silently rejecting or dropping the explicit POC-only PICK bypass.
         calls: list[tuple[str, bool]] = []
