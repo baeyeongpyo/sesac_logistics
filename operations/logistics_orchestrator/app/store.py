@@ -7,7 +7,13 @@ import sqlite3
 import threading
 from uuid import uuid4
 
-from .models import CommandRecord, EventEnvelope, OperationStep, Pallet3Mission
+from .models import (
+    CommandRecord,
+    EventEnvelope,
+    OperationStep,
+    Pallet3Mission,
+    Pallet3OperationWorkflow,
+)
 
 
 class OrchestratorStore:
@@ -80,6 +86,16 @@ class OrchestratorStore:
                 CREATE UNIQUE INDEX IF NOT EXISTS pallet3_poc_active_robot
                     ON pallet3_poc_missions (robot_id)
                     WHERE phase NOT IN ('COMPLETED', 'FAILED');
+                CREATE TABLE IF NOT EXISTS pallet3_operation_workflows (
+                    operation_id TEXT PRIMARY KEY,
+                    robot_id TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    manual_pick_confirmed_at TEXT,
+                    failure_detail TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT
+                );
                 """
             )
 
@@ -231,6 +247,124 @@ class OrchestratorStore:
             self._connection.execute(
                 "DELETE FROM operation_recoveries WHERE operation_id = ?", (operation_id,)
             )
+
+    def create_or_get_pallet3_workflow(
+        self, operation_id: str, robot_id: str
+    ) -> tuple[Pallet3OperationWorkflow, bool]:
+        timestamp = _format_time(_now())
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT * FROM pallet3_operation_workflows WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if row is not None:
+                return _pallet3_workflow_from_row(row), False
+            self._connection.execute(
+                """
+                INSERT INTO pallet3_operation_workflows (
+                    operation_id, robot_id, phase, manual_pick_confirmed_at,
+                    failure_detail, created_at, updated_at, completed_at
+                ) VALUES (?, ?, 'PICK_PENDING', NULL, NULL, ?, ?, NULL)
+                """,
+                (operation_id, robot_id, timestamp, timestamp),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM pallet3_operation_workflows WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+        return _pallet3_workflow_from_row(row), True
+
+    def get_pallet3_workflow(self, operation_id: str) -> Pallet3OperationWorkflow | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM pallet3_operation_workflows WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+        return _pallet3_workflow_from_row(row) if row is not None else None
+
+    def confirm_pallet3_manual_pick(
+        self, operation_id: str
+    ) -> tuple[Pallet3OperationWorkflow | None, bool]:
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT * FROM pallet3_operation_workflows WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                return None, False
+            workflow = _pallet3_workflow_from_row(row)
+            if workflow.manual_pick_confirmed_at is not None:
+                return workflow, False
+            timestamp = _format_time(_now())
+            cursor = self._connection.execute(
+                """
+                UPDATE pallet3_operation_workflows
+                SET manual_pick_confirmed_at = ?, updated_at = ?
+                WHERE operation_id = ? AND manual_pick_confirmed_at IS NULL
+                """,
+                (timestamp, timestamp, operation_id),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM pallet3_operation_workflows WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+        return _pallet3_workflow_from_row(row), cursor.rowcount == 1
+
+    def transition_pallet3_workflow(
+        self, operation_id: str, expected_phase: str, phase: str
+    ) -> tuple[Pallet3OperationWorkflow | None, bool]:
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT * FROM pallet3_operation_workflows WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                return None, False
+            workflow = _pallet3_workflow_from_row(row)
+            if workflow.phase != expected_phase or workflow.phase in {"COMPLETED", "FAILED"}:
+                return workflow, False
+            timestamp = _format_time(_now())
+            completed_at = timestamp if phase == "COMPLETED" else None
+            cursor = self._connection.execute(
+                """
+                UPDATE pallet3_operation_workflows
+                SET phase = ?, updated_at = ?, completed_at = COALESCE(?, completed_at)
+                WHERE operation_id = ? AND phase = ?
+                """,
+                (phase, timestamp, completed_at, operation_id, expected_phase),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM pallet3_operation_workflows WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+        return _pallet3_workflow_from_row(row), cursor.rowcount == 1
+
+    def fail_pallet3_workflow(
+        self, operation_id: str, detail: str
+    ) -> Pallet3OperationWorkflow | None:
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT * FROM pallet3_operation_workflows WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            workflow = _pallet3_workflow_from_row(row)
+            if workflow.phase in {"COMPLETED", "FAILED"}:
+                return workflow
+            self._connection.execute(
+                """
+                UPDATE pallet3_operation_workflows
+                SET phase = 'FAILED', failure_detail = ?, updated_at = ?
+                WHERE operation_id = ?
+                """,
+                (detail[:1000], _format_time(_now()), operation_id),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM pallet3_operation_workflows WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+        return _pallet3_workflow_from_row(row)
 
     def create_or_get_pallet3_mission(
         self,
@@ -493,6 +627,19 @@ def _pallet3_mission_from_row(row: sqlite3.Row) -> Pallet3Mission:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         unload_confirmed_at=row["unload_confirmed_at"],
+        completed_at=row["completed_at"],
+    )
+
+
+def _pallet3_workflow_from_row(row: sqlite3.Row) -> Pallet3OperationWorkflow:
+    return Pallet3OperationWorkflow(
+        operation_id=row["operation_id"],
+        robot_id=row["robot_id"],
+        phase=row["phase"],
+        manual_pick_confirmed_at=row["manual_pick_confirmed_at"],
+        failure_detail=row["failure_detail"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
         completed_at=row["completed_at"],
     )
 

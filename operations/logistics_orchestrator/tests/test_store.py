@@ -95,6 +95,48 @@ class OrchestratorStoreTest(unittest.TestCase):
         self.assertEqual(replaced.phase, "FAILED")
         self.assertEqual(replaced.failure_detail, "SUPERSEDED_BY_NEW_POC_REQUEST")
 
+    def test_pallet3_operation_workflow_persists_manual_pick_and_terminal_phase(self) -> None:
+        # This catches a Pallet 3 recipe being detached from its Inventory operation.
+        workflow, created = self.store.create_or_get_pallet3_workflow(
+            "operation-1", "robot_1"
+        )
+        repeated, repeated_created = self.store.create_or_get_pallet3_workflow(
+            "operation-1", "robot_1"
+        )
+        confirmed, confirmation_changed = self.store.confirm_pallet3_manual_pick(
+            "operation-1"
+        )
+        replayed, replay_changed = self.store.confirm_pallet3_manual_pick("operation-1")
+        outbound, outbound_changed = self.store.transition_pallet3_workflow(
+            "operation-1", "PICK_PENDING", "OUTBOUND_SENT"
+        )
+        completed, completed_changed = self.store.transition_pallet3_workflow(
+            "operation-1", "OUTBOUND_SENT", "COMPLETED"
+        )
+
+        self.assertTrue(created)
+        self.assertFalse(repeated_created)
+        self.assertEqual(workflow.operation_id, "operation-1")
+        self.assertEqual(repeated.operation_id, "operation-1")
+        self.assertEqual(workflow.phase, "PICK_PENDING")
+        self.assertTrue(confirmation_changed)
+        self.assertIsNotNone(confirmed.manual_pick_confirmed_at)
+        self.assertFalse(replay_changed)
+        self.assertEqual(replayed.manual_pick_confirmed_at, confirmed.manual_pick_confirmed_at)
+        self.assertTrue(outbound_changed)
+        self.assertEqual(outbound.phase, "OUTBOUND_SENT")
+        self.assertTrue(completed_changed)
+        self.assertEqual(completed.phase, "COMPLETED")
+        self.assertIsNotNone(completed.completed_at)
+
+        self.store.close()
+        self.store = OrchestratorStore(self.database_path)
+
+        restored = self.store.get_pallet3_workflow("operation-1")
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.phase, "COMPLETED")
+        self.assertIsNotNone(restored.manual_pick_confirmed_at)
+
 
 if __name__ == "__main__":
     unittest.main()

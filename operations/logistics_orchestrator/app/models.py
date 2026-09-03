@@ -61,6 +61,19 @@ class Pallet3Mission(BaseModel):
     completed_at: datetime | None
 
 
+class Pallet3OperationWorkflow(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    operation_id: str
+    robot_id: str
+    phase: str
+    manual_pick_confirmed_at: datetime | None
+    failure_detail: str | None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None
+
+
 class Pallet3MissionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
