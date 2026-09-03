@@ -79,13 +79,15 @@ class OrchestratorApiTest(unittest.TestCase):
 
     def test_pallet3_poc_routes_create_read_and_confirm_the_same_mission(self) -> None:
         calls: list[tuple[str, str]] = []
+        start_bypass_values: list[bool] = []
 
         class RecordingPocService:
             def __init__(self, store) -> None:
                 self.store = store
 
-            def start_pallet3_mission(self, robot_id: str):
+            def start_pallet3_mission(self, robot_id: str, *, bypass_pick: bool = False):
                 calls.append(("start", robot_id))
+                start_bypass_values.append(bypass_pick)
                 mission, _created = self.store.create_or_get_pallet3_mission(robot_id)
                 return mission
 
@@ -116,6 +118,7 @@ class OrchestratorApiTest(unittest.TestCase):
         self.assertEqual(confirmation.status_code, 200)
         self.assertEqual(retrieved.json()["mission_id"], mission_id)
         self.assertEqual(calls, [("start", "robot_1"), ("confirm", mission_id)])
+        self.assertEqual(start_bypass_values, [False])
 
     def test_pallet3_poc_start_requires_the_runtime_service(self) -> None:
         response = self.client.post(
@@ -124,6 +127,32 @@ class OrchestratorApiTest(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 503)
+
+    def test_pallet3_poc_forwards_explicit_pick_bypass_to_the_runtime_service(self) -> None:
+        # This catches silently rejecting or dropping the explicit POC-only PICK bypass.
+        calls: list[tuple[str, bool]] = []
+
+        class RecordingPocService:
+            def __init__(self, store) -> None:
+                self.store = store
+
+            def start_pallet3_mission(self, robot_id: str, *, bypass_pick: bool = False):
+                calls.append((robot_id, bypass_pick))
+                mission, _created = self.store.create_or_get_pallet3_mission(robot_id)
+                return mission
+
+        app = create_app(
+            str(Path(self.temporary_directory.name) / "poc-bypass.db"),
+            service_factory=lambda store: RecordingPocService(store),
+        )
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/poc/pallet-3-missions",
+                json={"robot_id": "robot_1", "bypass_pick": True},
+            )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(calls, [("robot_1", True)])
 
 
 if __name__ == "__main__":

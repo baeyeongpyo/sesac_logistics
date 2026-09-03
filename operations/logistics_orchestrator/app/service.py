@@ -64,7 +64,9 @@ class OrchestratorService:
         del source, event
         self.reconcile()
 
-    def start_pallet3_mission(self, robot_id: str) -> Pallet3Mission:
+    def start_pallet3_mission(
+        self, robot_id: str, *, bypass_pick: bool = False
+    ) -> Pallet3Mission:
         robot_id = robot_id.strip()
         if not robot_id:
             raise ValueError("robot_id must be a non-empty string")
@@ -79,23 +81,28 @@ class OrchestratorService:
         )
         if vehicle is None:
             raise KeyError(f"unknown vehicle: {robot_id}")
-        if (
-            str(vehicle.get("state")) != "WAIT"
-            or str(vehicle.get("source")) != "AUTO_DOCK"
-            or str(vehicle.get("detail")) != "AUTO_DOCK_PICK_COMPLETED"
-        ):
-            raise Pallet3MissionConflictError(
-                "vehicle must report AUTO_DOCK_PICK_COMPLETED before the pallet 3 POC"
-            )
-        pick_operation_id = str(vehicle.get("operation_id") or "").strip()
-        if not pick_operation_id:
-            raise Pallet3MissionConflictError(
-                "AUTO_DOCK_PICK_COMPLETED must include the pickup operation_id"
-            )
+        mission_id: str | None = None
+        if bypass_pick:
+            if str(vehicle.get("state")) != "WAIT":
+                raise Pallet3MissionConflictError(
+                    "vehicle must be WAIT before bypassing Auto Dock PICK for the pallet 3 POC"
+                )
+        else:
+            if (
+                str(vehicle.get("state")) != "WAIT"
+                or str(vehicle.get("source")) != "AUTO_DOCK"
+                or str(vehicle.get("detail")) != "AUTO_DOCK_PICK_COMPLETED"
+            ):
+                raise Pallet3MissionConflictError(
+                    "vehicle must report AUTO_DOCK_PICK_COMPLETED before the pallet 3 POC"
+                )
+            mission_id = str(vehicle.get("operation_id") or "").strip()
+            if not mission_id:
+                raise Pallet3MissionConflictError(
+                    "AUTO_DOCK_PICK_COMPLETED must include the pickup operation_id"
+                )
         self._store.clear_error("pallet3_vehicle_snapshot")
-        mission, created = self._store.create_or_get_pallet3_mission(
-            robot_id, pick_operation_id
-        )
+        mission, created = self._store.create_or_get_pallet3_mission(robot_id, mission_id)
         if created:
             self._deliver_pallet3_command(
                 mission,

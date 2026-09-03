@@ -299,6 +299,30 @@ class OrchestratorServiceTest(unittest.TestCase):
         self.assertEqual(inventory.pick_completion_keys, [])
         self.assertEqual(inventory.place_completion_keys, [])
 
+    def test_pallet3_mission_bypasses_pick_completion_only_when_explicitly_requested(self) -> None:
+        # This catches requiring an unavailable Auto Dock PICK completion in the explicit POC bypass.
+        inventory = FakeInventory(stocks=[], active_operations=[])
+        fleet = FakeFleet([{
+            "robot_id": "robot_1", "state": "WAIT",
+            "source": "API", "detail": "OPERATOR_READY",
+        }])
+
+        mission = OrchestratorService(self.store, inventory, fleet).start_pallet3_mission(
+            "robot_1", bypass_pick=True
+        )
+
+        self.assertEqual(mission.phase, "OUTBOUND_SENT")
+        self.assertEqual(fleet.commands[0][0:2], ("navigate_waypoints", "robot_1"))
+        self.assertEqual(fleet.commands[0][2]["operation_id"], mission.mission_id)
+        self.assertEqual(
+            fleet.commands[0][2]["waypoints"],
+            [
+                {"frame_id": "map", "x": -0.44, "y": -0.9, "yaw": 0.0},
+                {"frame_id": "map", "x": -0.42, "y": -2.0, "yaw": -1.5707963267948966},
+                {"frame_id": "map", "x": -0.42, "y": -2.4, "yaw": -1.5707963267948966},
+            ],
+        )
+
     def test_pallet3_mission_requires_arrival_confirmation_and_ignores_stale_fork_event(self) -> None:
         inventory = FakeInventory(stocks=[_stock("docker", "FRESH", 1)], active_operations=[])
         fleet = FakeFleet([{

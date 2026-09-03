@@ -114,10 +114,23 @@ ros2 topic pub --once /robot_1/auto_dock/drive_ready std_msgs/msg/Empty "{}"
 기본 topic 이름은 `/{robot_id}/auto_dock/drive_ready`입니다. Auto Dock PICK가 활성화되지 않은
 상태의 publish는 차량 API가 무시합니다.
 
+Auto Dock을 사용할 수 없는 **주행 POC 전용**으로는 요청 본문에 `bypass_pick: true`를
+명시할 수 있습니다. 이 경우에만 `AUTO_DOCK_PICK_COMPLETED`와 PICK `operation_id` 검증을
+건너뛰고 `WAIT` 상태의 차량으로 pallet_3 waypoint 주행을 즉시 시작합니다. 실제 적재,
+fork up, Inventory PICK 완료를 처리하거나 완료로 기록하지 않습니다. 차량 Command API에
+진행 중인 작업이 없어야 하며, 적재물·fork·주행 경로가 안전한 상태에서만 사용해야 합니다.
+하역 확인 이후의 fork down, 후진, dock_1 복귀는 기본 POC와 동일하게 계속 실행됩니다.
+
 ```bash
 curl --fail-with-body -X POST http://127.0.0.1:8083/api/v1/poc/pallet-3-missions \
   -H 'Content-Type: application/json' \
   -d '{"robot_id":"robot_1"}'
+```
+
+```bash
+curl --fail-with-body -X POST http://127.0.0.1:8083/api/v1/poc/pallet-3-missions \
+  -H 'Content-Type: application/json' \
+  -d '{"robot_id":"robot_1","bypass_pick":true}'
 ```
 
 응답의 `mission_id`로 상태를 조회합니다. 동일 차량에 활성 POC가 있으면 같은 미션을

@@ -54,7 +54,9 @@ def create_app(
     ) -> Pallet3Mission:
         service = _require_service(request)
         try:
-            return service.start_pallet3_mission(body.robot_id)
+            return service.start_pallet3_mission(
+                body.robot_id, bypass_pick=body.bypass_pick
+            )
         except KeyError as error:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail=str(error)

@@ -65,3 +65,4 @@ class Pallet3MissionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     robot_id: str = Field(min_length=1)
+    bypass_pick: bool = False
