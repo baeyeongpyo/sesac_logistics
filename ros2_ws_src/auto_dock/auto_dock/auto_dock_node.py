@@ -5008,11 +5008,15 @@ class AutoDockNode(Node):
                 candidate, pnp, reason = (
                     None, None, "nearest_recheck_pose_mismatch"
                 )
-            if not fresh_frame:
+            if not fresh_frame or candidate is None:
                 if getattr(self, "nearest_step_wait_started_at", None) is None:
                     self.nearest_step_wait_started_at = now
                 self.publish_status(
-                    "waiting", "nearest_waiting_fresh_recheck",
+                    "waiting", (
+                        "nearest_waiting_fresh_recheck"
+                        if not fresh_frame
+                        else "nearest_waiting_visual_reacquire"
+                    ),
                     measurement_reason=reason,
                     fresh_frame=fresh_frame,
                     wait_sec=round(now - self.nearest_step_wait_started_at, 2),
@@ -5022,23 +5026,16 @@ class AutoDockNode(Node):
             self.nearest_step_wait_started_at = None
             self.nearest_step_source_stamp_ns = source_stamp
             self.nearest_step_verified = True
-            if candidate is not None:
-                if not self.update_world_target(
-                    candidate, pnp, blend_existing=False
-                ):
-                    self.cancel("odom_missing")
-                    return
-                self.publish_status(
-                    "running", "nearest_fresh_measurement_relocked_by_pose",
-                    observed_entity_id=candidate.get("entity_id"),
-                    step=getattr(self, "nearest_step_count", 0),
-                )
-            else:
-                self.publish_status(
-                    "running", "nearest_visual_lost_using_locked_odom_pose",
-                    measurement_reason=reason,
-                    step=getattr(self, "nearest_step_count", 0),
-                )
+            if not self.update_world_target(
+                candidate, pnp, blend_existing=False
+            ):
+                self.cancel("odom_missing")
+                return
+            self.publish_status(
+                "running", "nearest_fresh_measurement_relocked_by_pose",
+                observed_entity_id=candidate.get("entity_id"),
+                step=getattr(self, "nearest_step_count", 0),
+            )
         elif not nearest_target:
             candidate, pnp, _ = self.valid_measurement()
             if candidate is not None:
@@ -5646,13 +5643,31 @@ class AutoDockNode(Node):
             )
             return
         candidate, pnp, _reason = self.valid_measurement()
-        if candidate is not None:
+        if candidate is None:
+            partial_measurement = getattr(
+                self, "tracked_partial_measurement", None
+            )
+            if callable(partial_measurement):
+                candidate, pnp, _reason = partial_measurement()
+        if candidate is None:
+            top_pair_measurement = getattr(
+                self, "visible_target_top_pair_measurement", None
+            )
+            if callable(top_pair_measurement):
+                candidate, pnp, _reason = top_pair_measurement()
+        visual_guidance = candidate is not None and isinstance(pnp, dict)
+        if visual_guidance:
             self.update_world_target(candidate, pnp, blend_existing=True)
         target = self.target_in_body()
         if target is None:
             self.cancel("virtual_target_missing_during_insertion")
             return
         _forward, lateral, yaw = target
+        if not visual_guidance:
+            # Once even the upper pair leaves the close-range view, finish the
+            # insertion straight instead of steering from a stale visual pose.
+            lateral = 0.0
+            yaw = 0.0
         insertion_speed = self.number(
             "insertion_speed_m_s", 0.05, 0.01, 0.20
         )

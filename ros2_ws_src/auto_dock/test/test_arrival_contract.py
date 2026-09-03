@@ -3065,7 +3065,7 @@ def test_nearest_recheck_accepts_changed_entity_id_by_pose(monkeypatch):
     assert fake.insertion_start_due_at == pytest.approx(10.6)
 
 
-def test_nearest_recheck_uses_locked_odom_pose_when_tags_disappear(monkeypatch):
+def test_nearest_recheck_waits_for_visual_before_insertion(monkeypatch):
     fake = type("FakeDock", (), {})()
     fake.target_type = "NEAREST"
     fake.target_entity_id = None
@@ -3095,9 +3095,9 @@ def test_nearest_recheck_uses_locked_odom_pose_when_tags_disappear(monkeypatch):
 
     AutoDockNode.tick_docking(fake)
 
-    assert fake.nearest_step_verified is True
-    assert fake.insertion_start_due_at == pytest.approx(10.6)
-    assert fake.last_status[1] == "aligned_pause_before_insertion"
+    assert fake.nearest_step_verified is False
+    assert fake.insertion_start_due_at is None
+    assert fake.last_status[1] == "nearest_waiting_visual_reacquire"
 
 
 def test_aligned_top_pair_at_nine_cm_can_start_insertion(monkeypatch):
@@ -3335,6 +3335,60 @@ def test_insertion_corrects_lateral_and_yaw_from_visible_target():
 
     assert updated == [(candidate, pnp, True)]
     assert commands == [(0.08, pytest.approx(0.01), pytest.approx(0.08))]
+
+
+def test_insertion_keeps_correcting_from_visible_upper_tag_pair():
+    fake = type("FakeDock", (), {})()
+    fake.insert_start_position = (0.0, 0.0)
+    fake.odom_position = (0.05, 0.0)
+    candidate, pnp = {"tag_ids": [1, 2]}, {"distance_source": "pnp"}
+    fake.valid_measurement = lambda: (None, None, "full_not_visible")
+    fake.tracked_partial_measurement = lambda: (
+        None, None, "tracked_partial_not_visible"
+    )
+    fake.visible_target_top_pair_measurement = lambda: (candidate, pnp, None)
+    updated = []
+    fake.update_world_target = lambda got_candidate, got_pnp, blend_existing: (
+        updated.append((got_candidate, got_pnp, blend_existing)) or True
+    )
+    fake.target_in_body = lambda: (0.10, -0.04, -0.10)
+    fake.number = lambda key, default, *_args: {
+        "insertion_distance_cm": 15.0,
+        "insertion_speed_m_s": 0.08,
+    }.get(key, default)
+    fake.cancel = lambda reason: pytest.fail(reason)
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+
+    AutoDockNode.tick_inserting(fake)
+
+    assert updated == [(candidate, pnp, True)]
+    assert commands == [(0.08, pytest.approx(-0.02), pytest.approx(-0.08))]
+
+
+def test_insertion_drives_straight_after_upper_tag_pair_disappears():
+    fake = type("FakeDock", (), {})()
+    fake.insert_start_position = (0.0, 0.0)
+    fake.odom_position = (0.05, 0.0)
+    fake.valid_measurement = lambda: (None, None, "full_not_visible")
+    fake.tracked_partial_measurement = lambda: (
+        None, None, "tracked_partial_not_visible"
+    )
+    fake.visible_target_top_pair_measurement = lambda: (
+        None, None, "top_pair_not_visible"
+    )
+    fake.target_in_body = lambda: (0.10, 0.04, 0.10)
+    fake.number = lambda key, default, *_args: {
+        "insertion_distance_cm": 15.0,
+        "insertion_speed_m_s": 0.08,
+    }.get(key, default)
+    fake.cancel = lambda reason: pytest.fail(reason)
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+
+    AutoDockNode.tick_inserting(fake)
+
+    assert commands == [(0.08, 0.0, 0.0)]
 
 
 def test_nearest_centering_switches_to_stable_closer_visible_candidate(monkeypatch):
