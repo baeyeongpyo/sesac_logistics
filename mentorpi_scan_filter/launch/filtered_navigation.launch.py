@@ -55,7 +55,7 @@ def _launch_setup(context):
         output='screen',
         parameters=[{
             'output_frame': 'depth_scan_frame',
-            'scan_height': 101,
+            'scan_height': 11,
         }],
         remappings=[
             ('depth', '/ascamera/camera_publisher/depth0/image_raw'),
