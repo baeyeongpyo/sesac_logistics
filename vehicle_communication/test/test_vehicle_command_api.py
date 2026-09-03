@@ -18,6 +18,7 @@ import uuid
 PACKAGE = Path(__file__).resolve().parents[1]
 SCRIPT = PACKAGE / 'vehicle_command_api.py'
 INVENTORY_OPERATION_ID = '73d5b9af-5a12-4f34-a96c-5de116df1e8e'
+POC_MISSION_ID = '3e829a02-7601-4b9f-afdf-3dbd84737828'
 
 
 def load_server_module():
@@ -308,6 +309,14 @@ class VehicleCommandApiServerTest(unittest.TestCase):
                 'target': {'type': 'NEAREST'},
             },
         )
+
+    def wait_until(self, predicate):
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.01)
+        self.fail('timed out waiting for expected vehicle status')
 
     def test_startup_stays_init_until_operator_marks_idle(self):
         """AMCL initial pose alone must not authorise a newly started vehicle."""
@@ -690,6 +699,88 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         self.assertEqual(down, {'command': 'DOWN', 'state': 'FORK_COMMAND_PUBLISHED'})
         self.assertEqual(self.velocity.fork_messages, ['UP', 'DOWN'])
 
+    def test_fork_down_complete_is_relayed_only_for_the_pending_poc_mission(self):
+        """A stale fork-state message must not release a POC mission into reverse."""
+        self.service.on_fork_state('{"state":"DOWN_COMPLETE","error":""}')
+        self.assertEqual(self.status_reporter.reports, [])
+
+        status, response = post_json(
+            f'{self.base_url}/v1/fork/down',
+            {'operation_id': POC_MISSION_ID},
+        )
+        self.service.on_fork_state('{"state":"DOWN_COMPLETE","error":""}')
+
+        self.assertEqual(status, 202)
+        self.assertEqual(response, {'command': 'DOWN', 'state': 'FORK_COMMAND_PUBLISHED'})
+        self.assertEqual(self.status_reporter.reports[-1]['state'], 'WAIT')
+        self.assertEqual(self.status_reporter.reports[-1]['operation_id'], POC_MISSION_ID)
+        self.assertEqual(self.status_reporter.reports[-1]['source'], 'FORK')
+        self.assertEqual(self.status_reporter.reports[-1]['detail'], 'FORK_DOWN_COMPLETE')
+
+    def test_fork_down_error_fails_the_pending_poc_mission(self):
+        """An error must never be treated as the down-complete gate for reverse."""
+        post_json(
+            f'{self.base_url}/v1/fork/down',
+            {'operation_id': POC_MISSION_ID},
+        )
+
+        self.service.on_fork_state('{"state":"DOWN_COMPLETE","error":"hydraulic_fault"}')
+
+        self.assertEqual(self.status_reporter.reports[-1]['state'], 'FAIL')
+        self.assertEqual(self.status_reporter.reports[-1]['operation_id'], POC_MISSION_ID)
+        self.assertEqual(self.status_reporter.reports[-1]['source'], 'FORK')
+        self.assertEqual(
+            self.status_reporter.reports[-1]['detail'],
+            'FORK_DOWN_ERROR:hydraulic_fault',
+        )
+
+    def test_fork_down_timeout_fails_the_pending_poc_mission(self):
+        """A missing fork completion cannot leave the mission eligible to reverse."""
+        reporter = RecordingStatusReporter()
+        service = self.module.VehicleCommandService(
+            velocity=RecordingVelocity(),
+            navigation=FakeNavigation(),
+            max_linear_x=1.0,
+            max_angular_z=1.0,
+            max_hold_ms=1000,
+            fork_state_timeout_sec=0.01,
+            status_reporter=reporter,
+        )
+        try:
+            service.fork_command('DOWN', {'operation_id': POC_MISSION_ID})
+            self.wait_until(lambda: bool(reporter.reports))
+            reports = list(reporter.reports)
+        finally:
+            service.close()
+
+        self.assertEqual(reports[-1]['state'], 'FAIL')
+        self.assertEqual(reports[-1]['operation_id'], POC_MISSION_ID)
+        self.assertEqual(reports[-1]['source'], 'FORK')
+        self.assertEqual(reports[-1]['detail'], 'FORK_DOWN_TIMEOUT')
+
+    def test_manual_expiry_relays_the_optional_poc_mission_id(self):
+        """The POC cannot start its return leg until the exact reverse has stopped."""
+        self.mark_idle()
+        self.status_reporter.reports.clear()
+        status, response = post_json(
+            f'{self.base_url}/v1/cmd-vel',
+            {
+                'operation_id': POC_MISSION_ID,
+                'linear_x': -0.18,
+                'linear_y': 0.0,
+                'angular_z': 0.0,
+                'hold_ms': 1,
+            },
+        )
+        self.wait_until(lambda: bool(self.status_reporter.reports))
+
+        self.assertEqual(status, 202)
+        self.assertEqual(response['linear_x'], -0.18)
+        self.assertEqual(self.status_reporter.reports[-1]['state'], 'WAIT')
+        self.assertEqual(self.status_reporter.reports[-1]['operation_id'], POC_MISSION_ID)
+        self.assertEqual(self.status_reporter.reports[-1]['source'], 'API')
+        self.assertEqual(self.status_reporter.reports[-1]['detail'], 'MANUAL_COMMAND_EXPIRED')
+
     def test_health_openapi_and_operation_status_are_discoverable(self):
         """Removing a public endpoint must fail the vehicle integration contract."""
         health_status, health = self.get_json('/healthz')
@@ -709,6 +800,17 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             'minimum': -1.0,
             'maximum': 1.0,
         })
+        self.assertEqual(
+            velocity_schema['properties']['operation_id'],
+            {'type': 'string', 'format': 'uuid'},
+        )
+        fork_schema = openapi['paths']['/v1/fork/down']['post']['requestBody'][
+            'content'
+        ]['application/json']['schema']
+        self.assertEqual(
+            fork_schema['properties']['operation_id'],
+            {'type': 'string', 'format': 'uuid'},
+        )
         self.assertEqual(
             set(openapi['paths']),
             {
@@ -1076,7 +1178,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
         for option in (
             '--host', '--port', '--robot-id', '--cmd-vel-topic', '--action-name',
             '--follow-waypoints-action-name',
-            '--fork-command-topic',
+            '--fork-command-topic', '--fork-state-topic', '--fork-state-timeout-sec',
             '--battery-topic', '--battery-stale-sec',
             '--initial-pose-topic', '--initial-pose-position-variance',
             '--initial-pose-yaw-variance',
@@ -1092,6 +1194,8 @@ class VehicleCommandApiCliTest(unittest.TestCase):
         self.assertEqual(arguments.max_linear_x, 1.0)
         self.assertEqual(arguments.max_linear_y, 1.0)
         self.assertEqual(arguments.max_angular_z, 1.0)
+        self.assertEqual(arguments.fork_state_topic, '/fork/state')
+        self.assertEqual(arguments.fork_state_timeout_sec, 15.0)
 
     def test_direct_runner_reports_init_to_the_configured_status_relay(self):
         adapter = ClosingFakeAdapter()
@@ -1102,6 +1206,8 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             robot_id='robot_2',
             cmd_vel_topic='/cmd_vel',
             fork_command_topic='/fork/command',
+            fork_state_topic='/fork/state',
+            fork_state_timeout_sec=15.0,
             action_name='/navigate_to_pose',
             follow_waypoints_action_name='/follow_waypoints',
             battery_topic='/ros_robot_controller/battery',
@@ -1264,6 +1370,8 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             robot_id='robot_2',
             cmd_vel_topic='/cmd_vel',
             fork_command_topic='/fork/command',
+            fork_state_topic='/fork/state',
+            fork_state_timeout_sec=15.0,
             action_name='/navigate_to_pose',
             follow_waypoints_action_name='/follow_waypoints',
             battery_topic='/ros_robot_controller/battery',
@@ -1293,6 +1401,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             goal_response_timeout_sec,
             cancel_response_timeout_sec,
             fork_command_topic,
+            fork_state_topic,
             auto_dock_arrival_topic,
             auto_dock_status_topic,
             auto_dock_stop_topic,
@@ -1307,6 +1416,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
                 'goal_response_timeout_sec': goal_response_timeout_sec,
                 'cancel_response_timeout_sec': cancel_response_timeout_sec,
                 'fork_command_topic': fork_command_topic,
+                'fork_state_topic': fork_state_topic,
                 'auto_dock_arrival_topic': auto_dock_arrival_topic,
                 'auto_dock_status_topic': auto_dock_status_topic,
                 'auto_dock_stop_topic': auto_dock_stop_topic,
@@ -1335,6 +1445,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             'goal_response_timeout_sec': 3.0,
             'cancel_response_timeout_sec': 3.0,
             'fork_command_topic': '/fork/command',
+            'fork_state_topic': '/fork/state',
             'auto_dock_arrival_topic': None,
             'auto_dock_status_topic': None,
             'auto_dock_stop_topic': None,

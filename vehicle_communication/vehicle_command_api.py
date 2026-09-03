@@ -152,6 +152,7 @@ class VehicleCommandService:
         vehicle_status=None,
         status_reporter=None,
         max_linear_y=None,
+        fork_state_timeout_sec=15.0,
     ):
         self.velocity = velocity
         self.navigation = navigation
@@ -170,6 +171,14 @@ class VehicleCommandService:
         self._lock = threading.Lock()
         self._manual_timer = None
         self._manual_generation = 0
+        self._manual_operation_id = None
+        if fork_state_timeout_sec <= 0:
+            raise ValueError('fork_state_timeout_sec must be greater than zero')
+        self._fork_state_timeout_sec = fork_state_timeout_sec
+        self._fork_timer = None
+        self._fork_generation = 0
+        self._pending_fork_command = None
+        self._pending_fork_operation_id = None
         self._active_navigation_operation = None
         self._active_navigation_attempt = None
         self._navigation_origin_state = None
@@ -233,11 +242,15 @@ class VehicleCommandService:
             return dict(self._status)
 
     def command(self, payload):
-        self._validate_fields(payload, {'linear_x', 'linear_y', 'angular_z', 'hold_ms'})
+        self._validate_fields(
+            payload,
+            {'linear_x', 'linear_y', 'angular_z', 'hold_ms', 'operation_id'},
+        )
         linear_x = self._bounded_number(payload, 'linear_x', self.max_linear_x)
         linear_y = self._optional_bounded_number(payload, 'linear_y', self.max_linear_y)
         angular_z = self._bounded_number(payload, 'angular_z', self.max_angular_z)
         hold_ms = self._hold_ms(payload)
+        operation_id = self._optional_operation_id(payload)
         self._validate_manual_rotation(angular_z, hold_ms)
 
         with self._lock:
@@ -265,6 +278,7 @@ class VehicleCommandService:
                     'DRIVE',
                 )
             self._manual_restore_status = dict(self._status)
+            self._manual_operation_id = operation_id or self._status['operation_id']
             self._manual_generation += 1
             generation = self._manual_generation
             self._cancel_manual_timer()
@@ -291,13 +305,62 @@ class VehicleCommandService:
             'hold_ms': hold_ms,
         }
 
-    def fork_command(self, command):
+    def _fork_command(self, command, payload):
         if command not in {'UP', 'DOWN'}:
             raise CommandValidationError('fork command must be UP or DOWN')
+        self._validate_fields(payload, {'operation_id'})
+        operation_id = self._optional_operation_id(payload)
         if not hasattr(self.velocity, 'publish_fork_command'):
             raise NavigationUnavailableError('FORK_COMMAND_PUBLISHER_UNAVAILABLE')
+        if operation_id is not None:
+            with self._lock:
+                if self._pending_fork_command is not None:
+                    raise OperationConflictError('FORK_COMMAND_ACTIVE')
+                self._fork_generation += 1
+                generation = self._fork_generation
+                self._pending_fork_command = command
+                self._pending_fork_operation_id = operation_id
+                self._cancel_fork_timer()
+                self._fork_timer = threading.Timer(
+                    self._fork_state_timeout_sec,
+                    self._expire_fork_state,
+                    [generation],
+                )
+                self._fork_timer.daemon = True
+                self._fork_timer.start()
         self.velocity.publish_fork_command(command)
         return {'command': command, 'state': 'FORK_COMMAND_PUBLISHED'}
+
+    def fork_command(self, command, payload=None):
+        return self._fork_command(command, payload or {})
+
+    def on_fork_state(self, raw_data):
+        try:
+            payload = json.loads(raw_data)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = None
+        with self._lock:
+            command = self._pending_fork_command
+            operation_id = self._pending_fork_operation_id
+            if command is None or operation_id is None:
+                return
+            self._clear_pending_fork()
+
+        state = payload.get('state') if isinstance(payload, dict) else None
+        error = payload.get('error') if isinstance(payload, dict) else 'INVALID_FORK_STATE'
+        if not isinstance(error, str):
+            error = 'INVALID_FORK_STATE'
+        if state == f'{command}_COMPLETE' and not error:
+            self._report_fork_state(operation_id, f'FORK_{command}_COMPLETE', False)
+            return
+        detail = f'FORK_{command}_ERROR'
+        if error:
+            detail = f'{detail}:{error}'
+        elif state:
+            detail = f'{detail}:{state}'
+        else:
+            detail = f'{detail}:INVALID_FORK_STATE'
+        self._report_fork_state(operation_id, detail, True)
 
     def navigation_goal(self, payload):
         goal = self._goal(payload, {'operation_id', 'purpose'})
@@ -522,6 +585,7 @@ class VehicleCommandService:
         with self._lock:
             self._manual_generation += 1
             self._cancel_manual_timer()
+            self._clear_pending_fork()
             navigation_attempt = self._active_navigation_attempt
             auto_dock_active = self._auto_dock_active
             status_before_stop = dict(self._status)
@@ -583,6 +647,8 @@ class VehicleCommandService:
         }
 
     def close(self):
+        with self._lock:
+            self._clear_pending_fork()
         self.stop()
 
     def _on_navigation_terminal(self, attempt_id, terminal_state):
@@ -645,10 +711,14 @@ class VehicleCommandService:
                 'detail': 'MANUAL_COMMAND_EXPIRED',
             }
             self._manual_restore_status = None
+            operation_id = self._manual_operation_id
+            self._manual_operation_id = None
             self._status = {
                 **restored,
                 'detail': 'MANUAL_COMMAND_EXPIRED',
             }
+            if operation_id is not None:
+                self._report_external_state('API', operation_id=operation_id)
 
     def _set_status(
         self,
@@ -731,6 +801,48 @@ class VehicleCommandService:
             self._manual_timer.cancel()
             self._manual_timer = None
 
+    def _expire_fork_state(self, generation):
+        with self._lock:
+            if generation != self._fork_generation:
+                return
+            command = self._pending_fork_command
+            operation_id = self._pending_fork_operation_id
+            self._clear_pending_fork()
+        if command is not None and operation_id is not None:
+            self._report_fork_state(operation_id, f'FORK_{command}_TIMEOUT', True)
+
+    def _clear_pending_fork(self):
+        self._fork_generation += 1
+        self._cancel_fork_timer()
+        self._pending_fork_command = None
+        self._pending_fork_operation_id = None
+
+    def _cancel_fork_timer(self):
+        if self._fork_timer is not None:
+            self._fork_timer.cancel()
+            self._fork_timer = None
+
+    def _report_fork_state(self, operation_id, detail, failed):
+        if self._status_reporter is None:
+            return
+        state = 'FAIL' if failed else 'WAIT'
+        payload = {
+            'state': state,
+            'previous_state': self._last_reported_external_state,
+            'operation_id': operation_id,
+            'attempt_id': None,
+            'source': 'FORK',
+            'detail': detail,
+            'observed_at': datetime.now(timezone.utc).isoformat(
+                timespec='milliseconds',
+            ).replace('+00:00', 'Z'),
+        }
+        try:
+            self._status_reporter.report(payload)
+        except Exception:
+            return
+        self._last_reported_external_state = state
+
     def _goal(self, payload, extra_fields=None):
         allowed_fields = {'frame_id', 'x', 'y', 'yaw'}
         if extra_fields:
@@ -745,6 +857,18 @@ class VehicleCommandService:
             'y': self._finite_number(payload, 'y'),
             'yaw': self._finite_number(payload, 'yaw'),
         }
+
+    @staticmethod
+    def _optional_operation_id(payload):
+        operation_id = payload.get('operation_id')
+        if operation_id is None:
+            return None
+        if not isinstance(operation_id, str) or not operation_id.strip():
+            raise CommandValidationError('operation_id must be a non-empty string')
+        try:
+            return str(uuid.UUID(operation_id))
+        except (ValueError, AttributeError) as error:
+            raise CommandValidationError('operation_id must be a UUID') from error
 
     def _waypoints(self, payload):
         self._validate_fields(payload, {'operation_id', 'purpose', 'waypoints'})
@@ -978,6 +1102,7 @@ def openapi_document(service):
                                     'minimum': -service.max_linear_y,
                                     'maximum': service.max_linear_y,
                                 },
+                                'operation_id': {'type': 'string', 'format': 'uuid'},
                                 'angular_z': {
                                     'type': 'number',
                                     'description': (
@@ -1003,6 +1128,15 @@ def openapi_document(service):
             },
             '/v1/fork/up': {
                 'post': {
+                    'requestBody': {
+                        'content': {'application/json': {'schema': {
+                            'type': 'object',
+                            'additionalProperties': False,
+                            'properties': {
+                                'operation_id': {'type': 'string', 'format': 'uuid'},
+                            },
+                        }}},
+                    },
                     'responses': {
                         '202': {'description': 'UP published to the fork command topic'},
                         '503': {'description': 'Fork command topic publisher unavailable'},
@@ -1011,6 +1145,15 @@ def openapi_document(service):
             },
             '/v1/fork/down': {
                 'post': {
+                    'requestBody': {
+                        'content': {'application/json': {'schema': {
+                            'type': 'object',
+                            'additionalProperties': False,
+                            'properties': {
+                                'operation_id': {'type': 'string', 'format': 'uuid'},
+                            },
+                        }}},
+                    },
                     'responses': {
                         '202': {'description': 'DOWN published to the fork command topic'},
                         '503': {'description': 'Fork command topic publisher unavailable'},
@@ -1167,12 +1310,16 @@ def create_http_server(host, port, service):
                     self._write_json(202, service.command(self._read_json()))
                     return
                 if path == '/v1/fork/up':
-                    self._read_optional_json()
-                    self._write_json(202, service.fork_command('UP'))
+                    self._write_json(
+                        202,
+                        service.fork_command('UP', self._read_optional_json()),
+                    )
                     return
                 if path == '/v1/fork/down':
-                    self._read_optional_json()
-                    self._write_json(202, service.fork_command('DOWN'))
+                    self._write_json(
+                        202,
+                        service.fork_command('DOWN', self._read_optional_json()),
+                    )
                     return
                 if path == '/v1/navigation/goals':
                     self._write_json(202, service.navigation_goal(self._read_json()))
@@ -1267,6 +1414,7 @@ class RosVehicleAdapter:
         goal_response_timeout_sec,
         cancel_response_timeout_sec,
         fork_command_topic=None,
+        fork_state_topic=None,
         auto_dock_arrival_topic=None,
         auto_dock_status_topic=None,
         auto_dock_stop_topic=None,
@@ -1319,6 +1467,7 @@ class RosVehicleAdapter:
         self._initial_pose_publisher = None
         self._auto_dock_status_subscription = None
         self._auto_dock_drive_ready_subscription = None
+        self._fork_state_subscription = None
 
         robot_name = robot_id.strip('/')
         if not robot_name:
@@ -1336,6 +1485,7 @@ class RosVehicleAdapter:
             auto_dock_drive_ready_topic or f'/{robot_name}/auto_dock/drive_ready'
         )
         self._fork_command_topic = fork_command_topic or '/fork/command'
+        self._fork_state_topic = fork_state_topic or '/fork/state'
 
         self._context = Context()
         self._rclpy.init(args=None, context=self._context)
@@ -1412,6 +1562,16 @@ class RosVehicleAdapter:
             self._empty_type,
             self._auto_dock_drive_ready_topic,
             lambda _message: on_drive_ready(),
+            10,
+        )
+
+    def configure_fork_state_subscription(self, on_fork_state):
+        if self._fork_state_subscription is not None:
+            raise RuntimeError('fork state subscription is already configured')
+        self._fork_state_subscription = self._node.create_subscription(
+            self._string_type,
+            self._fork_state_topic,
+            lambda message: on_fork_state(message.data),
             10,
         )
 
@@ -1579,6 +1739,8 @@ def parse_args(argv=None):
     parser.add_argument('--robot-id', required=True)
     parser.add_argument('--cmd-vel-topic', default='/cmd_vel')
     parser.add_argument('--fork-command-topic', default='/fork/command')
+    parser.add_argument('--fork-state-topic', default='/fork/state')
+    parser.add_argument('--fork-state-timeout-sec', type=float, default=15.0)
     parser.add_argument('--action-name', default='/navigate_to_pose')
     parser.add_argument('--follow-waypoints-action-name', default='/follow_waypoints')
     parser.add_argument('--battery-topic', default='/ros_robot_controller/battery')
@@ -1609,6 +1771,7 @@ def create_ros_vehicle_adapter(arguments):
         robot_id=arguments.robot_id,
         cmd_vel_topic=arguments.cmd_vel_topic,
         fork_command_topic=getattr(arguments, 'fork_command_topic', None),
+        fork_state_topic=getattr(arguments, 'fork_state_topic', None),
         action_name=arguments.action_name,
         follow_waypoints_action_name=arguments.follow_waypoints_action_name,
         action_server_timeout_sec=arguments.action_server_timeout_sec,
@@ -1646,6 +1809,7 @@ def run_server(arguments, adapter_factory=None, http_server_factory=create_http_
         max_linear_y=getattr(arguments, 'max_linear_y', arguments.max_linear_x),
         max_angular_z=arguments.max_angular_z,
         max_hold_ms=arguments.max_hold_ms,
+        fork_state_timeout_sec=getattr(arguments, 'fork_state_timeout_sec', 15.0),
         initial_pose_position_variance=arguments.initial_pose_position_variance,
         initial_pose_yaw_variance=arguments.initial_pose_yaw_variance,
         vehicle_status=vehicle_status,
@@ -1656,6 +1820,8 @@ def run_server(arguments, adapter_factory=None, http_server_factory=create_http_
             service.on_auto_dock_status,
             service.on_auto_dock_drive_ready,
         )
+    if hasattr(adapter, 'configure_fork_state_subscription'):
+        adapter.configure_fork_state_subscription(service.on_fork_state)
     service.report_current_status()
     http_server = http_server_factory(arguments.host, arguments.port, service)
     previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
