@@ -140,6 +140,24 @@ class CommandApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertEqual(fleet_manager.calls, [])
 
+    def test_vehicle_status_relay_accepts_fork_completion_for_the_poc_mission(self):
+        fleet_manager = RecordingFleetManagerClient()
+        client, _vehicle_api = self.client(fleet_manager=fleet_manager)
+        payload = {
+            'state': 'WAIT',
+            'previous_state': 'WAIT',
+            'operation_id': '3e829a02-7601-4b9f-afdf-3dbd84737828',
+            'attempt_id': None,
+            'source': 'FORK',
+            'detail': 'FORK_DOWN_COMPLETE',
+            'observed_at': '2026-08-31T12:00:00Z',
+        }
+
+        response = client.post('/api/v1/vehicle-status/robot_1', json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(fleet_manager.calls, [('robot_1', payload)])
+
     def test_vehicle_status_relay_preserves_fleet_manager_error_response(self):
         fleet_manager = RecordingFleetManagerClient(
             error=FleetManagerApiError(422, {'detail': 'invalid vehicle state'}),
@@ -233,7 +251,9 @@ class CommandApiTest(unittest.TestCase):
                 'hold_ms': 300,
             }, '/v1/cmd-vel'),
             ('POST', '/fork/up', None, '/v1/fork/up'),
-            ('POST', '/fork/down', None, '/v1/fork/down'),
+            ('POST', '/fork/down', {
+                'operation_id': '3e829a02-7601-4b9f-afdf-3dbd84737828',
+            }, '/v1/fork/down'),
             ('POST', '/navigation/goals', {
                 'operation_id': '73d5b9af-5a12-4f34-a96c-5de116df1e8e',
                 'x': 1.5,

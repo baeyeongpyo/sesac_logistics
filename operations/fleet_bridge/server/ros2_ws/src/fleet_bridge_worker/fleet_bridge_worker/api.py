@@ -48,7 +48,7 @@ VEHICLE_STATUS_TAG = {
 }
 
 VehicleState = Literal['INIT', 'WAIT', 'DRIVE', 'PICK', 'PLACE', 'FAIL']
-StateSource = Literal['VEHICLE', 'NAV2', 'AUTO_DOCK', 'API']
+StateSource = Literal['VEHICLE', 'NAV2', 'AUTO_DOCK', 'API', 'FORK']
 
 
 class VehicleStatusReport(BaseModel):
@@ -435,8 +435,20 @@ def create_app(
             **_relay_error_responses(),
         },
     )
-    async def vehicle_fork_up(robot_id: RobotId) -> JSONResponse:
-        return await relay_vehicle_command(robot_id, 'POST', '/v1/fork/up')
+    async def vehicle_fork_up(
+        robot_id: RobotId,
+        payload: Any = Body(
+            default=None,
+            description='선택적으로 POC 작업 ID를 포함하는 차량-native 포크 상승 요청입니다.',
+            openapi_examples={
+                'sample': {
+                    'summary': 'POC 작업과 포크 상승 연결',
+                    'value': {'operation_id': '3e829a02-7601-4b9f-afdf-3dbd84737828'},
+                },
+            },
+        ),
+    ) -> JSONResponse:
+        return await relay_vehicle_command(robot_id, 'POST', '/v1/fork/up', payload)
 
     @app.post(
         '/api/v1/vehicle-command/{robot_id}/fork/down',
@@ -458,8 +470,20 @@ def create_app(
             **_relay_error_responses(),
         },
     )
-    async def vehicle_fork_down(robot_id: RobotId) -> JSONResponse:
-        return await relay_vehicle_command(robot_id, 'POST', '/v1/fork/down')
+    async def vehicle_fork_down(
+        robot_id: RobotId,
+        payload: Any = Body(
+            default=None,
+            description='POC 작업 ID를 포함하는 차량-native 포크 하강 요청입니다.',
+            openapi_examples={
+                'sample': {
+                    'summary': 'Pallet 3 하역 포크 하강',
+                    'value': {'operation_id': '3e829a02-7601-4b9f-afdf-3dbd84737828'},
+                },
+            },
+        ),
+    ) -> JSONResponse:
+        return await relay_vehicle_command(robot_id, 'POST', '/v1/fork/down', payload)
 
     @app.post(
         '/api/v1/vehicle-command/{robot_id}/navigation/goals',

@@ -133,6 +133,48 @@ def create_app(
             payload,
         )
 
+    @app.post("/api/v1/vehicles/{robot_id}/commands/navigation/waypoints")
+    def navigate_vehicle_waypoints(
+        robot_id: str,
+        payload: dict[str, Any] = Body(...),
+        request: Request = None,
+    ) -> Response:
+        return _relay_command(
+            request,
+            robot_id,
+            "navigate",
+            f"/api/v1/vehicle-command/{robot_id}/navigation/waypoints",
+            payload,
+        )
+
+    @app.post("/api/v1/vehicles/{robot_id}/commands/fork/down")
+    def lower_vehicle_fork(
+        robot_id: str,
+        payload: dict[str, Any] = Body(...),
+        request: Request = None,
+    ) -> Response:
+        return _relay_command(
+            request,
+            robot_id,
+            "fork",
+            f"/api/v1/vehicle-command/{robot_id}/fork/down",
+            payload,
+        )
+
+    @app.post("/api/v1/vehicles/{robot_id}/commands/cmd-vel")
+    def command_vehicle_velocity(
+        robot_id: str,
+        payload: dict[str, Any] = Body(...),
+        request: Request = None,
+    ) -> Response:
+        return _relay_command(
+            request,
+            robot_id,
+            "manual_drive",
+            f"/api/v1/vehicle-command/{robot_id}/cmd-vel",
+            payload,
+        )
+
     @app.post("/api/v1/vehicles/{robot_id}/commands/auto-dock")
     def auto_dock_vehicle(
         robot_id: str,
@@ -145,6 +187,16 @@ def create_app(
             "auto_dock",
             f"/api/v1/vehicle-command/{robot_id}/auto-dock",
             payload,
+        )
+
+    @app.post("/api/v1/vehicles/{robot_id}/commands/stop")
+    def stop_vehicle(robot_id: str, request: Request) -> Response:
+        return _relay_command(
+            request,
+            robot_id,
+            "stop",
+            f"/api/v1/vehicle-command/{robot_id}/stop",
+            {},
         )
 
     return app

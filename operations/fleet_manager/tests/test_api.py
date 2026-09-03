@@ -36,6 +36,22 @@ class FleetManagerApiTests(unittest.TestCase):
             "/api/v1/vehicles/{robot_id}/commands/auto-dock",
             schema["paths"],
         )
+        self.assertIn(
+            "/api/v1/vehicles/{robot_id}/commands/navigation/waypoints",
+            schema["paths"],
+        )
+        self.assertIn(
+            "/api/v1/vehicles/{robot_id}/commands/fork/down",
+            schema["paths"],
+        )
+        self.assertIn(
+            "/api/v1/vehicles/{robot_id}/commands/cmd-vel",
+            schema["paths"],
+        )
+        self.assertIn(
+            "/api/v1/vehicles/{robot_id}/commands/stop",
+            schema["paths"],
+        )
 
     def test_state_report_creates_vehicle_snapshot(self) -> None:
         response = self.client.post(

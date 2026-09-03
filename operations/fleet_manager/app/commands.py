@@ -9,7 +9,7 @@ import yaml
 
 
 SUPPORTED_CAPABILITIES = frozenset(
-    {"navigate", "auto_dock", "stop", "report_status"}
+    {"navigate", "auto_dock", "stop", "report_status", "fork", "manual_drive"}
 )
 
 

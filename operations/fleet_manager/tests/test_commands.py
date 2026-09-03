@@ -37,7 +37,7 @@ class FleetManagerCommandApiTests(unittest.TestCase):
             """models:
   - id: mentorpi
     bridge_url: http://command-api:8080
-    capabilities: [navigate, auto_dock, stop, report_status]
+    capabilities: [navigate, auto_dock, stop, report_status, fork, manual_drive]
   - id: limited
     bridge_url: http://limited-bridge:8080
     capabilities: [navigate]
@@ -109,6 +109,46 @@ vehicles:
         self.assertEqual(
             self.bridge.calls[0][2:],
             ("/api/v1/vehicle-command/robot_1/auto-dock", payload),
+        )
+
+    def test_poc_commands_relay_waypoints_fork_down_and_bounded_reverse(self) -> None:
+        mission_id = "3e829a02-7601-4b9f-afdf-3dbd84737828"
+        waypoints = {
+            "operation_id": mission_id,
+            "purpose": "PLACE",
+            "waypoints": [{"frame_id": "map", "x": -0.42, "y": -2.4, "yaw": -1.57}],
+        }
+        reverse = {
+            "operation_id": mission_id,
+            "linear_x": -0.18,
+            "linear_y": 0.0,
+            "angular_z": 0.0,
+            "hold_ms": 1000,
+        }
+
+        waypoint_response = self.client.post(
+            "/api/v1/vehicles/robot_1/commands/navigation/waypoints",
+            json=waypoints,
+        )
+        fork_response = self.client.post(
+            "/api/v1/vehicles/robot_1/commands/fork/down",
+            json={"operation_id": mission_id},
+        )
+        reverse_response = self.client.post(
+            "/api/v1/vehicles/robot_1/commands/cmd-vel",
+            json=reverse,
+        )
+
+        self.assertEqual(waypoint_response.status_code, 202)
+        self.assertEqual(fork_response.status_code, 202)
+        self.assertEqual(reverse_response.status_code, 202)
+        self.assertEqual(
+            [call[2:] for call in self.bridge.calls],
+            [
+                ("/api/v1/vehicle-command/robot_1/navigation/waypoints", waypoints),
+                ("/api/v1/vehicle-command/robot_1/fork/down", {"operation_id": mission_id}),
+                ("/api/v1/vehicle-command/robot_1/cmd-vel", reverse),
+            ],
         )
 
     def test_unsupported_capability_is_rejected_before_bridge_delivery(self) -> None:

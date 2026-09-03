@@ -23,7 +23,7 @@ docker compose --env-file .env up --build
 models:
   - id: mentorpi
     bridge_url: http://command-api:8080
-    capabilities: [navigate, auto_dock, stop, report_status]
+    capabilities: [navigate, auto_dock, stop, report_status, fork, manual_drive]
 vehicles:
   - id: robot_1
     model: mentorpi
@@ -76,6 +76,10 @@ Orchestrator는 Fleet Bridge가 아닌 Fleet Manager에 아래 표준 역할을 
 
 ```text
 POST /api/v1/vehicles/{robot_id}/commands/navigation/goals
+POST /api/v1/vehicles/{robot_id}/commands/navigation/waypoints
+POST /api/v1/vehicles/{robot_id}/commands/fork/down
+POST /api/v1/vehicles/{robot_id}/commands/cmd-vel
+POST /api/v1/vehicles/{robot_id}/commands/stop
 POST /api/v1/vehicles/{robot_id}/commands/auto-dock
 ```
 

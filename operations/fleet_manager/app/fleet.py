@@ -26,6 +26,7 @@ class StateSource(str, Enum):
     NAV2 = "NAV2"
     AUTO_DOCK = "AUTO_DOCK"
     API = "API"
+    FORK = "FORK"
 
 
 class VehicleStateReport(BaseModel):
