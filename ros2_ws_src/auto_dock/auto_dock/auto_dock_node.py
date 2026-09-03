@@ -3541,6 +3541,41 @@ class AutoDockNode(Node):
             self.target_world = observed
         return True
 
+    def measurement_matches_locked_target(self, candidate, pnp):
+        """Match a reacquired pallet by physical pose instead of transient ID."""
+        target = self.target_in_body()
+        if target is None or not isinstance(pnp, dict):
+            return False
+        depth_measurement = candidate.get("depth_yaw") or {}
+        distance_source = pnp.get("distance_source", "depth")
+        forward_value = (
+            pnp.get("forward_distance_cm")
+            if distance_source == "pnp"
+            else depth_measurement.get("forward_distance_cm")
+        )
+        if forward_value is None:
+            forward_value = pnp.get("forward_distance_cm")
+        try:
+            physical_forward = float(forward_value) / 100.0
+            physical_lateral = -float(
+                pnp.get("lateral_ratio", 0.0)
+            ) * physical_forward
+        except (TypeError, ValueError):
+            return False
+        physical_lateral += self.number("centerline_offset_cm", 0.0) / 100.0
+        observed_forward = physical_forward / self.number(
+            "distance_coefficient", 1.0, 0.10, 2.0
+        )
+        observed_lateral = physical_lateral / self.number(
+            "lateral_coefficient", 1.0, 0.10, 2.0
+        )
+        maximum_delta = self.number(
+            "nearest_recheck_pose_max_delta_m", 0.18, 0.05, 0.50
+        )
+        return math.hypot(
+            observed_forward - target[0], observed_lateral - target[1]
+        ) <= maximum_delta
+
     def target_in_body(self):
         if self.target_world is None or self.odom_position is None or self.odom_yaw is None:
             return None
@@ -4943,19 +4978,6 @@ class AutoDockNode(Node):
                 "source_stamp_ns"
             )
             candidate, pnp, reason = self.valid_measurement()
-            locked_entity_id = getattr(self, "target_entity_id", None)
-            if (
-                candidate is not None
-                and locked_entity_id is not None
-                and candidate.get("entity_id") not in {None, locked_entity_id}
-            ):
-                locked_candidate, locked_pnp = self.nearest_product_candidate(
-                    self.latest_detection or {}, respect_lock=True
-                )
-                if locked_candidate is not None:
-                    candidate, pnp, reason = locked_candidate, locked_pnp, None
-                else:
-                    candidate, pnp, reason = None, None, "locked_entity_mismatch"
             if candidate is None:
                 partial_measurement = getattr(
                     self, "tracked_partial_measurement", None
@@ -4975,12 +4997,18 @@ class AutoDockNode(Node):
                 and source_stamp
                 != getattr(self, "nearest_step_source_stamp_ns", None)
             )
-            same_entity = (
-                candidate is not None
-                and candidate.get("entity_id")
-                in {None, getattr(self, "target_entity_id", None)}
+            pose_matcher = getattr(
+                self, "measurement_matches_locked_target", None
             )
-            if not fresh_frame or not same_entity:
+            if (
+                candidate is not None
+                and callable(pose_matcher)
+                and not pose_matcher(candidate, pnp)
+            ):
+                candidate, pnp, reason = (
+                    None, None, "nearest_recheck_pose_mismatch"
+                )
+            if not fresh_frame:
                 if getattr(self, "nearest_step_wait_started_at", None) is None:
                     self.nearest_step_wait_started_at = now
                 self.publish_status(
@@ -4990,18 +5018,27 @@ class AutoDockNode(Node):
                     wait_sec=round(now - self.nearest_step_wait_started_at, 2),
                 )
                 return
-            if not self.update_world_target(candidate, pnp, blend_existing=False):
-                self.cancel("odom_missing")
-                return
             self.nearest_step_settle_until = None
             self.nearest_step_wait_started_at = None
             self.nearest_step_source_stamp_ns = source_stamp
             self.nearest_step_verified = True
-            self.publish_status(
-                "running", "nearest_fresh_measurement_relocked",
-                entity_id=self.target_entity_id,
-                step=getattr(self, "nearest_step_count", 0),
-            )
+            if candidate is not None:
+                if not self.update_world_target(
+                    candidate, pnp, blend_existing=False
+                ):
+                    self.cancel("odom_missing")
+                    return
+                self.publish_status(
+                    "running", "nearest_fresh_measurement_relocked_by_pose",
+                    observed_entity_id=candidate.get("entity_id"),
+                    step=getattr(self, "nearest_step_count", 0),
+                )
+            else:
+                self.publish_status(
+                    "running", "nearest_visual_lost_using_locked_odom_pose",
+                    measurement_reason=reason,
+                    step=getattr(self, "nearest_step_count", 0),
+                )
         elif not nearest_target:
             candidate, pnp, _ = self.valid_measurement()
             if candidate is not None:

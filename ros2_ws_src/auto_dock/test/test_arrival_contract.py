@@ -3028,7 +3028,7 @@ def test_nearest_recheck_accepts_locked_upper_pair_on_new_frame(monkeypatch):
     assert fake.insertion_start_due_at == pytest.approx(10.6)
 
 
-def test_nearest_legacy_recheck_reselects_locked_or_pallet_candidate(monkeypatch):
+def test_nearest_recheck_accepts_changed_entity_id_by_pose(monkeypatch):
     fake = type("FakeDock", (), {})()
     fake.target_type = "NEAREST"
     fake.target_entity_id = 52
@@ -3039,13 +3039,10 @@ def test_nearest_legacy_recheck_reselects_locked_or_pallet_candidate(monkeypatch
     fake.nearest_step_count = 1
     fake.nearest_step_verified = False
     wrong = {"entity_id": 70}
-    pallet = {"entity_id": None, "depth_yaw": {"forward_distance_cm": 19.0}}
-    pallet_pnp = {"depth_fallback": True, "lateral_ratio": 0.0}
-    fake.valid_measurement = lambda: (wrong, {"depth_fallback": False}, None)
-    fake.nearest_product_candidate = lambda _detection, respect_lock: (
-        (pallet, pallet_pnp) if respect_lock else (wrong, {})
-    )
+    wrong_pnp = {"depth_fallback": False}
+    fake.valid_measurement = lambda: (wrong, wrong_pnp, None)
     fake.tracked_partial_measurement = lambda: (None, None, "unused")
+    fake.measurement_matches_locked_target = lambda candidate, pnp: True
     updates = []
     fake.update_world_target = lambda candidate, pnp, **kwargs: (
         updates.append((candidate, pnp, kwargs)) or True
@@ -3063,9 +3060,44 @@ def test_nearest_legacy_recheck_reselects_locked_or_pallet_candidate(monkeypatch
 
     AutoDockNode.tick_docking(fake)
 
-    assert updates == [(pallet, pallet_pnp, {"blend_existing": False})]
+    assert updates == [(wrong, wrong_pnp, {"blend_existing": False})]
     assert fake.nearest_step_verified is True
     assert fake.insertion_start_due_at == pytest.approx(10.6)
+
+
+def test_nearest_recheck_uses_locked_odom_pose_when_tags_disappear(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.target_type = "NEAREST"
+    fake.target_entity_id = None
+    fake.latest_detection = {"source_stamp_ns": 101}
+    fake.nearest_step_settle_until = 10.0
+    fake.nearest_step_source_stamp_ns = 100
+    fake.nearest_step_wait_started_at = 9.0
+    fake.nearest_step_count = 1
+    fake.nearest_step_verified = False
+    fake.valid_measurement = lambda: (None, None, "no_selected_candidate")
+    fake.tracked_partial_measurement = lambda: (
+        None, None, "partial_entity_unavailable"
+    )
+    fake.update_world_target = lambda *_args, **_kwargs: pytest.fail(
+        "locked odom target must be kept"
+    )
+    fake.target_in_body = lambda: (0.20, 0.0, 0.0)
+    fake.number = lambda key, default, *_args: default
+    fake.stop_drive = lambda *_args: None
+    fake.publish_status = lambda state, reason, **extra: setattr(
+        fake, "last_status", (state, reason, extra)
+    )
+    fake.insertion_start_due_at = None
+    fake.odom_position = (0.0, 0.0)
+    fake.odom_yaw = 0.0
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.5)
+
+    AutoDockNode.tick_docking(fake)
+
+    assert fake.nearest_step_verified is True
+    assert fake.insertion_start_due_at == pytest.approx(10.6)
+    assert fake.last_status[1] == "aligned_pause_before_insertion"
 
 
 def test_aligned_top_pair_at_nine_cm_can_start_insertion(monkeypatch):
