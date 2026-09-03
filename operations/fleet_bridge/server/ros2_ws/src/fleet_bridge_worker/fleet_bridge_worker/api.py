@@ -416,6 +416,52 @@ def create_app(
         return await relay_vehicle_command(robot_id, 'POST', '/v1/cmd-vel', payload)
 
     @app.post(
+        '/api/v1/vehicle-command/{robot_id}/fork/up',
+        tags=['vehicle-command relay'],
+        summary='포크 상승 명령 전달',
+        description=(
+            '선택한 차량의 `/fork/command` 토픽에 `std_msgs/msg/String`의 `UP` 명령을 '
+            '한 번 발행하도록 차량 API에 전달합니다.'
+        ),
+        responses={
+            202: {
+                'description': '차량이 포크 상승 명령을 발행했습니다.',
+                'content': {
+                    'application/json': {
+                        'example': {'command': 'UP', 'state': 'FORK_COMMAND_PUBLISHED'},
+                    },
+                },
+            },
+            **_relay_error_responses(),
+        },
+    )
+    async def vehicle_fork_up(robot_id: RobotId) -> JSONResponse:
+        return await relay_vehicle_command(robot_id, 'POST', '/v1/fork/up')
+
+    @app.post(
+        '/api/v1/vehicle-command/{robot_id}/fork/down',
+        tags=['vehicle-command relay'],
+        summary='포크 하강 명령 전달',
+        description=(
+            '선택한 차량의 `/fork/command` 토픽에 `std_msgs/msg/String`의 `DOWN` 명령을 '
+            '한 번 발행하도록 차량 API에 전달합니다.'
+        ),
+        responses={
+            202: {
+                'description': '차량이 포크 하강 명령을 발행했습니다.',
+                'content': {
+                    'application/json': {
+                        'example': {'command': 'DOWN', 'state': 'FORK_COMMAND_PUBLISHED'},
+                    },
+                },
+            },
+            **_relay_error_responses(),
+        },
+    )
+    async def vehicle_fork_down(robot_id: RobotId) -> JSONResponse:
+        return await relay_vehicle_command(robot_id, 'POST', '/v1/fork/down')
+
+    @app.post(
         '/api/v1/vehicle-command/{robot_id}/navigation/goals',
         tags=['vehicle-command relay'],
         summary='Nav2 목표 주행 요청 전달',

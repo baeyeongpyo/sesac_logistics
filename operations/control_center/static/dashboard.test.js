@@ -1,11 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import * as dashboard from './dashboard.js';
 
 import {
   batteryPercent,
   clampZoom,
   clampMapPan,
+  connectivityAgeLabel,
+  connectivityLabel,
+  displayedFleetState,
+  fleetStateLabel,
   inventoryBreakdown,
   ManualControlSession,
   manualRepeatInterval,
@@ -13,10 +18,15 @@ import {
   mapPointAtZoom,
   mapToPixel,
   manualCommand,
+  NavigationExecutionSession,
+  NavigationDraft,
+  navigationExecutionMatchesDraft,
   parsePgm,
   pixelToMap,
   rotationHoldMs,
+  scheduleSnapshotRefresh,
   svgRotationFromYaw,
+  taskLabel,
   vehicleSizeInPixels,
   yawFromDrag,
 } from './dashboard.js';
@@ -41,6 +51,56 @@ test('initial pose yaw follows the map-space direction of the drag', () => {
   assert.equal(yawFromDrag({ x: 50, y: 60 }, { x: 50, y: 40 }), Math.PI / 2);
 });
 
+test('navigation draft keeps initial and goal poses pending independently until execution', () => {
+  const draft = new NavigationDraft();
+  const initialPose = { x: -1.2, y: 0.75, yaw: 0.4 };
+  const goalPose = { x: 2.4, y: -0.5, yaw: -0.8 };
+
+  draft.setPose('initial', initialPose);
+  draft.setPose('goal', goalPose);
+
+  assert.deepEqual(draft.initialPose, initialPose);
+  assert.deepEqual(draft.goalPose, goalPose);
+  assert.equal(draft.hasPending('initial'), true);
+  assert.equal(draft.hasPending('goal'), true);
+});
+
+test('navigation draft keeps follow waypoints in selection order and renumbers after removal', () => {
+  const draft = new NavigationDraft();
+  draft.addWaypoint({ x: 0.5, y: 0, yaw: 0 });
+  draft.addWaypoint({ x: 1.0, y: 0.5, yaw: 0.4 });
+  draft.addWaypoint({ x: 1.5, y: 1.0, yaw: 0.8 });
+
+  draft.removeWaypoint(1);
+
+  assert.deepEqual(draft.waypoints, [
+    { x: 0.5, y: 0, yaw: 0 },
+    { x: 1.5, y: 1.0, yaw: 0.8 },
+  ]);
+  assert.equal(draft.hasPending('waypoints'), true);
+  draft.clearWaypoints();
+  assert.equal(draft.hasPending('waypoints'), false);
+});
+
+test('navigation execution session accepts one request and only clears its owning vehicle draft', () => {
+  const session = new NavigationExecutionSession();
+  const execution = session.begin('robot_1', 'waypoints', 4);
+
+  assert.deepEqual(execution, { robotId: 'robot_1', mode: 'waypoints', draftRevision: 4 });
+  assert.equal(session.begin('robot_1', 'waypoints', 5), null);
+  assert.equal(session.isPending(), true);
+  assert.equal(navigationExecutionMatchesDraft(execution, 'robot_2', { waypoints: 4 }), false);
+  assert.equal(navigationExecutionMatchesDraft(execution, 'robot_1', { waypoints: 5 }), false);
+  assert.equal(
+    navigationExecutionMatchesDraft(execution, 'robot_1', {
+      initial: 9, goal: 3, waypoints: 4,
+    }),
+    true,
+  );
+  assert.equal(session.complete(execution), true);
+  assert.equal(session.isPending(), false);
+});
+
 test('the operational PGM map decodes to its native dimensions', async () => {
   const source = new URL('../../monitoring/map_server/maps/map_0825.pgm', import.meta.url);
   const pgm = parsePgm(await readFile(source));
@@ -50,12 +110,113 @@ test('the operational PGM map decodes to its native dimensions', async () => {
   assert.equal(pgm.pixels.length, 196 * 128);
 });
 
+test('rotated operational map view crops unknown margin while preserving map input coordinates', async () => {
+  assert.equal(typeof dashboard.operationalMapView, 'function');
+  assert.equal(typeof dashboard.mapPixelToRotatedDisplay, 'function');
+  assert.equal(typeof dashboard.rotatedDisplayToMapPixel, 'function');
+  assert.equal(typeof dashboard.mapYawToRotatedDisplay, 'function');
+  assert.equal(typeof dashboard.rotatedDisplayYawToMapYaw, 'function');
+
+  const source = new URL('../../monitoring/map_server/maps/map_0825.pgm', import.meta.url);
+  const view = dashboard.operationalMapView(dashboard.parsePgm(await readFile(source)));
+
+  assert.ok(view.width > view.height);
+  assert.ok(view.sourceBounds.x > 0 && view.sourceBounds.y > 0);
+  assert.ok(80 - view.sourceBounds.x >= 8);
+  assert.ok(43 - view.sourceBounds.y >= 8);
+  assert.ok(view.sourceBounds.x + view.sourceBounds.width - 121 >= 8);
+  assert.ok(view.sourceBounds.y + view.sourceBounds.height - 109 >= 8);
+
+  const fixedView = {
+    sourceBounds: { x: 10, y: 20, width: 60, height: 100 },
+    width: 100,
+    height: 60,
+  };
+  const displayPoint = dashboard.mapPixelToRotatedDisplay({ x: 25, y: 35 }, fixedView);
+  assert.deepEqual(displayPoint, { x: 85, y: 15 });
+  assert.deepEqual(dashboard.rotatedDisplayToMapPixel(displayPoint, fixedView), { x: 25, y: 35 });
+  assert.equal(dashboard.mapYawToRotatedDisplay(0), -Math.PI / 2);
+  assert.equal(dashboard.rotatedDisplayYawToMapYaw(0), Math.PI / 2);
+});
+
 test('battery raw values are clamped and converted from the 6500 to 8500 range', () => {
   assert.equal(batteryPercent(6500), 0);
   assert.equal(batteryPercent(7500), 50);
   assert.equal(batteryPercent(8500), 100);
   assert.equal(batteryPercent(9000), 100);
   assert.equal(batteryPercent(6200), 0);
+});
+
+test('telemetry connection labels distinguish fresh, delayed, disconnected, and unconfirmed vehicles', () => {
+  assert.equal(connectivityLabel('online'), '연결됨');
+  assert.equal(connectivityLabel('stale'), '응답 지연');
+  assert.equal(connectivityLabel('offline'), '연결 끊김');
+  assert.equal(connectivityLabel('unconfirmed'), '수신 이력 없음');
+});
+
+test('disconnected vehicles hide their last telemetry age', () => {
+  assert.equal(connectivityAgeLabel({ state: 'online', age_sec: 7 }), ' · 7초 전');
+  assert.equal(connectivityAgeLabel({ state: 'stale', age_sec: 29 }), ' · 29초 전');
+  assert.equal(connectivityAgeLabel({ state: 'offline', age_sec: 960 }), '');
+  assert.equal(connectivityAgeLabel({ state: 'unconfirmed', age_sec: null }), '');
+});
+
+test('dashboard schedules snapshot refresh once per second', () => {
+  const calls = [];
+  const refresh = () => {};
+
+  scheduleSnapshotRefresh(refresh, (callback, interval) => {
+    calls.push({ callback, interval });
+    return 'poll-timer';
+  });
+
+  assert.deepEqual(calls, [{ callback: refresh, interval: 1000 }]);
+});
+
+test('vehicle list uses human-readable operational state and task names instead of task IDs', () => {
+  assert.equal(fleetStateLabel('DRIVE'), '주행 중');
+  assert.equal(fleetStateLabel('FAIL'), '오류');
+  assert.equal(fleetStateLabel('STOPPED'), '정지');
+  assert.equal(taskLabel({ status: 'TO_PICK' }, 'DRIVE'), '픽업 구역으로 이동');
+  assert.equal(taskLabel({ status: 'TO_PLACE' }, 'DRIVE'), '적치 구역으로 이동');
+  assert.equal(taskLabel({ status: 'TO_PICK', operation_id: 'opaque-operation-id' }, 'FAIL'), '운행 복구 대기');
+  assert.equal(taskLabel(null, 'STOPPED'), '정지 요청됨');
+  assert.equal(taskLabel(null, 'WAIT'), '할당된 작업 없음');
+});
+
+test('dashboard prefers the UI-only navigation display state over the vehicle control state', () => {
+  assert.equal(displayedFleetState({
+    fleet_state: { state: 'DRIVE' },
+    display_state: 'AUTO_DRIVE',
+  }), 'AUTO_DRIVE');
+  assert.equal(displayedFleetState({
+    fleet_state: { state: 'DRIVE' },
+  }), 'DRIVE');
+  assert.equal(fleetStateLabel('AUTO_DRIVE'), '자동 주행 중');
+  assert.equal(fleetStateLabel('MANUAL_DRIVE'), '수동 주행 중');
+});
+
+test('switching to a different navigation mode clears every existing point', () => {
+  const draft = new NavigationDraft();
+  draft.selectMode('initial');
+  draft.setPose('initial', { x: -1.2, y: 0.75, yaw: 0.4 });
+
+  draft.selectMode('goal');
+
+  assert.equal(draft.initialPose, null);
+  assert.equal(draft.goalPose, null);
+  assert.deepEqual(draft.waypoints, []);
+});
+
+test('reselecting the current navigation mode keeps its existing points', () => {
+  const draft = new NavigationDraft();
+  const initialPose = { x: -1.2, y: 0.75, yaw: 0.4 };
+  draft.selectMode('initial');
+  draft.setPose('initial', initialPose);
+
+  draft.selectMode('initial');
+
+  assert.deepEqual(draft.initialPose, initialPose);
 });
 
 test('inventory shows individual item quantities while retaining the zone total', () => {

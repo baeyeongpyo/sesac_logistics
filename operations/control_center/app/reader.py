@@ -10,6 +10,10 @@ import sqlite3
 from typing import Any, Callable
 
 
+ONLINE_TELEMETRY_AGE_SEC = 10
+OFFLINE_TELEMETRY_AGE_SEC = 30
+
+
 class SnapshotReader:
     """Build one dashboard snapshot from the operations SQLite databases.
 
@@ -18,8 +22,14 @@ class SnapshotReader:
     state change through the mounted monitoring data directory.
     """
 
-    def __init__(self, data_directory: Path):
+    def __init__(
+        self,
+        data_directory: Path,
+        *,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ):
         self.data_directory = data_directory
+        self._clock = clock
 
     def snapshot(self) -> dict[str, Any]:
         """Return a partial snapshot even when one source is unavailable."""
@@ -57,7 +67,14 @@ class SnapshotReader:
             'inventory': inventory_status,
             'orchestrator': orchestrator_status,
         }
-        vehicles = self._build_vehicles(telemetry, fleet, inventory, orchestrator)
+        vehicles = self._build_vehicles(
+            telemetry,
+            fleet,
+            inventory,
+            orchestrator,
+            inventory_available=inventory_status['available'],
+            now=self._clock().astimezone(UTC),
+        )
         return {
             'generated_at': datetime.now(UTC).isoformat(),
             'sources': sources,
@@ -262,6 +279,9 @@ class SnapshotReader:
         fleet: dict[str, list[dict[str, Any]]],
         inventory: dict[str, list[dict[str, Any]]],
         orchestrator: dict[str, list[dict[str, Any]]],
+        *,
+        inventory_available: bool,
+        now: datetime,
     ) -> list[dict[str, Any]]:
         poses = self._by_robot(telemetry.get('poses', []))
         batteries = self._by_robot(telemetry.get('batteries', []))
@@ -276,7 +296,8 @@ class SnapshotReader:
         vehicles = []
         for robot_id in sorted(robot_ids):
             fleet_state = states.get(robot_id)
-            active_task = operations.get(robot_id)
+            inventory_task = operations.get(robot_id)
+            active_task = inventory_task
             if active_task is None and fleet_state and fleet_state.get('operation_id'):
                 active_task = {'operation_id': fleet_state['operation_id']}
             pose = poses.get(robot_id)
@@ -292,7 +313,17 @@ class SnapshotReader:
                     'robot_id': robot_id,
                     'pose': compact_pose,
                     'battery': batteries.get(robot_id),
+                    'connectivity': self._connectivity(
+                        pose,
+                        batteries.get(robot_id),
+                        now,
+                    ),
                     'fleet_state': fleet_state,
+                    'display_state': self._display_state(
+                        fleet_state,
+                        inventory_task,
+                        inventory_available,
+                    ),
                     'pallet_state': pallet_states.get(robot_id),
                     'active_task': active_task,
                     'orchestrator_step': steps.get(robot_id),
@@ -300,6 +331,83 @@ class SnapshotReader:
                 }
             )
         return vehicles
+
+    @staticmethod
+    def _display_state(
+        fleet_state: dict[str, Any] | None,
+        inventory_task: dict[str, Any] | None,
+        inventory_available: bool,
+    ) -> str | None:
+        """Derive a dashboard-only state without changing vehicle control state."""
+
+        if fleet_state is None:
+            return None
+        state = fleet_state.get('state')
+        if (
+            state in {'FAIL', 'FAILED'}
+            and fleet_state.get('source') == 'API'
+            and fleet_state.get('detail') == 'API_STOP'
+        ):
+            return 'STOPPED'
+        if not inventory_available:
+            return state
+
+        operation_id = fleet_state.get('operation_id')
+        is_active_inventory_task = (
+            inventory_task is not None
+            and inventory_task.get('operation_id') == operation_id
+            and inventory_task.get('status')
+            in {'TO_PICK', 'PICKING', 'TO_PLACE', 'PLACING'}
+        )
+        if is_active_inventory_task and state in {'WAIT', 'DRIVE'}:
+            return 'AUTO_DRIVE'
+        if not is_active_inventory_task and state == 'DRIVE':
+            return 'MANUAL_DRIVE'
+        return state
+
+    @staticmethod
+    def _connectivity(
+        pose: dict[str, Any] | None,
+        battery: dict[str, Any] | None,
+        now: datetime,
+    ) -> dict[str, str | int | None]:
+        receipts = [
+            received_at
+            for received_at in (
+                pose.get('received_at') if pose else None,
+                battery.get('received_at') if battery else None,
+            )
+            if isinstance(received_at, str)
+        ]
+        timestamps = []
+        for received_at in receipts:
+            try:
+                timestamp = datetime.fromisoformat(received_at.replace('Z', '+00:00'))
+            except ValueError:
+                continue
+            if timestamp.tzinfo is not None:
+                timestamps.append((timestamp.astimezone(UTC), received_at))
+
+        if not timestamps:
+            return {
+                'state': 'unconfirmed',
+                'last_received_at': None,
+                'age_sec': None,
+            }
+
+        latest_timestamp, latest_received_at = max(timestamps)
+        age_sec = max(0, int((now - latest_timestamp).total_seconds()))
+        if age_sec <= ONLINE_TELEMETRY_AGE_SEC:
+            state = 'online'
+        elif age_sec <= OFFLINE_TELEMETRY_AGE_SEC:
+            state = 'stale'
+        else:
+            state = 'offline'
+        return {
+            'state': state,
+            'last_received_at': latest_received_at,
+            'age_sec': age_sec,
+        }
 
     @staticmethod
     def _by_robot(

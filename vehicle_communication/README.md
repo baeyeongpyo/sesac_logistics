@@ -116,6 +116,7 @@ Foxglove Bridge의 허용 topic, QoS, 서비스/파라미터 차단, 압축 설�
 |---|---:|---|
 | `--robot-id` | 없음(필수) | 이 API 인스턴스가 제어하는 차량 식별자 |
 | `--battery-topic` | `/ros_robot_controller/battery` | `std_msgs/msg/UInt16` 배터리 원시값 토픽 |
+| `--fork-command-topic` | `/fork/command` | 포크 상승·하강 `std_msgs/msg/String` 명령 발행 토픽 |
 | `--battery-stale-sec` | `3.0` | 이 시간보다 오래된 배터리값을 stale로 표시 (초) |
 | `--initial-pose-topic` | `/initialpose` | AMCL 초기 위치 발행 토픽 |
 | `--initial-pose-position-variance` | `0.25` | initial pose X/Y covariance 대각값 (m²) |
@@ -162,6 +163,18 @@ curl -i -X POST http://192.168.100.20:8082/v1/cmd-vel \
 
 회전 명령은 `abs(angular_z) × hold_ms / 1000`이 10°를 넘으면 거부한다. 따라서
 수동 회전 버튼은 선택한 회전 속도에 따라 유지 시간을 계산해 한 번에 최대 10°만 회전한다.
+
+### 포크 상승·하강
+
+포크 제어는 차량의 기존 `/fork/command` 토픽 계약을 그대로 사용한다. 각 HTTP 요청은
+`std_msgs/msg/String` 한 건만 발행하며, `up`은 `UP`, `down`은 `DOWN`을 발행한다.
+
+```bash
+curl -i -X POST http://192.168.100.20:8082/v1/fork/up
+curl -i -X POST http://192.168.100.20:8082/v1/fork/down
+```
+
+기본 토픽이 다른 차량은 API 실행 시 `--fork-command-topic <topic>`으로 변경한다.
 
 ### Nav2 목표 전송
 

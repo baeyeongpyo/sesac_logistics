@@ -41,6 +41,18 @@ class InitialPoseCommand(BaseModel):
     yaw: float = Field(ge=-math.pi, le=math.pi)
 
 
+class NavigationGoalCommand(InitialPoseCommand):
+    """One Nav2 target pose selected by an operator on the map."""
+
+
+class NavigationWaypointsCommand(BaseModel):
+    """An ordered, non-empty set of operator-selected Nav2 waypoint poses."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    waypoints: list[NavigationGoalCommand] = Field(min_length=1)
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -132,6 +144,40 @@ def create_app(
             y=command.y,
             yaw=command.yaw,
         )
+
+    @app.post('/api/vehicles/{robot_id}/navigation/goal')
+    def navigation_goal(
+        robot_id: str,
+        command: NavigationGoalCommand,
+    ) -> JSONResponse:
+        return _relay_response(
+            app.state.relay,
+            'send_navigation_goal',
+            robot_id,
+            x=command.x,
+            y=command.y,
+            yaw=command.yaw,
+        )
+
+    @app.post('/api/vehicles/{robot_id}/navigation/waypoints')
+    def navigation_waypoints(
+        robot_id: str,
+        command: NavigationWaypointsCommand,
+    ) -> JSONResponse:
+        return _relay_response(
+            app.state.relay,
+            'send_navigation_waypoints',
+            robot_id,
+            waypoints=[waypoint.model_dump() for waypoint in command.waypoints],
+        )
+
+    @app.post('/api/vehicles/{robot_id}/fork/up')
+    def fork_up(robot_id: str) -> JSONResponse:
+        return _relay_response(app.state.relay, 'send_fork_up', robot_id)
+
+    @app.post('/api/vehicles/{robot_id}/fork/down')
+    def fork_down(robot_id: str) -> JSONResponse:
+        return _relay_response(app.state.relay, 'send_fork_down', robot_id)
 
     static_directory = Path(__file__).parent.parent / 'static'
     app.mount('/assets', StaticFiles(directory=static_directory), name='assets')

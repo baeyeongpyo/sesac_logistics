@@ -291,6 +291,14 @@ class VehicleCommandService:
             'hold_ms': hold_ms,
         }
 
+    def fork_command(self, command):
+        if command not in {'UP', 'DOWN'}:
+            raise CommandValidationError('fork command must be UP or DOWN')
+        if not hasattr(self.velocity, 'publish_fork_command'):
+            raise NavigationUnavailableError('FORK_COMMAND_PUBLISHER_UNAVAILABLE')
+        self.velocity.publish_fork_command(command)
+        return {'command': command, 'state': 'FORK_COMMAND_PUBLISHED'}
+
     def navigation_goal(self, payload):
         goal = self._goal(payload, {'operation_id', 'purpose'})
         return self._start_navigation(
@@ -993,6 +1001,22 @@ def openapi_document(service):
                     },
                 },
             },
+            '/v1/fork/up': {
+                'post': {
+                    'responses': {
+                        '202': {'description': 'UP published to the fork command topic'},
+                        '503': {'description': 'Fork command topic publisher unavailable'},
+                    },
+                },
+            },
+            '/v1/fork/down': {
+                'post': {
+                    'responses': {
+                        '202': {'description': 'DOWN published to the fork command topic'},
+                        '503': {'description': 'Fork command topic publisher unavailable'},
+                    },
+                },
+            },
             '/v1/navigation/goals': {
                 'post': {
                     'requestBody': {
@@ -1142,6 +1166,14 @@ def create_http_server(host, port, service):
                 if path == '/v1/cmd-vel':
                     self._write_json(202, service.command(self._read_json()))
                     return
+                if path == '/v1/fork/up':
+                    self._read_optional_json()
+                    self._write_json(202, service.fork_command('UP'))
+                    return
+                if path == '/v1/fork/down':
+                    self._read_optional_json()
+                    self._write_json(202, service.fork_command('DOWN'))
+                    return
                 if path == '/v1/navigation/goals':
                     self._write_json(202, service.navigation_goal(self._read_json()))
                     return
@@ -1234,6 +1266,7 @@ class RosVehicleAdapter:
         action_server_timeout_sec,
         goal_response_timeout_sec,
         cancel_response_timeout_sec,
+        fork_command_topic=None,
         auto_dock_arrival_topic=None,
         auto_dock_status_topic=None,
         auto_dock_stop_topic=None,
@@ -1302,11 +1335,17 @@ class RosVehicleAdapter:
         self._auto_dock_drive_ready_topic = (
             auto_dock_drive_ready_topic or f'/{robot_name}/auto_dock/drive_ready'
         )
+        self._fork_command_topic = fork_command_topic or '/fork/command'
 
         self._context = Context()
         self._rclpy.init(args=None, context=self._context)
         self._node = self._rclpy.create_node('vehicle_command_api', context=self._context)
         self._publisher = self._node.create_publisher(self._twist_type, cmd_vel_topic, 10)
+        self._fork_command_publisher = self._node.create_publisher(
+            self._string_type,
+            self._fork_command_topic,
+            10,
+        )
         self._auto_dock_arrival_publisher = self._node.create_publisher(
             self._string_type,
             self._auto_dock_arrival_topic,
@@ -1397,6 +1436,11 @@ class RosVehicleAdapter:
         message.linear.y = linear_y
         message.angular.z = angular_z
         self._publisher.publish(message)
+
+    def publish_fork_command(self, command):
+        message = self._string_type()
+        message.data = command
+        self._fork_command_publisher.publish(message)
 
     def publish_arrival(self, payload):
         message = self._string_type()
@@ -1534,6 +1578,7 @@ def parse_args(argv=None):
     parser.add_argument('--port', type=int, default=8082)
     parser.add_argument('--robot-id', required=True)
     parser.add_argument('--cmd-vel-topic', default='/cmd_vel')
+    parser.add_argument('--fork-command-topic', default='/fork/command')
     parser.add_argument('--action-name', default='/navigate_to_pose')
     parser.add_argument('--follow-waypoints-action-name', default='/follow_waypoints')
     parser.add_argument('--battery-topic', default='/ros_robot_controller/battery')
@@ -1563,6 +1608,7 @@ def create_ros_vehicle_adapter(arguments):
     return RosVehicleAdapter(
         robot_id=arguments.robot_id,
         cmd_vel_topic=arguments.cmd_vel_topic,
+        fork_command_topic=getattr(arguments, 'fork_command_topic', None),
         action_name=arguments.action_name,
         follow_waypoints_action_name=arguments.follow_waypoints_action_name,
         action_server_timeout_sec=arguments.action_server_timeout_sec,

@@ -49,9 +49,13 @@ def post_json(url, payload):
 class RecordingVelocity:
     def __init__(self):
         self.messages = []
+        self.fork_messages = []
 
     def publish(self, *values):
         self.messages.append(values)
+
+    def publish_fork_command(self, command):
+        self.fork_messages.append(command)
 
 
 class FakeNavigation:
@@ -675,6 +679,17 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             'detail': 'STOP_REQUESTED',
         })
 
+    def test_fork_up_and_down_publish_exact_commands_to_the_fork_topic_adapter(self):
+        """The HTTP controls must preserve the vehicle's UP/DOWN topic contract."""
+        up_status, up = post_json(f'{self.base_url}/v1/fork/up', {})
+        down_status, down = post_json(f'{self.base_url}/v1/fork/down', {})
+
+        self.assertEqual(up_status, 202)
+        self.assertEqual(up, {'command': 'UP', 'state': 'FORK_COMMAND_PUBLISHED'})
+        self.assertEqual(down_status, 202)
+        self.assertEqual(down, {'command': 'DOWN', 'state': 'FORK_COMMAND_PUBLISHED'})
+        self.assertEqual(self.velocity.fork_messages, ['UP', 'DOWN'])
+
     def test_health_openapi_and_operation_status_are_discoverable(self):
         """Removing a public endpoint must fail the vehicle integration contract."""
         health_status, health = self.get_json('/healthz')
@@ -703,6 +718,8 @@ class VehicleCommandApiServerTest(unittest.TestCase):
                 '/v1/vehicle-status',
                 '/v1/operation/idle',
                 '/v1/cmd-vel',
+                '/v1/fork/up',
+                '/v1/fork/down',
                 '/v1/navigation/goals',
                 '/v1/navigation/waypoints',
                 '/v1/auto-dock',
@@ -1059,6 +1076,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
         for option in (
             '--host', '--port', '--robot-id', '--cmd-vel-topic', '--action-name',
             '--follow-waypoints-action-name',
+            '--fork-command-topic',
             '--battery-topic', '--battery-stale-sec',
             '--initial-pose-topic', '--initial-pose-position-variance',
             '--initial-pose-yaw-variance',
@@ -1083,6 +1101,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             port=8082,
             robot_id='robot_2',
             cmd_vel_topic='/cmd_vel',
+            fork_command_topic='/fork/command',
             action_name='/navigate_to_pose',
             follow_waypoints_action_name='/follow_waypoints',
             battery_topic='/ros_robot_controller/battery',
@@ -1149,6 +1168,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             port=8082,
             robot_id='robot_2',
             cmd_vel_topic='/cmd_vel',
+            fork_command_topic='/fork/command',
             action_name='/navigate_to_pose',
             follow_waypoints_action_name='/follow_waypoints',
             battery_topic='/ros_robot_controller/battery',
@@ -1193,6 +1213,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             port=8082,
             robot_id='robot_2',
             cmd_vel_topic='/cmd_vel',
+            fork_command_topic='/fork/command',
             action_name='/navigate_to_pose',
             follow_waypoints_action_name='/follow_waypoints',
             battery_topic='/ros_robot_controller/battery',
@@ -1242,6 +1263,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             port=8082,
             robot_id='robot_2',
             cmd_vel_topic='/cmd_vel',
+            fork_command_topic='/fork/command',
             action_name='/navigate_to_pose',
             follow_waypoints_action_name='/follow_waypoints',
             battery_topic='/ros_robot_controller/battery',
@@ -1270,6 +1292,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             action_server_timeout_sec,
             goal_response_timeout_sec,
             cancel_response_timeout_sec,
+            fork_command_topic,
             auto_dock_arrival_topic,
             auto_dock_status_topic,
             auto_dock_stop_topic,
@@ -1283,6 +1306,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
                 'action_server_timeout_sec': action_server_timeout_sec,
                 'goal_response_timeout_sec': goal_response_timeout_sec,
                 'cancel_response_timeout_sec': cancel_response_timeout_sec,
+                'fork_command_topic': fork_command_topic,
                 'auto_dock_arrival_topic': auto_dock_arrival_topic,
                 'auto_dock_status_topic': auto_dock_status_topic,
                 'auto_dock_stop_topic': auto_dock_stop_topic,
@@ -1310,6 +1334,7 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             'action_server_timeout_sec': 1.0,
             'goal_response_timeout_sec': 3.0,
             'cancel_response_timeout_sec': 3.0,
+            'fork_command_topic': '/fork/command',
             'auto_dock_arrival_topic': None,
             'auto_dock_status_topic': None,
             'auto_dock_stop_topic': None,

@@ -102,6 +102,57 @@ class CommandRelay:
             {'frame_id': 'map', 'x': x, 'y': y, 'yaw': yaw},
         )
 
+    def send_navigation_goal(
+        self,
+        robot_id: str,
+        *,
+        x: float,
+        y: float,
+        yaw: float,
+    ) -> RelayResponse:
+        """Send one operator-selected Nav2 goal in the fixed ``map`` frame."""
+
+        self._validate_robot_id(robot_id)
+        return self._post(robot_id, 'navigation/goals', self._navigation_pose(x, y, yaw))
+
+    def send_navigation_waypoints(
+        self,
+        robot_id: str,
+        *,
+        waypoints: list[dict[str, float]],
+    ) -> RelayResponse:
+        """Send an ordered, non-empty Nav2 FollowWaypoints request."""
+
+        self._validate_robot_id(robot_id)
+        if not isinstance(waypoints, list) or not waypoints:
+            raise ValueError('waypoints must be a non-empty list')
+        normalized_waypoints = []
+        for index, waypoint in enumerate(waypoints):
+            if not isinstance(waypoint, dict):
+                raise ValueError(f'waypoints[{index}] must be an object')
+            normalized_waypoints.append(self._navigation_pose(
+                waypoint.get('x'),
+                waypoint.get('y'),
+                waypoint.get('yaw'),
+            ))
+        return self._post(
+            robot_id,
+            'navigation/waypoints',
+            {'waypoints': normalized_waypoints},
+        )
+
+    def send_fork_up(self, robot_id: str) -> RelayResponse:
+        """Publish the vehicle-native ``UP`` command to ``/fork/command``."""
+
+        self._validate_robot_id(robot_id)
+        return self._post(robot_id, 'fork/up', None)
+
+    def send_fork_down(self, robot_id: str) -> RelayResponse:
+        """Publish the vehicle-native ``DOWN`` command to ``/fork/command``."""
+
+        self._validate_robot_id(robot_id)
+        return self._post(robot_id, 'fork/down', None)
+
     def send_operation_idle(self, robot_id: str) -> RelayResponse:
         """Explicitly request the vehicle-native transition to IDLE."""
 
@@ -139,6 +190,13 @@ class CommandRelay:
     def _validate_robot_id(robot_id: str) -> None:
         if not isinstance(robot_id, str) or not ROBOT_ID_PATTERN.fullmatch(robot_id):
             raise ValueError('robot_id has an invalid format')
+
+    @classmethod
+    def _navigation_pose(cls, x: float, y: float, yaw: float) -> dict[str, float | str]:
+        cls._validate_number('x', x, -1000.0, 1000.0)
+        cls._validate_number('y', y, -1000.0, 1000.0)
+        cls._validate_number('yaw', yaw, -math.pi, math.pi)
+        return {'frame_id': 'map', 'x': x, 'y': y, 'yaw': yaw}
 
     @staticmethod
     def _validate_number(name: str, value: float, minimum: float, maximum: float) -> None:

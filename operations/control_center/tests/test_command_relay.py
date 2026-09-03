@@ -71,6 +71,59 @@ class CommandRelayTests(unittest.TestCase):
             {'reason': 'OPERATOR_CONFIRMED'},
         )
 
+    def test_fork_controls_relay_without_a_json_body(self):
+        self.relay.send_fork_up('R1')
+        self.relay.send_fork_down('R1')
+
+        self.assertEqual(
+            self.transport.calls,
+            [
+                {
+                    'method': 'POST',
+                    'url': 'http://fleet-bridge:8080/api/v1/vehicle-command/R1/fork/up',
+                    'payload': None,
+                    'timeout': 2.5,
+                },
+                {
+                    'method': 'POST',
+                    'url': 'http://fleet-bridge:8080/api/v1/vehicle-command/R1/fork/down',
+                    'payload': None,
+                    'timeout': 2.5,
+                },
+            ],
+        )
+
+    def test_goal_and_waypoint_navigation_use_their_allowlisted_vehicle_api_paths(self):
+        self.relay.send_navigation_goal('R1', x=1.2, y=-0.3, yaw=0.75)
+        self.relay.send_navigation_waypoints(
+            'R1',
+            waypoints=[
+                {'x': 1.2, 'y': -0.3, 'yaw': 0.75},
+                {'x': 2.0, 'y': 0.5, 'yaw': -0.25},
+            ],
+        )
+
+        self.assertEqual(
+            [call['url'] for call in self.transport.calls],
+            [
+                'http://fleet-bridge:8080/api/v1/vehicle-command/R1/navigation/goals',
+                'http://fleet-bridge:8080/api/v1/vehicle-command/R1/navigation/waypoints',
+            ],
+        )
+        self.assertEqual(
+            self.transport.calls[0]['payload'],
+            {'frame_id': 'map', 'x': 1.2, 'y': -0.3, 'yaw': 0.75},
+        )
+        self.assertEqual(
+            self.transport.calls[1]['payload'],
+            {
+                'waypoints': [
+                    {'frame_id': 'map', 'x': 1.2, 'y': -0.3, 'yaw': 0.75},
+                    {'frame_id': 'map', 'x': 2.0, 'y': 0.5, 'yaw': -0.25},
+                ],
+            },
+        )
+
     def test_invalid_control_input_never_reaches_transport(self):
         with self.assertRaises(ValueError):
             self.relay.send_manual('R1', linear_x=0.1, angular_z=0.0, hold_ms=50)

@@ -20,119 +20,135 @@
       </header>
 
       <main class="workspace">
-        <aside class="sidebar panel">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">FLEET MANAGER</p>
-              <h1>차량 현황</h1>
-            </div>
-            <span class="count-pill" id="vehicleCount">0</span>
-          </div>
-          <div class="vehicle-list" id="vehicleList">
-            <p class="empty-state">차량 데이터를 불러오는 중입니다.</p>
-          </div>
-          <div class="source-health" id="sourceHealth"></div>
-        </aside>
-
-        <section class="map-column">
-          <section class="map-panel panel">
-            <div class="map-heading">
+        <section class="map-panel panel">
+          <div class="map-heading">
+            <div class="panel-heading">
               <div>
-                <p class="eyebrow">LIVE MAP</p>
-                <h2>운영 지도 <span id="mapMeta"></span></h2>
+                <p class="eyebrow">지도 조작</p>
+                <h1>운영 지도 <span id="mapMeta"></span></h1>
               </div>
               <div class="map-actions">
-                <button class="outlined-button" id="initialPoseButton" type="button" disabled>
-                  Initial Pose
-                </button>
+                <button class="outlined-button" id="initialPoseButton" type="button" disabled>Initial Pose</button>
+                <button class="outlined-button" id="goalPoseButton" type="button" disabled>Goal Pose</button>
+                <button class="outlined-button" id="waypointButton" type="button" disabled>Follow Waypoints</button>
                 <button class="danger-button" id="stopButton" type="button" disabled>긴급 정지</button>
               </div>
             </div>
-            <div class="map-instruction" id="mapInstruction">차량을 선택하면 제어할 수 있습니다.</div>
-            <div class="map-stage" id="mapStage">
-              <div class="map-content" id="mapContent">
-                <canvas id="pgmCanvas" aria-label="PGM 운영 지도"></canvas>
-                <svg id="mapOverlay" aria-label="차량 위치 오버레이"></svg>
-              </div>
-              <div class="map-zoom-controls" id="mapZoomControls" aria-label="지도 확대 및 축소">
-                <button id="zoomOutButton" type="button" aria-label="지도 축소" title="지도 축소">−</button>
-                <button id="zoomResetButton" type="button" aria-label="기본 배율로 초기화" title="기본 배율로 초기화">100%</button>
-                <button id="zoomInButton" type="button" aria-label="지도 확대" title="지도 확대">+</button>
-              </div>
+          </section>
+          <div class="map-instruction" id="mapInstruction">차량을 선택하면 제어할 수 있습니다.</div>
+          <section class="navigation-draft" id="navigationDraft" hidden aria-live="polite">
+            <div class="navigation-draft-heading">
+              <strong id="navigationDraftTitle">주행 위치 지정</strong>
+              <span id="navigationDraftMeta">지도에서 위치와 방향을 지정하세요.</span>
             </div>
-            <div class="map-legend">
-              <span><i class="legend-dot vehicle-dot"></i> 선택 차량</span>
-              <span><i class="legend-vehicle"></i> 차체 헤딩 (yaw)</span>
-              <span><i class="legend-line pose-line"></i> Initial Pose 방향</span>
+            <ol class="waypoint-list" id="waypointList" hidden></ol>
+            <div class="navigation-draft-actions">
+              <button class="ghost-button" id="clearNavigationButton" type="button">지정 초기화</button>
+              <button class="execute-button" id="executeNavigationButton" type="button" disabled>실행</button>
             </div>
           </section>
+          <div class="map-stage" id="mapStage">
+            <div class="map-viewport" id="mapViewport">
+              <div class="map-content" id="mapContent">
+                <canvas id="pgmCanvas" aria-label="90도 회전된 운영 지도"></canvas>
+                <svg id="mapOverlay" aria-label="차량 위치 오버레이"></svg>
+              </div>
+            </div>
+            <div class="map-zoom-controls" id="mapZoomControls" aria-label="지도 확대 및 축소">
+              <button id="zoomOutButton" type="button" aria-label="지도 축소" title="지도 축소">−</button>
+              <button id="zoomResetButton" type="button" aria-label="기본 배율로 초기화" title="기본 배율로 초기화">100%</button>
+              <button id="zoomInButton" type="button" aria-label="지도 확대" title="지도 확대">+</button>
+            </div>
+          </div>
+          <div class="map-legend">
+            <span><i class="legend-dot vehicle-dot"></i> 선택 차량</span>
+            <span><i class="legend-vehicle"></i> 차체 헤딩 (yaw)</span>
+            <span><i class="legend-line pose-line"></i> 지정 위치·방향</span>
+            <span><i class="legend-line waypoint-line"></i> Follow Waypoints 순서</span>
+          </div>
+        </section>
+
+        <section class="dashboard-lower">
+          <aside class="sidebar panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">차량 관리</p>
+                <h2>차량 현황</h2>
+              </div>
+              <span class="count-pill" id="vehicleCount">0</span>
+            </div>
+            <div class="vehicle-list" id="vehicleList">
+              <p class="empty-state">차량 데이터를 불러오는 중입니다.</p>
+            </div>
+            <div class="source-health" id="sourceHealth"></div>
+          </aside>
 
           <section class="inventory-panel panel">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">INVENTORY</p>
-                <h2>물류 현황</h2>
+                <p class="eyebrow">물류 현황</p>
+                <h2>재고와 작업</h2>
               </div>
               <span class="muted" id="operationCount">작업 0건</span>
             </div>
             <div class="inventory-grid" id="inventoryGrid"></div>
           </section>
+
+          <aside class="control-column" aria-label="선택 차량 제어">
+            <section class="detail-panel panel">
+              <div class="panel-heading">
+                <div>
+                  <p class="eyebrow">선택 차량</p>
+                  <h2 id="selectedName">차량을 선택하세요</h2>
+                </div>
+                <span class="state-badge state-unknown" id="selectedState">—</span>
+              </div>
+              <dl class="vehicle-details" id="vehicleDetails">
+                <div><dt>위치</dt><dd>—</dd></div>
+                <div><dt>자세</dt><dd>—</dd></div>
+                <div><dt>배터리</dt><dd>—</dd></div>
+                <div><dt>적재</dt><dd>—</dd></div>
+              </dl>
+              <div class="task-card" id="taskCard">
+                <p class="eyebrow">현재 작업</p>
+                <strong>선택된 차량이 없습니다.</strong>
+                <span>—</span>
+              </div>
+              <div class="secondary-controls">
+                <button class="outlined-button" id="idleButton" type="button" disabled>대기 상태로 전환</button>
+                <button class="ghost-button" id="cancelButton" type="button" disabled>주행 취소</button>
+              </div>
+            </section>
+
+            <section class="remote-panel panel">
+              <div class="panel-heading remote-heading">
+                <div>
+                  <p class="eyebrow">수동 조작</p>
+                  <h2>방향 제어</h2>
+                </div>
+                <span class="speed-chip" id="speedChip">전후 0.1 · 횡 0.1 m/s · 회전 0.2 rad/s</span>
+              </div>
+              <div class="manual-speed-inputs" aria-label="수동 조작 속도 설정">
+                <label>전·후 <input id="driveSpeedInput" type="number" min="0.1" max="1" step="0.1" value="0.1" inputmode="decimal" /> <small>m/s</small></label>
+                <label>횡이동 <input id="strafeSpeedInput" type="number" min="0.1" max="1" step="0.1" value="0.1" inputmode="decimal" /> <small>m/s</small></label>
+                <label>회전 <input id="rotationSpeedInput" type="number" min="0.1" max="1" step="0.1" value="0.2" inputmode="decimal" /> <small>rad/s</small></label>
+              </div>
+              <p class="remote-note">전·후·횡이동은 누르는 동안만 이동합니다. 회전은 한 번에 최대 10°만 제어합니다.</p>
+              <div class="remote-pad" aria-label="수동 조작 리모컨">
+                <button class="remote-button up" type="button" data-manual="forward" aria-label="전진" title="전진">↑</button>
+                <button class="remote-button left" type="button" data-manual="rotate-left" aria-label="좌회전" title="좌회전">◀</button>
+                <button class="remote-button stop-core" type="button" id="padStopButton" aria-label="정지" title="정지">■</button>
+                <button class="remote-button right" type="button" data-manual="rotate-right" aria-label="우회전" title="우회전">▶</button>
+                <button class="remote-button down" type="button" data-manual="reverse" aria-label="후진" title="후진">↓</button>
+              </div>
+              <div class="strafe-controls" aria-label="횡이동 제어">
+                <button type="button" data-manual="strafe-left" aria-label="왼쪽 횡이동" title="왼쪽 횡이동">⇤</button>
+                <span>횡이동</span>
+                <button type="button" data-manual="strafe-right" aria-label="오른쪽 횡이동" title="오른쪽 횡이동">⇥</button>
+              </div>
+            </section>
+          </aside>
         </section>
-
-        <aside class="control-column">
-          <section class="detail-panel panel">
-            <div class="panel-heading">
-              <div>
-                <p class="eyebrow">SELECTED VEHICLE</p>
-                <h2 id="selectedName">차량을 선택하세요</h2>
-              </div>
-              <span class="state-badge state-unknown" id="selectedState">—</span>
-            </div>
-            <dl class="vehicle-details" id="vehicleDetails">
-              <div><dt>위치</dt><dd>—</dd></div>
-              <div><dt>자세</dt><dd>—</dd></div>
-              <div><dt>배터리</dt><dd>—</dd></div>
-              <div><dt>적재</dt><dd>—</dd></div>
-            </dl>
-            <div class="task-card" id="taskCard">
-              <p class="eyebrow">CURRENT TASK</p>
-              <strong>선택된 차량이 없습니다.</strong>
-              <span>—</span>
-            </div>
-            <div class="secondary-controls">
-              <button class="outlined-button" id="idleButton" type="button" disabled>Operation / Idle</button>
-              <button class="ghost-button" id="cancelButton" type="button" disabled>주행 취소</button>
-            </div>
-          </section>
-
-          <section class="remote-panel panel">
-            <div class="panel-heading remote-heading">
-              <div>
-                <p class="eyebrow">MANUAL CONTROL</p>
-                <h2>수동 조작</h2>
-              </div>
-              <span class="speed-chip" id="speedChip">전후 0.1 · 횡 0.1 m/s · 회전 0.2 rad/s</span>
-            </div>
-            <div class="manual-speed-inputs" aria-label="수동 조작 속도 설정">
-              <label>전·후 <input id="driveSpeedInput" type="number" min="0.1" max="1" step="0.1" value="0.1" inputmode="decimal" /> <small>m/s</small></label>
-              <label>횡이동 <input id="strafeSpeedInput" type="number" min="0.1" max="1" step="0.1" value="0.1" inputmode="decimal" /> <small>m/s</small></label>
-              <label>회전 <input id="rotationSpeedInput" type="number" min="0.1" max="1" step="0.1" value="0.2" inputmode="decimal" /> <small>rad/s</small></label>
-            </div>
-            <p class="remote-note">전·후·횡이동은 누르는 동안만 이동합니다. 회전은 한 번에 최대 10°만 제어합니다.</p>
-            <div class="remote-pad" aria-label="수동 조작 리모컨">
-              <button class="remote-button up" type="button" data-manual="forward" aria-label="전진" title="전진">↑</button>
-              <button class="remote-button left" type="button" data-manual="rotate-left" aria-label="좌회전" title="좌회전">◀</button>
-              <button class="remote-button stop-core" type="button" id="padStopButton" aria-label="정지" title="정지">■</button>
-              <button class="remote-button right" type="button" data-manual="rotate-right" aria-label="우회전" title="우회전">▶</button>
-              <button class="remote-button down" type="button" data-manual="reverse" aria-label="후진" title="후진">↓</button>
-            </div>
-            <div class="strafe-controls" aria-label="횡이동 제어">
-              <button type="button" data-manual="strafe-left" aria-label="왼쪽 횡이동" title="왼쪽 횡이동">⇤</button>
-              <span>횡이동</span>
-              <button type="button" data-manual="strafe-right" aria-label="오른쪽 횡이동" title="오른쪽 횡이동">⇥</button>
-            </div>
-          </section>
-        </aside>
       </main>
     </div>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>

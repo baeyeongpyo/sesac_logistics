@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -55,6 +56,93 @@ class SnapshotReaderTests(unittest.TestCase):
         self.assertEqual(snapshot['orchestrator']['steps'][0]['phase'], 'TO_PICK')
         self.assertTrue(all(source['available'] for source in snapshot['sources'].values()))
 
+    def test_snapshot_displays_matching_inventory_navigation_as_auto_drive(self):
+        with self._connect('fleet_manager.db') as db:
+            db.execute(
+                "UPDATE vehicle_states SET state = 'DRIVE', detail = 'NAVIGATION_STARTED' "
+                "WHERE robot_id = 'R1'"
+            )
+
+        vehicle = SnapshotReader(self.data_directory).snapshot()['vehicles'][0]
+
+        self.assertEqual(vehicle['fleet_state']['state'], 'DRIVE')
+        self.assertEqual(vehicle['display_state'], 'AUTO_DRIVE')
+
+    def test_snapshot_displays_navigation_without_inventory_operation_as_manual_drive(self):
+        with self._connect('inventory.db') as db:
+            db.execute("DELETE FROM transport_operations WHERE operation_id = 'op-1'")
+        with self._connect('fleet_manager.db') as db:
+            db.execute(
+                "UPDATE vehicle_states SET state = 'DRIVE', operation_id = 'manual-nav', "
+                "detail = 'NAVIGATION_STARTED' WHERE robot_id = 'R1'"
+            )
+
+        vehicle = SnapshotReader(self.data_directory).snapshot()['vehicles'][0]
+
+        self.assertEqual(vehicle['fleet_state']['state'], 'DRIVE')
+        self.assertEqual(vehicle['display_state'], 'MANUAL_DRIVE')
+
+    def test_snapshot_displays_navigation_as_manual_drive_when_only_completed_inventory_work_exists(self):
+        with self._connect('inventory.db') as db:
+            db.execute(
+                "UPDATE transport_operations SET status = 'COMPLETED', "
+                "completed_at = '2026-09-01T09:01:00Z' WHERE operation_id = 'op-1'"
+            )
+        with self._connect('fleet_manager.db') as db:
+            db.execute(
+                "UPDATE vehicle_states SET state = 'DRIVE', operation_id = 'manual-nav', "
+                "detail = 'NAVIGATION_STARTED' WHERE robot_id = 'R1'"
+            )
+
+        vehicle = SnapshotReader(self.data_directory).snapshot()['vehicles'][0]
+
+        self.assertEqual(vehicle['fleet_state']['state'], 'DRIVE')
+        self.assertEqual(vehicle['display_state'], 'MANUAL_DRIVE')
+
+    def test_snapshot_keeps_wait_after_navigation_without_inventory_operation_completes(self):
+        with self._connect('inventory.db') as db:
+            db.execute("DELETE FROM transport_operations WHERE operation_id = 'op-1'")
+        with self._connect('fleet_manager.db') as db:
+            db.execute(
+                "UPDATE vehicle_states SET state = 'WAIT', operation_id = 'manual-nav', "
+                "detail = 'NAVIGATION_SUCCEEDED' WHERE robot_id = 'R1'"
+            )
+
+        vehicle = SnapshotReader(self.data_directory).snapshot()['vehicles'][0]
+
+        self.assertEqual(vehicle['fleet_state']['state'], 'WAIT')
+        self.assertEqual(vehicle['display_state'], 'WAIT')
+
+    def test_snapshot_displays_operator_api_stop_without_overwriting_raw_failure(self):
+        """Changing the API stop signature must not turn a commanded stop into an error badge."""
+
+        with self._connect('fleet_manager.db') as db:
+            db.execute(
+                "UPDATE vehicle_states SET state = 'FAIL', previous_state = 'DRIVE', "
+                "source = 'API', detail = 'API_STOP' WHERE robot_id = 'R1'"
+            )
+
+        vehicle = SnapshotReader(self.data_directory).snapshot()['vehicles'][0]
+
+        self.assertEqual(vehicle['fleet_state']['state'], 'FAIL')
+        self.assertEqual(vehicle['fleet_state']['source'], 'API')
+        self.assertEqual(vehicle['fleet_state']['detail'], 'API_STOP')
+        self.assertEqual(vehicle['display_state'], 'STOPPED')
+
+    def test_snapshot_preserves_fleet_state_when_inventory_source_is_unavailable(self):
+        (self.data_directory / 'inventory.db').unlink()
+        with self._connect('fleet_manager.db') as db:
+            db.execute(
+                "UPDATE vehicle_states SET state = 'DRIVE', detail = 'NAVIGATION_STARTED' "
+                "WHERE robot_id = 'R1'"
+            )
+
+        snapshot = SnapshotReader(self.data_directory).snapshot()
+        vehicle = snapshot['vehicles'][0]
+
+        self.assertFalse(snapshot['sources']['inventory']['available'])
+        self.assertEqual(vehicle['display_state'], 'DRIVE')
+
     def test_missing_database_is_reported_without_breaking_other_sources(self):
         (self.data_directory / 'orchestrator.db').unlink()
 
@@ -63,6 +151,53 @@ class SnapshotReaderTests(unittest.TestCase):
         self.assertFalse(snapshot['sources']['orchestrator']['available'])
         self.assertEqual(snapshot['orchestrator']['steps'], [])
         self.assertEqual(snapshot['vehicles'][0]['robot_id'], 'R1')
+
+    def test_snapshot_marks_connectivity_from_the_newest_telemetry_receipt(self):
+        with self._connect('fleet_telemetry.db') as db:
+            db.execute(
+                "UPDATE robot_battery SET received_at = '2026-09-01T09:00:06Z' "
+                "WHERE robot_id = 'R1'"
+            )
+
+        online = SnapshotReader(
+            self.data_directory,
+            clock=lambda: datetime(2026, 9, 1, 9, 0, 15, tzinfo=UTC),
+        ).snapshot()['vehicles'][0]['connectivity']
+        stale = SnapshotReader(
+            self.data_directory,
+            clock=lambda: datetime(2026, 9, 1, 9, 0, 20, tzinfo=UTC),
+        ).snapshot()['vehicles'][0]['connectivity']
+        offline = SnapshotReader(
+            self.data_directory,
+            clock=lambda: datetime(2026, 9, 1, 9, 0, 37, tzinfo=UTC),
+        ).snapshot()['vehicles'][0]['connectivity']
+
+        self.assertEqual(
+            online,
+            {
+                'state': 'online',
+                'last_received_at': '2026-09-01T09:00:06Z',
+                'age_sec': 9,
+            },
+        )
+        self.assertEqual(stale['state'], 'stale')
+        self.assertEqual(offline['state'], 'offline')
+
+    def test_snapshot_marks_a_vehicle_without_telemetry_as_unconfirmed(self):
+        with self._connect('fleet_manager.db') as db:
+            db.execute(
+                "INSERT INTO vehicle_states VALUES "
+                "('R2', 'WAIT', NULL, NULL, NULL, 'demo', '{}', "
+                "'2026-09-01T09:00:00Z', '2026-09-01T09:00:01Z')"
+            )
+
+        snapshot = SnapshotReader(self.data_directory).snapshot()
+        vehicle = next(vehicle for vehicle in snapshot['vehicles'] if vehicle['robot_id'] == 'R2')
+
+        self.assertEqual(
+            vehicle['connectivity'],
+            {'state': 'unconfirmed', 'last_received_at': None, 'age_sec': None},
+        )
 
     def test_connections_are_read_only(self):
         reader = SnapshotReader(self.data_directory)

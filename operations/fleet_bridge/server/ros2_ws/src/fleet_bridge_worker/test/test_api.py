@@ -232,6 +232,8 @@ class CommandApiTest(unittest.TestCase):
                 'angular_z': 0.0,
                 'hold_ms': 300,
             }, '/v1/cmd-vel'),
+            ('POST', '/fork/up', None, '/v1/fork/up'),
+            ('POST', '/fork/down', None, '/v1/fork/down'),
             ('POST', '/navigation/goals', {
                 'operation_id': '73d5b9af-5a12-4f34-a96c-5de116df1e8e',
                 'x': 1.5,
@@ -362,6 +364,8 @@ class CommandApiTest(unittest.TestCase):
         self.assertIn('/api/v1/vehicle-command/{robot_id}/vehicle-status', schema['paths'])
         self.assertIn('/api/v1/vehicle-command/{robot_id}/operation/idle', schema['paths'])
         self.assertIn('/api/v1/vehicle-command/{robot_id}/cmd-vel', schema['paths'])
+        self.assertIn('/api/v1/vehicle-command/{robot_id}/fork/up', schema['paths'])
+        self.assertIn('/api/v1/vehicle-command/{robot_id}/fork/down', schema['paths'])
         self.assertIn('/api/v1/vehicle-command/{robot_id}/navigation/goals', schema['paths'])
         self.assertIn('/api/v1/vehicle-command/{robot_id}/auto-dock', schema['paths'])
         self.assertIn('/api/v1/vehicle-command/{robot_id}/navigation/cancel', schema['paths'])
