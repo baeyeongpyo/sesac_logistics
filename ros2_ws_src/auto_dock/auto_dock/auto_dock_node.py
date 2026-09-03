@@ -57,6 +57,8 @@ def public_fsm_state(internal_state, operation, event_state="", was_docking=Fals
         "coarse_align": "ALIGNING",
         "docking": "ALIGNING",
         "inserting": "INSERTING",
+        "y_slot_centering": "ALIGNING",
+        "y_slot_inserting": "INSERTING",
         "reversing_after_lift": "REVERSING",
         "post_lift_opening_search": "SEARCHING",
         "turning_right_for_ready": "TURNING",
@@ -86,12 +88,14 @@ def detect_warning_tape(
     if frame is None or frame.size == 0:
         return None
     height, width = frame.shape[:2]
+    values = filter_config if isinstance(filter_config, dict) else {}
+    if minimum_center_y_ratio is None:
+        minimum_center_y_ratio = values.get("roi_top_ratio")
     roi_top = 0 if minimum_center_y_ratio is None else int(round(
         clamp(float(minimum_center_y_ratio), 0.0, 0.95) * height
     ))
     roi = frame[roi_top:, :]
     roi_height = roi.shape[0]
-    values = filter_config if isinstance(filter_config, dict) else {}
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     yellow = cv2.inRange(
         hsv,
@@ -255,10 +259,187 @@ def detect_warning_tape(
         "angle_deg": float(angle_deg),
         "x_min_px": int(xs.min()),
         "x_max_px": int(xs.max()),
+        "center_x_px": float(0.5 * (int(xs.min()) + int(xs.max()))),
+        "center_x_ratio": float(
+            0.5 * (int(xs.min()) + int(xs.max())) / float(width)
+        ),
+        "image_width_px": int(width),
+        "image_height_px": int(height),
         "yellow_pixels": int(len(xs)),
         "component_count": int(accepted_components),
         "black_adjacent_components": int(black_adjacent_components),
         "band_width_px": round(band_width_px, 1),
+    }
+
+
+def detect_y_slot_x(frame, minimum_yellow_pixels=600, filter_config=None):
+    """Detect the yellow X marker used at Y1-Y4 and return its crossing."""
+    if frame is None or frame.size == 0:
+        return None
+    height, width = frame.shape[:2]
+    values = filter_config if isinstance(filter_config, dict) else {}
+    roi_top = int(round(clamp(
+        float(values.get("roi_top_ratio", 0.70)), 0.0, 0.95
+    ) * height))
+    hsv = cv2.cvtColor(frame[roi_top:, :], cv2.COLOR_BGR2HSV)
+    x_s_min = int(values.get("y_slot_x_s_min", 40))
+    yellow = cv2.inRange(
+        hsv,
+        np.asarray((
+            int(values.get("h_min", 15)), x_s_min,
+            int(values.get("v_min", 70)),
+        ), dtype=np.uint8),
+        np.asarray((
+            int(values.get("h_max", 42)), int(values.get("s_max", 255)),
+            int(values.get("v_max", 255)),
+        ), dtype=np.uint8),
+    )
+    open_size = int(values.get("open_kernel", 3))
+    if open_size > 1:
+        open_size += int(open_size % 2 == 0)
+        yellow = cv2.morphologyEx(
+            yellow, cv2.MORPH_OPEN,
+            np.ones((open_size, open_size), dtype=np.uint8),
+        )
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        yellow, connectivity=8
+    )
+    best = None
+    for label in range(1, count):
+        x, y, component_width, component_height, area = stats[label]
+        if (
+            area < max(300, int(minimum_yellow_pixels) // 2)
+            or component_width < 60 or component_height < 45
+        ):
+            continue
+        component = np.zeros_like(yellow)
+        component[labels == label] = 255
+        lines = cv2.HoughLinesP(
+            component, 1, np.pi / 180.0, 25,
+            minLineLength=40, maxLineGap=20,
+        )
+        if lines is None:
+            continue
+        positive, negative = [], []
+        for x1, y1, x2, y2 in lines.reshape(-1, 4):
+            angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
+            if angle >= 90.0:
+                angle -= 180.0
+            if angle < -90.0:
+                angle += 180.0
+            length = math.hypot(x2 - x1, y2 - y1)
+            item = (length, angle, (x1, y1, x2, y2))
+            if 18.0 <= angle <= 70.0:
+                positive.append(item)
+            elif -70.0 <= angle <= -18.0:
+                negative.append(item)
+        minimum_line_length = max(60.0, component_width * 0.65)
+        for rising in positive:
+            for falling in negative:
+                if min(rising[0], falling[0]) < minimum_line_length:
+                    continue
+                x1, y1, x2, y2 = rising[2]
+                x3, y3, x4, y4 = falling[2]
+                denominator = (
+                    (x1 - x2) * (y3 - y4)
+                    - (y1 - y2) * (x3 - x4)
+                )
+                if abs(denominator) < 1e-6:
+                    continue
+                crossing_x = (
+                    (x1 * y2 - y1 * x2) * (x3 - x4)
+                    - (x1 - x2) * (x3 * y4 - y3 * x4)
+                ) / denominator
+                crossing_y = (
+                    (x1 * y2 - y1 * x2) * (y3 - y4)
+                    - (y1 - y2) * (x3 * y4 - y3 * x4)
+                ) / denominator
+                if (
+                    abs(crossing_x - (x + component_width * 0.5))
+                    > component_width * 0.32
+                    or abs(crossing_y - (y + component_height * 0.5))
+                    > component_height * 0.32
+                ):
+                    continue
+                score = min(rising[0], falling[0]) + area * 0.01
+                if best is None or score > best[0]:
+                    best = (
+                        score, label, crossing_x, crossing_y,
+                        rising[2], falling[2], int(area),
+                        int(x), int(x + component_width),
+                        int(y), int(y + component_height),
+                    )
+    if best is None:
+        return None
+    (_score, _label, center_x, center_y, rising_line, falling_line,
+     area, x_min, x_max, y_min, y_max) = best
+    # The near edge of the warning border can sit just above the yellow-X ROI.
+    # Detect its horizontal edge in full-frame coordinates, while keeping the
+    # X detector itself restricted to the floor ROI.
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+    x_padding = max(40, int(round((x_max - x_min) * 0.25)))
+    y_padding = max(48, int(round((y_max - y_min) * 0.45)))
+    search_x_min = max(0, x_min - x_padding)
+    search_x_max = min(width, x_max + x_padding)
+    global_y_min = roi_top + y_min
+    global_y_max = roi_top + y_max
+    search_y_min = max(0, global_y_min - y_padding)
+    search_y_max = min(height, global_y_max + y_padding)
+    border_edges = np.zeros_like(edges)
+    border_edges[
+        search_y_min:search_y_max, search_x_min:search_x_max
+    ] = edges[search_y_min:search_y_max, search_x_min:search_x_max]
+    border_hough = cv2.HoughLinesP(
+        border_edges, 1, np.pi / 360.0, 35,
+        minLineLength=max(60, int(round((x_max - x_min) * 0.35))),
+        maxLineGap=25,
+    )
+    border_candidates = []
+    if border_hough is not None:
+        for x1, y1, x2, y2 in border_hough.reshape(-1, 4):
+            angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
+            if angle >= 90.0:
+                angle -= 180.0
+            if angle < -90.0:
+                angle += 180.0
+            if abs(angle) <= 12.0:
+                length = math.hypot(x2 - x1, y2 - y1)
+                border_candidates.append(
+                    (
+                        length, angle,
+                        (
+                            int(x1), int(y1 - roi_top),
+                            int(x2), int(y2 - roi_top),
+                        ),
+                    )
+                )
+    border_candidates.sort(reverse=True)
+    strongest_border = border_candidates[:8]
+    border_angle_deg = None
+    if strongest_border:
+        border_angle_deg = float(np.median([
+            candidate[1] for candidate in strongest_border
+        ]))
+    return {
+        "center_y_ratio": float((center_y + roi_top) / height),
+        "angle_deg": 0.0,
+        "x_min_px": x_min,
+        "x_max_px": x_max,
+        "center_x_px": float(center_x),
+        "center_x_ratio": float(center_x / width),
+        "image_width_px": int(width),
+        "image_height_px": int(height),
+        "yellow_pixels": area,
+        "component_count": 1,
+        "black_adjacent_components": 0,
+        "band_width_px": 0.0,
+        "x_lines": (rising_line, falling_line),
+        "border_angle_deg": border_angle_deg,
+        "border_line_count": len(strongest_border),
+        "border_lines": tuple(
+            candidate[2] for candidate in strongest_border
+        ),
     }
 
 
@@ -741,6 +922,14 @@ def parse_arrival(raw):
     location = str(payload.get("location", "")).strip().upper()
     operation = str(payload.get("operation", "")).strip().upper()
     product_type = str(payload.get("product_type", "")).strip().upper()
+    insertion_distance_cm = payload.get("insertion_distance_cm")
+    if insertion_distance_cm is not None:
+        try:
+            insertion_distance_cm = float(insertion_distance_cm)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("arrival_insertion_distance") from exc
+        if not math.isfinite(insertion_distance_cm) or not 1.0 <= insertion_distance_cm <= 100.0:
+            raise ValueError("arrival_insertion_distance")
     if not location:
         raise ValueError("arrival_location")
     if operation not in OPERATIONS:
@@ -762,6 +951,13 @@ def parse_arrival(raw):
         if left not in SYMBOLS or right not in SYMBOLS:
             raise ValueError("invalid_target_symbols")
         normalized_target.update(left=left, right=right)
+    elif target_type == "NEAREST":
+        recognition_mode = str(
+            target.get("recognition_mode", "CURRENT")
+        ).strip().upper()
+        if recognition_mode not in {"CURRENT", "LEGACY"}:
+            raise ValueError("arrival_recognition_mode")
+        normalized_target["recognition_mode"] = recognition_mode
     elif target_type == "SLOT":
         slot_id = str(target.get("slot_id", "")).strip().upper()
         if not slot_id:
@@ -770,6 +966,7 @@ def parse_arrival(raw):
     return {
         "status": status, "location": location, "operation": operation,
         "product_type": product_type, "target": normalized_target,
+        "insertion_distance_cm": insertion_distance_cm,
     }
 
 
@@ -1106,7 +1303,7 @@ class AutoDockNode(Node):
             "/ascamera/camera_publisher/rgb0/camera_info",
         )
         self.declare_parameter("scan_topic", "/scan_raw")
-        self.declare_parameter("odom_topic", "/odom_raw")
+        self.declare_parameter("odom_topic", "/odom")
         self.declare_parameter("imu_rpy_topic", "/imu/rpy/filtered")
         self.declare_parameter("cmd_vel_topic", "/controller/cmd_vel")
         self.declare_parameter("fork_command_topic", "/fork/command")
@@ -1239,9 +1436,34 @@ class AutoDockNode(Node):
         self.tape_recovery_start_position = None
         self.tape_recovery_direction = None
         self.tape_recovery_done = False
+        self.y_slot_centering_started_at = None
+        self.y_slot_center_confirmation_count = 0
+        self.y_slot_last_counted_tape_at = None
+        self.y_slot_centered_since = None
+        self.y_slot_requested_insertion_distance_cm = None
+        self.y_slot_lateral_pulse_speed = 0.0
+        self.y_slot_lateral_pulse_until = 0.0
+        self.y_slot_lateral_settle_until = 0.0
+        self.y_slot_last_motion_tape_at = None
+        self.y_slot_yaw_pulse_speed = 0.0
+        self.y_slot_yaw_pulse_until = 0.0
+        self.y_slot_yaw_settle_until = 0.0
+        self.y_slot_last_yaw_tape_at = None
+        self.y_slot_insert_start_position = None
+        self.y_slot_insert_start_yaw = None
+        self.y_slot_insert_started_at = None
         self.candidate_stop_due_at = None
         self.candidate_confirmation_started_at = None
         self.candidate_retry_not_before = 0.0
+        self.nearest_step_settle_until = None
+        self.nearest_step_wait_started_at = None
+        self.nearest_step_source_stamp_ns = None
+        self.nearest_step_verified = False
+        self.nearest_step_count = 0
+        self.dock_reverse_search_start_position = None
+        self.dock_reverse_search_clearance_recovery_active = False
+        self.dock_lateral_search_standoff_reached = False
+        self.dock_lateral_yaw_entity_id = None
         self.latest_tape_guidance = None
         self.latest_tape_guidance_at = 0.0
         self.tape_reference = None
@@ -1530,17 +1752,17 @@ class AutoDockNode(Node):
             self.publish_status("rejected", "arrival_while_busy")
             return
         operation = arrival["operation"]
-        if operation == "PICK" and self.load_state != "UNLOADED":
-            self.publish_status("rejected", "pick_requires_unloaded")
-            return
-        if operation == "PLACE" and self.load_state != "LOADED":
-            self.publish_status("rejected", "place_requires_loaded")
-            return
         self.operation = operation
         self.location = arrival["location"]
         self.product_type = arrival["product_type"]
+        self.y_slot_requested_insertion_distance_cm = arrival.get(
+            "insertion_distance_cm"
+        )
         target = arrival["target"]
         self.target_type = target["type"]
+        self.nearest_recognition_mode = target.get(
+            "recognition_mode", "CURRENT"
+        )
         if self.target_type == "NEAREST" and operation != "PICK":
             self.publish_status("rejected", "nearest_target_requires_pick")
             return
@@ -1589,6 +1811,15 @@ class AutoDockNode(Node):
         self.candidate_stop_due_at = None
         self.candidate_confirmation_started_at = None
         self.candidate_retry_not_before = 0.0
+        self.nearest_step_settle_until = None
+        self.nearest_step_wait_started_at = None
+        self.nearest_step_source_stamp_ns = None
+        self.nearest_step_verified = False
+        self.nearest_step_count = 0
+        self.dock_reverse_search_start_position = None
+        self.dock_reverse_search_clearance_recovery_active = False
+        self.dock_lateral_search_standoff_reached = False
+        self.dock_lateral_yaw_entity_id = None
         self.nearest_alignment_distance_cm = None
         self.latest_tape_guidance = None
         self.latest_tape_guidance_at = 0.0
@@ -1597,6 +1828,51 @@ class AutoDockNode(Node):
         self.tape_recovery_start_position = None
         self.tape_recovery_direction = None
         self.tape_recovery_done = False
+        self.y_slot_centering_started_at = None
+        self.y_slot_center_confirmation_count = 0
+        self.y_slot_last_counted_tape_at = None
+        self.y_slot_centered_since = None
+        self.y_slot_lateral_pulse_speed = 0.0
+        self.y_slot_lateral_pulse_until = 0.0
+        self.y_slot_lateral_settle_until = 0.0
+        self.y_slot_last_motion_tape_at = None
+        self.y_slot_yaw_pulse_speed = 0.0
+        self.y_slot_yaw_pulse_until = 0.0
+        self.y_slot_yaw_settle_until = 0.0
+        self.y_slot_last_yaw_tape_at = None
+        self.y_slot_insert_start_position = None
+        self.y_slot_insert_start_yaw = None
+        self.y_slot_insert_started_at = None
+        configured_y_locations = self.config.get(
+            "y_slot_centering_locations", ["Y1", "Y2", "Y3", "Y4"]
+        )
+        if not isinstance(configured_y_locations, (list, tuple, set)):
+            configured_y_locations = ["Y1", "Y2", "Y3", "Y4"]
+        configured_y_locations = {
+            str(value).strip().upper() for value in configured_y_locations
+        }
+        if (
+            operation == "PLACE"
+            and self.location in configured_y_locations
+            and self.boolean("y_slot_centering_enabled", True)
+        ):
+            self.reset_coarse_alignment()
+            self.y_slot_centering_started_at = time.monotonic()
+            self.state = "y_slot_centering"
+            self.publish_status(
+                "running", "y_slot_centering_started",
+                target_center_x_ratio=self.number(
+                    "y_slot_target_center_x_ratio", 0.50, 0.05, 0.95
+                ),
+                tolerance_ratio=self.number(
+                    "y_slot_center_tolerance_ratio", 0.0, 0.0, 0.25
+                ),
+                insertion_start_min_center_y_ratio=self.number(
+                    "y_slot_insertion_start_min_center_y_ratio",
+                    0.9101, 0.0, 1.0,
+                ),
+            )
+            return
         self.reset_coarse_alignment()
         self.latch_search_heading()
         if self.target_type != "NEAREST":
@@ -1663,6 +1939,35 @@ class AutoDockNode(Node):
         self.finish_fork_operation(fork_state)
 
     def finish_fork_operation(self, fork_state):
+        if (
+            fork_state == "DOWN_COMPLETE"
+            and self.operation == "PLACE"
+            and self.location in {"Y1", "Y2", "Y3", "Y4"}
+        ):
+            placed_distance = getattr(
+                self, "completed_insertion_distance_m", None
+            )
+            self.load_state = "UNLOADED"
+            self.stop_drive(10)
+            self.post_lift_reverse_start = None
+            self.post_lift_reverse_start_yaw = None
+            self.post_lift_reverse_target_m = None
+            self.right_turn_target_yaw = None
+            self.right_turn_clearance_wait_started_at = None
+            self.y_slot_insert_start_position = None
+            self.y_slot_insert_start_yaw = None
+            self.y_slot_insert_started_at = None
+            self.completed_insertion_distance_m = None
+            self.state = "ready"
+            self.publish_status(
+                "completed", "y_slot_placement_complete",
+                fork_state=fork_state,
+                insertion_distance_cm=(
+                    None if placed_distance is None
+                    else round(placed_distance * 100.0, 1)
+                ),
+            )
+            return
         if self.odom_yaw is None or self.odom_position is None:
             self.cancel("odom_missing_after_fork")
             return
@@ -1701,6 +2006,10 @@ class AutoDockNode(Node):
         self.candidate_stop_due_at = None
         self.candidate_confirmation_started_at = None
         self.candidate_retry_not_before = 0.0
+        self.dock_reverse_search_start_position = None
+        self.dock_reverse_search_clearance_recovery_active = False
+        self.dock_lateral_search_standoff_reached = False
+        self.dock_lateral_yaw_entity_id = None
         self.nearest_alignment_distance_cm = None
         self.scan_sweep_started_yaw = None
         self.scan_sweep_phase = 0
@@ -1711,6 +2020,21 @@ class AutoDockNode(Node):
         self.tape_recovery_start_position = None
         self.tape_recovery_direction = None
         self.tape_recovery_done = False
+        self.y_slot_centering_started_at = None
+        self.y_slot_center_confirmation_count = 0
+        self.y_slot_last_counted_tape_at = None
+        self.y_slot_centered_since = None
+        self.y_slot_lateral_pulse_speed = 0.0
+        self.y_slot_lateral_pulse_until = 0.0
+        self.y_slot_lateral_settle_until = 0.0
+        self.y_slot_last_motion_tape_at = None
+        self.y_slot_yaw_pulse_speed = 0.0
+        self.y_slot_yaw_pulse_until = 0.0
+        self.y_slot_yaw_settle_until = 0.0
+        self.y_slot_last_yaw_tape_at = None
+        self.y_slot_insert_start_position = None
+        self.y_slot_insert_start_yaw = None
+        self.y_slot_insert_started_at = None
         self.reset_coarse_alignment()
         self.post_lift_reverse_start = None
         self.post_lift_reverse_start_yaw = None
@@ -1759,6 +2083,12 @@ class AutoDockNode(Node):
         """Accept only gradual tape-pose changes while the track is fresh."""
         if observation is None:
             return False
+        if self.state == "y_slot_centering":
+            # A valid X is session-latched: later hits update its position,
+            # while missed frames leave the last confirmed position intact.
+            self.latest_tape_guidance = observation
+            self.latest_tape_guidance_at = now
+            return True
         previous = getattr(self, "latest_tape_guidance", None)
         previous_age = now - getattr(self, "latest_tape_guidance_at", 0.0)
         reset_age = self.number("tape_outlier_reset_age_sec", 0.75, 0.10, 3.0)
@@ -1834,6 +2164,7 @@ class AutoDockNode(Node):
         post_lift_dock_end_active = self.state == "post_lift_opening_search"
         tape_due = (
             post_lift_dock_end_active
+            or self.state == "y_slot_centering"
             or self.state in {"search", "confirm", "coarse_align", "docking"}
             and (
                 AutoDockNode.boolean(self, "tape_guidance_enabled", False)
@@ -1907,14 +2238,22 @@ class AutoDockNode(Node):
                     tracked_roi_minimum = max(
                         tracked_roi_minimum or 0.0, pallet_minimum
                     )
-            observation = detect_warning_tape(
-                frame,
-                minimum_yellow_pixels=int(self.number(
-                    "tape_min_yellow_pixels", 600, 100, 20000
-                )),
-                minimum_center_y_ratio=tracked_roi_minimum,
-                filter_config=warning_tape_filter,
-            )
+            minimum_yellow_pixels = int(self.number(
+                "tape_min_yellow_pixels", 600, 100, 20000
+            ))
+            if self.state == "y_slot_centering":
+                observation = detect_y_slot_x(
+                    frame,
+                    minimum_yellow_pixels=minimum_yellow_pixels,
+                    filter_config=warning_tape_filter,
+                )
+            else:
+                observation = detect_warning_tape(
+                    frame,
+                    minimum_yellow_pixels=minimum_yellow_pixels,
+                    minimum_center_y_ratio=tracked_roi_minimum,
+                    filter_config=warning_tape_filter,
+                )
             current_tape_observation = observation
             accepted = AutoDockNode.update_warning_tape_guidance(
                 self, observation, time.monotonic()
@@ -2229,12 +2568,51 @@ class AutoDockNode(Node):
             return None
         return math.radians(yaw_deg)
 
+    def any_front_entity_yaw_error(self):
+        """Lock one complete entity and reuse only its yaw during the search."""
+        detection = getattr(self, "latest_detection", None)
+        if (
+            not isinstance(detection, dict)
+            or time.monotonic() - getattr(self, "latest_detection_at", 0.0) > 0.8
+        ):
+            return None
+        observations = []
+        locked_entity_id = getattr(self, "dock_lateral_yaw_entity_id", None)
+        for entity in detection.get("entities") or []:
+            if not isinstance(entity, dict):
+                continue
+            entity_id = entity.get("entity_id")
+            if locked_entity_id is not None and entity_id != locked_entity_id:
+                continue
+            depth_yaw = entity.get("depth_yaw") or {}
+            try:
+                yaw_deg = float(depth_yaw["yaw_deg"])
+                visibility = float(entity.get("visibility_score", 0.0))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if math.isfinite(yaw_deg) and abs(yaw_deg) <= 45.0:
+                observations.append((visibility, yaw_deg, entity_id))
+        if not observations:
+            return None
+        _visibility, yaw_deg, entity_id = max(
+            observations, key=lambda item: item[0]
+        )
+        if locked_entity_id is None:
+            self.dock_lateral_yaw_entity_id = entity_id
+        return math.radians(yaw_deg)
+
     def selected_candidate(self):
         detection = self.latest_detection
         if detection is None or time.monotonic() - self.latest_detection_at > 0.8:
             return None, None
         if getattr(self, "target_type", "SYMBOLS") == "NEAREST":
-            return self.nearest_product_candidate(detection)
+            legacy = (
+                getattr(self, "nearest_recognition_mode", "CURRENT")
+                == "LEGACY"
+            )
+            return self.nearest_product_candidate(
+                detection, respect_lock=not legacy
+            )
         if detection.get("target_top") != [self.target_left, self.target_right]:
             return None, None
         candidate = detection.get("candidate")
@@ -2273,6 +2651,16 @@ class AutoDockNode(Node):
         candidates = []
         image_width = self.number("camera_image_width_px", 640.0, 100.0, 4000.0)
         image_height = self.number("camera_image_height_px", 480.0, 100.0, 4000.0)
+        horizontal_fov = math.radians(
+            self.number("camera_horizontal_fov_deg", 60.0, 20.0, 120.0)
+        )
+
+        def pallet_center_pose(center_x):
+            center_error = (
+                center_x - image_width * 0.5
+            ) / max(image_width * 0.5, 1.0)
+            return center_error, math.tan(center_error * 0.5 * horizontal_fov)
+
         tracker = getattr(self, "dock_inventory_tracker", None)
         inventory = tracker.snapshot() if tracker is not None else {}
         visible_inventory = inventory.get("visible_nearest") or []
@@ -2323,22 +2711,160 @@ class AutoDockNode(Node):
             ):
                 continue
             center_x = 0.5 * (float(box[0]) + float(box[2]))
+            center_error, pallet_lateral_ratio = pallet_center_pose(center_x)
+            entity_streak = int(entity.get("seen_count", 1))
+            tracked_candidate = detection.get("candidate")
+            legacy = (
+                getattr(self, "nearest_recognition_mode", "CURRENT")
+                == "LEGACY"
+            )
+            if (
+                not legacy
+                and locked_entity_id is not None
+                and isinstance(tracked_candidate, dict)
+                and tracked_candidate.get("entity_id") == entity_id
+            ):
+                # Entity reconstruction can reset seen_count after an odom
+                # alignment step even while YOLO keeps tracking the same
+                # locked candidate continuously.  Use that continuous streak
+                # for the post-step stability check.
+                entity_streak = max(
+                    entity_streak,
+                    int(tracked_candidate.get("streak", 0)),
+                )
+            pallet_pnp = dict(pnp)
+            pallet_pnp["tag_lateral_ratio"] = pnp.get("lateral_ratio")
+            pallet_pnp["lateral_ratio"] = pallet_lateral_ratio
+            pallet_pnp["lateral_source"] = "pallet_box"
             candidate = {
                 "entity_id": entity_id,
                 "matrix": list(matrix),
-                "streak": int(entity.get("seen_count", 1)),
-                "center_error": (
-                    center_x - image_width * 0.5
-                ) / max(image_width * 0.5, 1.0),
+                "streak": entity_streak,
+                "center_error": center_error,
                 "frontal_error": float(entity.get("frontal_error", 0.0)),
                 "top_row_error": float(entity.get("top_row_error", 0.0)),
                 "bottom_row_error": float(entity.get("bottom_row_error", 0.0)),
                 "pallet_box": list(box),
-                "pnp": pnp,
+                "pnp": pallet_pnp,
                 "depth_yaw": depth_yaw,
             }
             candidates.append((distance_cm, abs(candidate["center_error"]), candidate))
-        if self.product_type == "FRESH":
+        # A physical pallet may carry only one to four symbol tags.  When a
+        # full 2x2 entity is unavailable, associate the visible tags with the
+        # pallet immediately below them and classify that pallet as a whole.
+        detections = [
+            item for item in (detection.get("detections") or [])
+            if isinstance(item, dict)
+            and isinstance(item.get("box"), list)
+            and len(item["box"]) == 4
+        ]
+        pallets = [item for item in detections if item.get("class") == "pallet"]
+        symbols = [item for item in detections if item.get("class") != "pallet"]
+        pallet_tags = {id(pallet): [] for pallet in pallets}
+        for symbol in symbols:
+            symbol_box = symbol["box"]
+            symbol_x = 0.5 * (float(symbol_box[0]) + float(symbol_box[2]))
+            symbol_y = 0.5 * (float(symbol_box[1]) + float(symbol_box[3]))
+            matches = []
+            for pallet in pallets:
+                box = [float(value) for value in pallet["box"]]
+                pallet_width = max(box[2] - box[0], 1.0)
+                pallet_height = max(box[3] - box[1], 1.0)
+                margin = pallet_width * 0.12
+                vertical_reach = max(4.0 * pallet_height, 0.9 * pallet_width)
+                if (
+                    box[0] - margin <= symbol_x <= box[2] + margin
+                    and box[1] - vertical_reach <= symbol_y <= box[3]
+                ):
+                    pallet_center_x = 0.5 * (box[0] + box[2])
+                    score = (
+                        abs(symbol_x - pallet_center_x) / pallet_width
+                        + 0.35 * abs(symbol_y - box[1]) / vertical_reach
+                    )
+                    matches.append((score, pallet))
+            if matches:
+                pallet_tags[id(min(matches, key=lambda item: item[0])[1])].append(
+                    symbol
+                )
+        legacy = getattr(self, "nearest_recognition_mode", "CURRENT") == "LEGACY"
+        partial_streak_key = (
+            "stable_detection_frames" if legacy
+            else "nearest_stable_detection_frames"
+        )
+        partial_streak_default = 2 if legacy else 3
+        for pallet in pallets:
+            box = [float(value) for value in pallet["box"]]
+            edge_margin = image_width * self.number(
+                "nearest_partial_pallet_edge_margin_ratio",
+                0.02, 0.0, 0.20,
+            )
+            if box[0] <= edge_margin or box[2] >= image_width - edge_margin:
+                continue
+            tags = pallet_tags[id(pallet)]
+            if not 1 <= len(tags) <= 4:
+                continue
+            tags = sorted(
+                tags,
+                key=lambda item: (
+                    0.5 * (float(item["box"][1]) + float(item["box"][3])),
+                    0.5 * (float(item["box"][0]) + float(item["box"][2])),
+                ),
+            )
+            matrix = [str(item.get("class", "")).strip().lower() for item in tags]
+            if pallet_product_type(matrix) != self.product_type:
+                continue
+            distances = []
+            for tag in tags:
+                depth = tag.get("depth")
+                if not isinstance(depth, dict):
+                    continue
+                try:
+                    value = float(depth["forward_distance_cm"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if math.isfinite(value) and 5.0 <= value <= 300.0:
+                    distances.append(value)
+            if not distances:
+                continue
+            distances.sort()
+            distance_cm = distances[len(distances) // 2]
+            pallet_center_x = 0.5 * (box[0] + box[2])
+            center_error, pallet_lateral_ratio = pallet_center_pose(
+                pallet_center_x
+            )
+            candidate = {
+                "entity_id": None,
+                "matrix": matrix,
+                "streak": int(self.number(
+                    partial_streak_key, partial_streak_default, 1, 30
+                )),
+                "center_error": center_error,
+                "frontal_error": 0.0,
+                "top_row_error": 0.0,
+                "bottom_row_error": 0.0,
+                "pallet_box": [int(round(value)) for value in box],
+                "pnp": {
+                    "reprojection_error_px": 999.0,
+                    "lateral_ratio": pallet_lateral_ratio,
+                    "lateral_source": "pallet_box",
+                    "depth_fallback": True,
+                    "distance_source": "depth",
+                },
+                "depth_yaw": {
+                    "forward_distance_cm": distance_cm,
+                    "yaw_deg": 0.0,
+                },
+                "pallet_tag_candidate": True,
+                "pallet_tag_count": len(tags),
+            }
+            candidates.append((
+                distance_cm, abs(candidate["center_error"]), candidate
+            ))
+        if (
+            self.product_type == "FRESH"
+            and getattr(self, "nearest_recognition_mode", "CURRENT")
+            != "LEGACY"
+        ):
             maximum_single_star_distance_cm = self.number(
                 "single_star_fresh_max_distance_cm", 300.0, 20.0, 500.0
             )
@@ -2408,15 +2934,16 @@ class AutoDockNode(Node):
                 _score, pallet, box, pallet_center_x = min(
                     matches, key=lambda item: item[0]
                 )
+                center_error, pallet_lateral_ratio = pallet_center_pose(
+                    pallet_center_x
+                )
                 candidate = {
                     "entity_id": None,
                     "matrix": ["star"],
                     "streak": int(self.number(
                         "stable_detection_frames", 2, 1, 30
                     )),
-                    "center_error": (
-                        pallet_center_x - image_width * 0.5
-                    ) / max(image_width * 0.5, 1.0),
+                    "center_error": center_error,
                     "frontal_error": 0.0,
                     "top_row_error": 0.0,
                     "bottom_row_error": 0.0,
@@ -2430,7 +2957,9 @@ class AutoDockNode(Node):
                 if distance_cm is not None:
                     candidate["pnp"] = {
                         "reprojection_error_px": 999.0,
-                        "lateral_ratio": math.tan(math.radians(bearing_deg)),
+                        "tag_lateral_ratio": math.tan(math.radians(bearing_deg)),
+                        "lateral_ratio": pallet_lateral_ratio,
+                        "lateral_source": "pallet_box",
                         "depth_fallback": True,
                         "distance_source": "depth",
                     }
@@ -2479,6 +3008,11 @@ class AutoDockNode(Node):
         return intersection / union if union > 0.0 else 0.0
 
     def candidate_matches_best_entity(self, candidate):
+        if candidate.get("pallet_tag_candidate"):
+            matrix = candidate.get("matrix") or []
+            if 1 <= len(matrix) <= 4 and pallet_product_type(matrix) == self.product_type:
+                return True, None
+            return False, "pallet_tag_product_mismatch"
         if candidate.get("fresh_single_star"):
             if getattr(self, "product_type", None) == "FRESH":
                 return True, None
@@ -2532,7 +3066,68 @@ class AutoDockNode(Node):
             matches, reason = self.candidate_matches_best_entity(candidate)
             if not matches:
                 return None, None, reason
-        frames = int(self.number("stable_detection_frames", 2, 1, 30))
+        legacy_nearest = (
+            getattr(self, "target_type", "SYMBOLS") == "NEAREST"
+            and getattr(self, "nearest_recognition_mode", "CURRENT")
+            == "LEGACY"
+        )
+        if (
+            getattr(self, "target_type", "SYMBOLS") == "NEAREST"
+            and not legacy_nearest
+            and not candidate.get("fresh_single_star")
+        ):
+            box = candidate.get("pallet_box")
+            candidate_width = 0.0
+            if isinstance(box, (list, tuple)) and len(box) == 4:
+                try:
+                    candidate_width = max(0.0, float(box[2]) - float(box[0]))
+                except (TypeError, ValueError):
+                    candidate_width = 0.0
+            visible_widths = []
+            for entity in (getattr(self, "latest_detection", None) or {}).get(
+                "entities", []
+            ):
+                entity_box = entity.get("image_pallet_box") if isinstance(entity, dict) else None
+                if not isinstance(entity_box, (list, tuple)) or len(entity_box) != 4:
+                    continue
+                try:
+                    visible_widths.append(max(
+                        0.0, float(entity_box[2]) - float(entity_box[0])
+                    ))
+                except (TypeError, ValueError):
+                    continue
+            largest_visible_width = max(visible_widths, default=candidate_width)
+            relative_width = (
+                candidate_width / largest_visible_width
+                if largest_visible_width > 0.0 else 1.0
+            )
+            depth_yaw = candidate.get("depth_yaw") or {}
+            try:
+                depth_yaw_deg = float(depth_yaw["yaw_deg"])
+                depth_distance_cm = float(depth_yaw["forward_distance_cm"])
+                depth_yaw_valid = (
+                    math.isfinite(depth_yaw_deg)
+                    and abs(depth_yaw_deg) <= 45.0
+                    and math.isfinite(depth_distance_cm)
+                    and 5.0 <= depth_distance_cm <= 300.0
+                )
+            except (KeyError, TypeError, ValueError):
+                depth_yaw_valid = False
+            minimum_relative_width = self.number(
+                "nearest_confirmation_min_relative_width_ratio",
+                0.60, 0.10, 1.0,
+            )
+            if relative_width < minimum_relative_width and not depth_yaw_valid:
+                return None, None, "nearest_candidate_relatively_small_without_depth_yaw"
+        frame_key = "stable_detection_frames"
+        if (
+            getattr(self, "target_type", "SYMBOLS") == "NEAREST"
+            and not legacy_nearest
+            and not candidate.get("fresh_single_star")
+        ):
+            frame_key = "nearest_stable_detection_frames"
+        frame_default = 3 if frame_key == "nearest_stable_detection_frames" else 2
+        frames = int(self.number(frame_key, frame_default, 1, 30))
         if int(candidate.get("streak", 0)) < frames:
             return None, None, "unstable_detection"
         return candidate, pnp, None
@@ -2793,7 +3388,17 @@ class AutoDockNode(Node):
             self.target_last_center_error = candidate.get("center_error")
             if not self.update_world_target(candidate, pnp):
                 return False
-            self.enter_coarse_alignment("nearest_candidate_centering")
+            self.state = "docking"
+            self.reset_coarse_alignment()
+            self.nearest_step_settle_until = None
+            self.nearest_step_wait_started_at = None
+            self.nearest_step_source_stamp_ns = None
+            self.nearest_step_verified = False
+            self.nearest_step_count = 0
+            self.publish_status(
+                "running", "nearest_target_locked_odom_step",
+                entity_id=self.target_entity_id,
+            )
             return True
         if pnp.get("depth_fallback"):
             if not self.update_world_target(candidate, pnp):
@@ -2823,6 +3428,8 @@ class AutoDockNode(Node):
     def maybe_switch_nearest_alignment_target(self):
         """Switch centering to a stable, materially closer visible product."""
         if getattr(self, "target_type", "SYMBOLS") != "NEAREST":
+            return False
+        if getattr(self, "nearest_recognition_mode", "CURRENT") == "LEGACY":
             return False
         detection = getattr(self, "latest_detection", None)
         if (
@@ -2890,10 +3497,19 @@ class AutoDockNode(Node):
             return False
         depth_measurement = candidate.get("depth_yaw") or {}
         distance_source = pnp.get("distance_source", "depth")
-        if distance_source == "pnp":
-            forward_cm = float(pnp["forward_distance_cm"])
-        else:
-            forward_cm = float(depth_measurement["forward_distance_cm"])
+        forward_value = (
+            pnp.get("forward_distance_cm")
+            if distance_source == "pnp"
+            else depth_measurement.get("forward_distance_cm")
+        )
+        if forward_value is None:
+            forward_value = pnp.get("forward_distance_cm")
+        try:
+            forward_cm = float(forward_value)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(forward_cm) or forward_cm <= 0.0:
+            return False
         forward = forward_cm / 100.0
         lateral = -float(pnp.get("lateral_ratio", 0.0)) * forward
         lateral += self.number("centerline_offset_cm", 0.0) / 100.0
@@ -2960,7 +3576,8 @@ class AutoDockNode(Node):
                 else ("front", "rear", "left", "right")
             )
         elif self.state in {
-            "scan_approach", "coarse_align", "docking", "inserting"
+            "scan_approach", "coarse_align", "docking", "inserting",
+            "y_slot_inserting",
         }:
             # The selected pallet is intentionally inside the front clearance.
             monitored = ("left", "right", "rear")
@@ -2977,7 +3594,7 @@ class AutoDockNode(Node):
         for direction, (distance, angle, calculated_clearance) in directions:
             clearance = calculated_clearance or default_clearance
             if direction == "rear" and self.state in {
-                "coarse_align", "docking", "inserting"
+                "coarse_align", "docking", "inserting", "y_slot_inserting"
             }:
                 alignment_rear_minimum = self.number(
                     "alignment_rear_lidar_min_distance_cm", 30.0, 5.0, 100.0
@@ -3003,7 +3620,8 @@ class AutoDockNode(Node):
             self.cancel(f"lidar_{direction}_blocked")
             return True
         self.was_docking_before_interrupt = self.state in {
-            "coarse_align", "docking", "inserting"
+            "coarse_align", "docking", "inserting",
+            "y_slot_centering", "y_slot_inserting",
         }
         self.state_before_lidar_interrupt = self.state
         self.candidate_stop_due_at = None
@@ -3080,6 +3698,10 @@ class AutoDockNode(Node):
             self.tick_docking()
         elif self.state == "inserting":
             self.tick_inserting()
+        elif self.state == "y_slot_centering":
+            self.tick_y_slot_centering()
+        elif self.state == "y_slot_inserting":
+            self.tick_y_slot_inserting()
         elif self.state == "waiting_fork":
             self.stop_drive()
         elif self.state == "reversing_after_lift":
@@ -3386,6 +4008,16 @@ class AutoDockNode(Node):
             self.config.get("search_lateral_direction", "left")
         ).strip().lower()
         direction_sign = -1.0 if direction == "right" else 1.0
+        if (
+            str(getattr(self, "location", "")).split("_", 1)[0] == "DOCK"
+            and not AutoDockNode.boolean(
+                self, "dock_warning_tape_search_enabled", True
+            )
+        ):
+            AutoDockNode.command_dock_reverse_target_search(
+                self, now, lateral_speed, direction_sign
+            )
+            return
         tape_guidance_only = AutoDockNode.boolean(
             self, "tape_guidance_only", False
         )
@@ -3395,6 +4027,7 @@ class AutoDockNode(Node):
                 now, lateral_speed, direction_sign
             ):
                 return
+
             if not getattr(self, "tape_recovery_done", False):
                 AutoDockNode.tick_missing_tape_recovery(
                     self, now, preferred_direction="rear"
@@ -3932,6 +4565,132 @@ class AutoDockNode(Node):
         )
         self.publish_drive(linear_x, 0.0, 0.0)
 
+    def command_dock_reverse_target_search(
+        self, now, lateral_speed=None, direction_sign=1.0
+    ):
+        """Reach rear standoff once, then search laterally while holding yaw."""
+        if not AutoDockNode.boolean(
+            self, "dock_reverse_target_search_enabled", True
+        ):
+            self.stop_drive()
+            self.publish_status("waiting", "dock_target_not_detected_stationary")
+            return
+        maximum_scan_age = self.number(
+            "dock_reverse_target_search_lidar_max_age_sec", 0.50, 0.10, 2.0
+        )
+        scan_age = now - getattr(self, "scan_updated_at", 0.0)
+        if scan_age > maximum_scan_age:
+            self.stop_drive()
+            self.publish_status(
+                "waiting", "dock_reverse_search_scan_stale",
+                scan_age_sec=round(scan_age, 2),
+                maximum_scan_age_sec=round(maximum_scan_age, 2),
+            )
+            return
+        rear_distance, rear_angle, _rear_threshold = getattr(
+            self, "nearest_by_direction", {}
+        ).get("rear", (math.inf, None, 0.0))
+        if not math.isfinite(rear_distance):
+            self.stop_drive()
+            self.publish_status("waiting", "dock_reverse_search_distance_missing")
+            return
+        minimum_rear_cm = self.number(
+            "dock_reverse_target_search_min_rear_distance_cm",
+            25.0, 5.0, 100.0,
+        )
+        rear_distance_cm = rear_distance * 100.0
+        restore_margin_cm = self.number(
+            "dock_reverse_target_search_restore_margin_cm",
+            2.0, 0.0, 20.0,
+        )
+        restore_target_cm = minimum_rear_cm + restore_margin_cm
+        if not getattr(self, "dock_lateral_search_standoff_reached", False):
+            skip_reverse_cm = self.number(
+                "dock_reverse_target_search_skip_above_rear_distance_cm",
+                50.0, restore_target_cm, 300.0,
+            )
+            if rear_distance_cm >= skip_reverse_cm:
+                self.dock_lateral_search_standoff_reached = True
+            elif rear_distance_cm > restore_target_cm:
+                speed = self.number(
+                    "dock_reverse_target_search_speed_m_s", 0.10, 0.10, 0.20
+                )
+                self.publish_drive(-speed, 0.0, 0.0)
+                self.publish_status(
+                    "running", "dock_reverse_target_search",
+                    rear_distance_cm=round(rear_distance_cm, 1),
+                    standoff_target_cm=round(restore_target_cm, 1),
+                    reverse_speed_m_s=round(speed, 3),
+                    rear_angle_deg=(
+                        None if rear_angle is None
+                        else round(math.degrees(rear_angle), 1)
+                    ),
+                )
+                return
+            else:
+                self.dock_lateral_search_standoff_reached = True
+        if rear_distance_cm <= minimum_rear_cm:
+            self.dock_reverse_search_clearance_recovery_active = True
+        if getattr(
+            self, "dock_reverse_search_clearance_recovery_active", False
+        ):
+            if rear_distance_cm < restore_target_cm:
+                speed = self.number(
+                    "dock_reverse_target_search_forward_speed_m_s",
+                    0.10, 0.10, 0.20,
+                )
+                self.publish_drive(speed, 0.0, 0.0)
+                self.publish_status(
+                    "running", "dock_reverse_search_restoring_clearance",
+                    rear_distance_cm=round(rear_distance_cm, 1),
+                    restore_target_cm=round(restore_target_cm, 1),
+                    forward_speed_m_s=round(speed, 3),
+                )
+                return
+            self.dock_reverse_search_clearance_recovery_active = False
+        if lateral_speed is None:
+            lateral_speed = self.number(
+                "search_lateral_speed_m_s", 0.12, 0.10, 0.30
+            )
+        entity_yaw_error = AutoDockNode.any_front_entity_yaw_error(self)
+        yaw_error = (
+            entity_yaw_error if entity_yaw_error is not None
+            else AutoDockNode.search_heading_error(self)
+        )
+        yaw_tolerance = self.number(
+            "tag_search_yaw_tolerance_deg", 3.0, 0.5, 15.0
+        )
+        if (
+            yaw_error is not None
+            and abs(math.degrees(yaw_error)) > yaw_tolerance
+        ):
+            angular = AutoDockNode.search_angular_command(self, yaw_error)
+            self.publish_drive(0.0, 0.0, angular)
+            self.publish_status(
+                "running", "dock_lateral_search_yaw_correction",
+                rear_distance_cm=round(rear_distance_cm, 1),
+                yaw_deg=round(math.degrees(yaw_error), 1),
+                yaw_source=(
+                    "front_entity" if entity_yaw_error is not None
+                    else getattr(self, "search_heading_source", None) or "odom"
+                ),
+            )
+            return
+        self.publish_drive(0.0, direction_sign * lateral_speed, 0.0)
+        self.publish_status(
+            "running", "dock_rear_clearance_held_lateral_search",
+            rear_distance_cm=round(rear_distance_cm, 1),
+            minimum_rear_cm=round(minimum_rear_cm, 1),
+            yaw_deg=(
+                None if yaw_error is None else round(math.degrees(yaw_error), 1)
+            ),
+            yaw_source=(
+                "front_entity" if entity_yaw_error is not None
+                else getattr(self, "search_heading_source", None) or "odom"
+            ),
+            lateral_speed_m_s=round(direction_sign * lateral_speed, 3),
+        )
+
     def tick_confirm(self):
         candidate, pnp, reason = self.valid_measurement()
         if candidate is None:
@@ -3939,19 +4698,20 @@ class AutoDockNode(Node):
             if identity is not None:
                 self.enter_coarse_alignment(reason or identity_reason)
                 return
-            raw, _ = self.selected_candidate()
-            if raw is None:
-                self.state = "search"
-                self.candidate_confirmation_started_at = None
-                self.candidate_retry_not_before = 0.0
-                self.publish_status("running", "candidate_lost_resume_search")
-                return
             now = time.monotonic()
             if self.candidate_confirmation_started_at is None:
                 self.candidate_confirmation_started_at = now
             timeout = self.number(
                 "candidate_confirmation_timeout_sec", 0.8, 0.1, 10.0
             )
+            raw, _ = self.selected_candidate()
+            if raw is None and now - self.candidate_confirmation_started_at < timeout:
+                self.stop_drive()
+                self.publish_status(
+                    "running", "candidate_temporarily_lost_confirmation_wait",
+                    measurement_reason=reason,
+                )
+                return
             if now - self.candidate_confirmation_started_at >= timeout:
                 cooldown = self.number(
                     "candidate_retry_cooldown_sec", 1.0, 0.0, 10.0
@@ -4168,9 +4928,84 @@ class AutoDockNode(Node):
             self.state = "inserting"
             self.publish_status("running", "aligned_inserting")
             return
-        candidate, pnp, _ = self.valid_measurement()
-        if candidate is not None:
-            self.update_world_target(candidate, pnp, blend_existing=True)
+        nearest_target = getattr(self, "target_type", "SYMBOLS") == "NEAREST"
+        settle_until = getattr(self, "nearest_step_settle_until", None)
+        if nearest_target and settle_until is not None:
+            self.stop_drive()
+            if now < settle_until:
+                self.publish_status(
+                    "running", "nearest_odom_step_settling",
+                    remaining_sec=round(settle_until - now, 2),
+                    step=getattr(self, "nearest_step_count", 0),
+                )
+                return
+            source_stamp = (getattr(self, "latest_detection", None) or {}).get(
+                "source_stamp_ns"
+            )
+            candidate, pnp, reason = self.valid_measurement()
+            locked_entity_id = getattr(self, "target_entity_id", None)
+            if (
+                candidate is not None
+                and locked_entity_id is not None
+                and candidate.get("entity_id") not in {None, locked_entity_id}
+            ):
+                locked_candidate, locked_pnp = self.nearest_product_candidate(
+                    self.latest_detection or {}, respect_lock=True
+                )
+                if locked_candidate is not None:
+                    candidate, pnp, reason = locked_candidate, locked_pnp, None
+                else:
+                    candidate, pnp, reason = None, None, "locked_entity_mismatch"
+            if candidate is None:
+                partial_measurement = getattr(
+                    self, "tracked_partial_measurement", None
+                )
+                if callable(partial_measurement):
+                    partial_candidate, partial_pnp, partial_reason = (
+                        partial_measurement()
+                    )
+                    if partial_candidate is not None:
+                        candidate, pnp, reason = (
+                            partial_candidate, partial_pnp, None
+                        )
+                    elif partial_reason is not None:
+                        reason = partial_reason
+            fresh_frame = (
+                source_stamp is not None
+                and source_stamp
+                != getattr(self, "nearest_step_source_stamp_ns", None)
+            )
+            same_entity = (
+                candidate is not None
+                and candidate.get("entity_id")
+                in {None, getattr(self, "target_entity_id", None)}
+            )
+            if not fresh_frame or not same_entity:
+                if getattr(self, "nearest_step_wait_started_at", None) is None:
+                    self.nearest_step_wait_started_at = now
+                self.publish_status(
+                    "waiting", "nearest_waiting_fresh_recheck",
+                    measurement_reason=reason,
+                    fresh_frame=fresh_frame,
+                    wait_sec=round(now - self.nearest_step_wait_started_at, 2),
+                )
+                return
+            if not self.update_world_target(candidate, pnp, blend_existing=False):
+                self.cancel("odom_missing")
+                return
+            self.nearest_step_settle_until = None
+            self.nearest_step_wait_started_at = None
+            self.nearest_step_source_stamp_ns = source_stamp
+            self.nearest_step_verified = True
+            self.publish_status(
+                "running", "nearest_fresh_measurement_relocked",
+                entity_id=self.target_entity_id,
+                step=getattr(self, "nearest_step_count", 0),
+            )
+        elif not nearest_target:
+            candidate, pnp, _ = self.valid_measurement()
+            if candidate is not None:
+                self.update_world_target(candidate, pnp, blend_existing=True)
         target = self.target_in_body()
         if target is None:
             self.cancel("odom_missing")
@@ -4204,6 +5039,28 @@ class AutoDockNode(Node):
             and yaw_ready
         ):
             self.stop_drive(5)
+            if nearest_target and not getattr(
+                self, "nearest_step_verified", False
+            ):
+                settle_sec = self.number(
+                    "nearest_odom_step_settle_sec", 0.50, 0.10, 3.0
+                )
+                self.nearest_step_settle_until = now + settle_sec
+                self.nearest_step_wait_started_at = None
+                self.nearest_step_source_stamp_ns = (
+                    (getattr(self, "latest_detection", None) or {}).get(
+                        "source_stamp_ns"
+                    )
+                )
+                self.nearest_step_count = getattr(
+                    self, "nearest_step_count", 0
+                ) + 1
+                self.publish_status(
+                    "running", "nearest_odom_step_complete_settling",
+                    settle_sec=settle_sec,
+                    step=self.nearest_step_count,
+                )
+                return
             self.insertion_entry_gap_m = max(0.0, forward_actual)
             pause = self.number("motion_transition_pause_sec", 0.10, 0.10, 2.0)
             self.insertion_start_due_at = now + pause
@@ -4212,6 +5069,8 @@ class AutoDockNode(Node):
             )
             return
         if translation_first:
+            if nearest_target:
+                self.nearest_step_verified = False
             forward_error = max(0.0, forward_actual - standoff)
             forward_gain = self.number(
                 "translation_alignment_forward_gain", 0.8, 0.1, 2.0
@@ -4228,17 +5087,39 @@ class AutoDockNode(Node):
                 "translation_alignment_max_lateral_speed_m_s", 0.08, 0.03, 0.15
             )
             max_angular = self.number(
-                "translation_alignment_max_angular_speed_rad_s", 0.12, 0.0, 0.20
+                "translation_alignment_max_angular_speed_rad_s", 0.20, 0.0, 0.20
             )
             angular = clamp(0.6 * yaw, -max_angular, max_angular)
             min_angular = min(max_angular, self.number(
-                "translation_alignment_min_angular_speed_rad_s", 0.10, 0.0, 0.20
+                "translation_alignment_min_angular_speed_rad_s", 0.20, 0.0, 0.20
             ))
             if not yaw_ready and 0.0 < abs(angular) < min_angular:
                 angular = math.copysign(min_angular, angular)
             forward_command = clamp(
                 forward_gain * forward_error, 0.0, max_forward
             )
+            lateral_command = clamp(
+                0.80 * lateral, -max_lateral, max_lateral
+            )
+            if nearest_target:
+                minimum_linear = self.number(
+                    "real_vehicle_min_linear_speed_m_s", 0.10, 0.10, 0.20
+                )
+                if not yaw_ready:
+                    forward_command = 0.0
+                    lateral_command = 0.0
+                elif abs(lateral_actual) >= 0.025:
+                    forward_command = 0.0
+                    angular = 0.0
+                    lateral_command = math.copysign(
+                        max(minimum_linear, abs(lateral_command)),
+                        lateral_command,
+                    )
+                else:
+                    lateral_command = 0.0
+                    angular = 0.0
+                    if forward_command > 0.0:
+                        forward_command = max(minimum_linear, forward_command)
             tape = getattr(self, "latest_tape_guidance", None)
             tape_age = now - getattr(self, "latest_tape_guidance_at", 0.0)
             tape_visible = (
@@ -4257,7 +5138,7 @@ class AutoDockNode(Node):
             )
             self.publish_drive(
                 forward_command,
-                clamp(0.80 * lateral, -max_lateral, max_lateral),
+                lateral_command,
                 angular,
             )
             self.publish_status(
@@ -4268,6 +5149,8 @@ class AutoDockNode(Node):
                 yaw_trusted=yaw_trusted,
                 tape_visible=tape_visible,
                 tape_far_warning=tape_far_warning,
+                forward_command_m_s=round(forward_command, 3),
+                lateral_command_m_s=round(lateral_command, 3),
             )
             return
         self.publish_drive(
@@ -4313,6 +5196,371 @@ class AutoDockNode(Node):
             "recovering", "returning_to_alignment_best_pose",
             remaining_cm=round(math.hypot(dx, dy) * 100.0, 1),
             yaw_error_deg=round(math.degrees(yaw), 1),
+        )
+
+    def tick_y_slot_centering(self):
+        now = time.monotonic()
+        started_at = getattr(self, "y_slot_centering_started_at", None)
+        if started_at is None:
+            started_at = now
+            self.y_slot_centering_started_at = now
+        timeout = self.number(
+            "y_slot_centering_timeout_sec", 8.0, 1.0, 60.0
+        )
+        tape = getattr(self, "latest_tape_guidance", None)
+        x_latched = isinstance(tape, dict)
+        if not x_latched and now - started_at >= timeout:
+            self.cancel("y_slot_centering_timeout")
+            return
+        if not x_latched:
+            self.stop_drive()
+            self.y_slot_center_confirmation_count = 0
+            self.y_slot_last_counted_tape_at = None
+            self.y_slot_centered_since = None
+            self.publish_status(
+                "waiting", "y_slot_tape_not_detected",
+                elapsed_sec=round(now - started_at, 2),
+            )
+            return
+        tape_age = now - getattr(self, "latest_tape_guidance_at", 0.0)
+        maximum_age = self.number(
+            "y_slot_tape_max_age_sec", 0.35, 0.05, 1.0
+        )
+        if tape_age > maximum_age:
+            self.stop_drive()
+            self.y_slot_lateral_pulse_speed = 0.0
+            self.y_slot_lateral_pulse_until = 0.0
+            self.y_slot_yaw_pulse_speed = 0.0
+            self.y_slot_yaw_pulse_until = 0.0
+            self.y_slot_center_confirmation_count = 0
+            self.y_slot_last_counted_tape_at = None
+            self.y_slot_centered_since = None
+            self.publish_status(
+                "waiting", "y_slot_x_latched_waiting_fresh_frame",
+                center_x_px=round(float(tape.get("center_x_px", 0.0)), 1),
+                tape_age_sec=round(tape_age, 3),
+            )
+            return
+        try:
+            center_x_ratio = float(tape["center_x_ratio"])
+            center_x_px = float(tape["center_x_px"])
+            image_width_px = float(tape["image_width_px"])
+            center_y_ratio = float(tape["center_y_ratio"])
+            border_angle_deg = float(tape["border_angle_deg"])
+        except (KeyError, TypeError, ValueError):
+            self.stop_drive()
+            self.y_slot_lateral_pulse_speed = 0.0
+            self.y_slot_lateral_pulse_until = 0.0
+            self.y_slot_yaw_pulse_speed = 0.0
+            self.y_slot_yaw_pulse_until = 0.0
+            self.publish_status("waiting", "y_slot_border_not_detected")
+            return
+        observation_at = getattr(self, "latest_tape_guidance_at", 0.0)
+        border_target = self.number(
+            "y_slot_border_target_angle_deg", 0.0, -15.0, 15.0
+        )
+        border_tolerance = self.number(
+            "y_slot_border_angle_tolerance_deg", 2.0, 0.2, 10.0
+        )
+        border_error = border_angle_deg - border_target
+        yaw_pulse_speed = getattr(self, "y_slot_yaw_pulse_speed", 0.0)
+        yaw_pulse_until = getattr(self, "y_slot_yaw_pulse_until", 0.0)
+        yaw_settle_until = getattr(self, "y_slot_yaw_settle_until", 0.0)
+        yaw_settle_sec = self.number(
+            "y_slot_border_rotation_settle_sec", 0.30, 0.10, 2.0
+        )
+        if abs(border_error) > border_tolerance:
+            self.y_slot_center_confirmation_count = 0
+            self.y_slot_last_counted_tape_at = None
+            self.y_slot_centered_since = None
+            self.y_slot_lateral_pulse_speed = 0.0
+            self.y_slot_lateral_pulse_until = 0.0
+            rotation_speed = self.number(
+                "y_slot_border_rotation_speed_rad_s", 0.35, 0.10, 1.0
+            )
+            desired_yaw = math.copysign(rotation_speed, -border_error)
+            if yaw_pulse_speed != 0.0 and now < yaw_pulse_until:
+                if math.copysign(1.0, yaw_pulse_speed) != math.copysign(
+                    1.0, desired_yaw
+                ):
+                    self.stop_drive()
+                    self.y_slot_yaw_pulse_speed = 0.0
+                    self.y_slot_yaw_pulse_until = 0.0
+                    self.y_slot_yaw_settle_until = now + yaw_settle_sec
+                    self.publish_status(
+                        "running", "y_slot_yaw_direction_change_settle",
+                        border_angle_deg=round(border_angle_deg, 2),
+                        settle_sec=yaw_settle_sec,
+                    )
+                    return
+                self.publish_drive(0.0, 0.0, yaw_pulse_speed)
+                return
+            if yaw_pulse_speed != 0.0:
+                self.stop_drive()
+                self.y_slot_yaw_pulse_speed = 0.0
+                self.y_slot_yaw_pulse_until = 0.0
+                self.y_slot_yaw_settle_until = now + yaw_settle_sec
+                self.publish_status(
+                    "running", "y_slot_yaw_pulse_settle",
+                    border_angle_deg=round(border_angle_deg, 2),
+                    settle_sec=yaw_settle_sec,
+                )
+                return
+            if now < yaw_settle_until:
+                self.stop_drive()
+                return
+            if observation_at == self.y_slot_last_yaw_tape_at:
+                self.stop_drive()
+                return
+            yaw_pulse_sec = self.number(
+                "y_slot_border_rotation_pulse_sec", 0.05, 0.03, 0.30
+            )
+            self.y_slot_last_yaw_tape_at = observation_at
+            self.y_slot_yaw_pulse_speed = desired_yaw
+            self.y_slot_yaw_pulse_until = now + yaw_pulse_sec
+            self.publish_drive(0.0, 0.0, desired_yaw)
+            self.publish_status(
+                "running", "y_slot_border_leveling_pulse",
+                border_angle_deg=round(border_angle_deg, 2),
+                border_error_deg=round(border_error, 2),
+                angular_speed_rad_s=round(desired_yaw, 3),
+                pulse_sec=yaw_pulse_sec,
+                settle_sec=yaw_settle_sec,
+            )
+            return
+        if yaw_pulse_speed != 0.0:
+            self.stop_drive()
+            self.y_slot_yaw_pulse_speed = 0.0
+            self.y_slot_yaw_pulse_until = 0.0
+            self.y_slot_yaw_settle_until = now + yaw_settle_sec
+            return
+        if now < yaw_settle_until:
+            self.stop_drive()
+            return
+        target_ratio = self.number(
+            "y_slot_target_center_x_ratio", 0.50, 0.05, 0.95
+        )
+        tolerance = self.number(
+            "y_slot_center_tolerance_ratio", 0.0, 0.0, 0.25
+        )
+        error = center_x_ratio - target_ratio
+        error_px = error * image_width_px
+        target_x_px = target_ratio * image_width_px
+        centered = (
+            int(round(center_x_px)) == int(round(target_x_px))
+            if tolerance <= 0.0 else abs(error) <= tolerance
+        )
+        if centered:
+            self.stop_drive()
+            self.y_slot_lateral_pulse_speed = 0.0
+            self.y_slot_lateral_pulse_until = 0.0
+            minimum_start_y = self.number(
+                "y_slot_insertion_start_min_center_y_ratio",
+                0.9101, 0.0, 1.0,
+            )
+            if center_y_ratio < minimum_start_y:
+                self.y_slot_center_confirmation_count = 0
+                self.y_slot_last_counted_tape_at = None
+                self.y_slot_centered_since = None
+                approach_speed = self.number(
+                    "y_slot_approach_speed_m_s", 0.10, 0.10, 0.30
+                )
+                self.publish_drive(approach_speed, 0.0, 0.0)
+                self.publish_status(
+                    "running", "y_slot_approaching_insertion_start_distance",
+                    center_x_px=round(center_x_px, 1),
+                    center_y_px=round(
+                        center_y_ratio * float(tape.get("image_height_px", 480)),
+                        1,
+                    ),
+                    center_y_ratio=round(center_y_ratio, 4),
+                    required_min_center_y_ratio=minimum_start_y,
+                    forward_speed_m_s=approach_speed,
+                )
+                return
+            if self.y_slot_centered_since is None:
+                self.y_slot_centered_since = now
+            observation_at = getattr(self, "latest_tape_guidance_at", 0.0)
+            if observation_at != self.y_slot_last_counted_tape_at:
+                self.y_slot_last_counted_tape_at = observation_at
+                self.y_slot_center_confirmation_count += 1
+            required = int(self.number(
+                "y_slot_center_confirmation_frames", 5, 1, 20
+            ))
+            settle_sec = self.number(
+                "y_slot_center_settle_sec", 0.50, 0.10, 3.0
+            )
+            stable_sec = now - self.y_slot_centered_since
+            if (
+                self.y_slot_center_confirmation_count < required
+                or stable_sec < settle_sec
+            ):
+                self.publish_status(
+                    "running", "y_slot_center_confirming",
+                    center_x_px=round(center_x_px, 1),
+                    center_error_px=round(error_px, 1),
+                    border_angle_deg=round(border_angle_deg, 2),
+                    confirmed_frames=self.y_slot_center_confirmation_count,
+                    required_frames=required,
+                    stable_sec=round(stable_sec, 2),
+                    required_stable_sec=settle_sec,
+                )
+                return
+            if self.odom_position is None or self.odom_yaw is None:
+                self.cancel("odom_missing_before_y_slot_insertion")
+                return
+            self.stop_drive(10)
+            self.y_slot_insert_start_position = self.odom_position
+            self.y_slot_insert_start_yaw = self.odom_yaw
+            self.y_slot_insert_started_at = now
+            self.fork_command_due_at = None
+            self.state = "y_slot_inserting"
+            self.publish_status(
+                "running", "y_slot_centered_inserting",
+                center_x_px=round(center_x_px, 1),
+                center_error_px=round(error_px, 1),
+                insertion_distance_cm=(
+                    self.y_slot_requested_insertion_distance_cm
+                    if self.y_slot_requested_insertion_distance_cm is not None
+                    else self.number(
+                        "y_slot_insertion_distance_cm", 15.0, 1.0, 100.0
+                    )
+                ),
+            )
+            return
+        self.y_slot_center_confirmation_count = 0
+        self.y_slot_last_counted_tape_at = None
+        self.y_slot_centered_since = None
+        minimum_speed = self.number(
+            "y_slot_min_lateral_speed_m_s", 0.10, 0.10, 0.30
+        )
+        maximum_speed = max(minimum_speed, self.number(
+            "y_slot_max_lateral_speed_m_s", 0.12, 0.10, 0.30
+        ))
+        gain = self.number("y_slot_center_gain", 0.40, 0.05, 2.0)
+        speed = clamp(abs(error) * gain, minimum_speed, maximum_speed)
+        lateral = math.copysign(speed, -error)
+        pulse_speed = getattr(self, "y_slot_lateral_pulse_speed", 0.0)
+        pulse_until = getattr(self, "y_slot_lateral_pulse_until", 0.0)
+        settle_until = getattr(self, "y_slot_lateral_settle_until", 0.0)
+        settle_sec = self.number(
+            "y_slot_lateral_pulse_settle_sec", 0.30, 0.10, 2.0
+        )
+        if pulse_speed != 0.0 and now < pulse_until:
+            if math.copysign(1.0, pulse_speed) != math.copysign(1.0, lateral):
+                self.stop_drive()
+                self.y_slot_lateral_pulse_speed = 0.0
+                self.y_slot_lateral_pulse_until = 0.0
+                self.y_slot_lateral_settle_until = now + settle_sec
+                self.publish_status(
+                    "running", "y_slot_lateral_direction_change_settle",
+                    settle_sec=settle_sec,
+                )
+                return
+            self.publish_drive(0.0, pulse_speed, 0.0)
+            return
+        if pulse_speed != 0.0:
+            self.stop_drive()
+            self.y_slot_lateral_pulse_speed = 0.0
+            self.y_slot_lateral_pulse_until = 0.0
+            self.y_slot_lateral_settle_until = now + settle_sec
+            self.publish_status(
+                "running", "y_slot_lateral_pulse_settle",
+                settle_sec=settle_sec,
+            )
+            return
+        if now < settle_until:
+            self.stop_drive()
+            return
+        if observation_at == self.y_slot_last_motion_tape_at:
+            self.stop_drive()
+            return
+        pulse_sec = self.number(
+            "y_slot_lateral_pulse_sec", 0.08, 0.05, 0.30
+        )
+        self.y_slot_last_motion_tape_at = observation_at
+        self.y_slot_lateral_pulse_speed = lateral
+        self.y_slot_lateral_pulse_until = now + pulse_sec
+        self.publish_drive(0.0, lateral, 0.0)
+        self.publish_status(
+            "running", "y_slot_centering_pulse",
+            center_x_px=round(center_x_px, 1),
+            center_error_px=round(error_px, 1),
+            border_angle_deg=round(border_angle_deg, 2),
+            lateral_speed_m_s=round(lateral, 3),
+            pulse_sec=pulse_sec,
+            settle_sec=settle_sec,
+        )
+
+    def tick_y_slot_inserting(self):
+        now = time.monotonic()
+        fork_command_due_at = getattr(self, "fork_command_due_at", None)
+        if fork_command_due_at is not None:
+            self.stop_drive()
+            if now < fork_command_due_at:
+                return
+            self.fork_command_due_at = None
+            self.state = "waiting_fork"
+            self.fork_pub.publish(String(data="DOWN"))
+            self.publish_status(
+                "waiting", "fork_command_sent", fork_command="DOWN"
+            )
+            return
+        if (
+            self.y_slot_insert_start_position is None
+            or self.y_slot_insert_start_yaw is None
+            or self.odom_position is None
+        ):
+            self.cancel("odom_missing_during_y_slot_insertion")
+            return
+        started_at = getattr(self, "y_slot_insert_started_at", None)
+        if started_at is None:
+            started_at = now
+            self.y_slot_insert_started_at = now
+        timeout = self.number(
+            "y_slot_insertion_timeout_sec", 4.0, 1.0, 30.0
+        )
+        if now - started_at >= timeout:
+            self.cancel("y_slot_insertion_timeout")
+            return
+        dx = self.odom_position[0] - self.y_slot_insert_start_position[0]
+        dy = self.odom_position[1] - self.y_slot_insert_start_position[1]
+        raw_forward = (
+            math.cos(self.y_slot_insert_start_yaw) * dx
+            + math.sin(self.y_slot_insert_start_yaw) * dy
+        )
+        travelled = max(0.0, raw_forward) * self.number(
+            "distance_coefficient", 1.0, 0.10, 2.0
+        )
+        target_cm = self.y_slot_requested_insertion_distance_cm
+        if target_cm is None:
+            target_cm = self.number(
+                "y_slot_insertion_distance_cm", 15.0, 1.0, 100.0
+            )
+        target = clamp(float(target_cm), 1.0, 100.0) / 100.0
+        if travelled >= target:
+            self.stop_drive(10)
+            self.completed_insertion_distance_m = travelled
+            pause = self.number(
+                "motion_transition_pause_sec", 0.10, 0.10, 2.0
+            )
+            self.fork_command_due_at = now + pause
+            self.publish_status(
+                "running", "y_slot_insertion_complete_pause_before_fork",
+                travelled_cm=round(travelled * 100.0, 1),
+                insertion_distance_cm=round(target * 100.0, 1),
+                pause_sec=pause,
+            )
+            return
+        speed = self.number(
+            "y_slot_insertion_speed_m_s", 0.10, 0.10, 0.20
+        )
+        self.publish_drive(speed, 0.0, 0.0)
+        self.publish_status(
+            "running", "y_slot_inserting",
+            travelled_cm=round(travelled * 100.0, 1),
+            remaining_cm=round((target - travelled) * 100.0, 1),
+            insertion_speed_m_s=round(speed, 3),
         )
 
     def tick_inserting(self):
@@ -4405,9 +5653,14 @@ class AutoDockNode(Node):
             "distance_coefficient", 1.0, 0.10, 2.0
         )
         if travelled_actual < reverse_m:
-            speed = self.number(
-                "post_lift_reverse_speed_m_s", 0.05, 0.01, 0.20
-            )
+            if self.location in {"Y1", "Y2", "Y3", "Y4"}:
+                speed = self.number(
+                    "y_slot_insertion_speed_m_s", 0.10, 0.10, 0.20
+                )
+            else:
+                speed = self.number(
+                    "post_lift_reverse_speed_m_s", 0.05, 0.01, 0.20
+                )
             self.publish_drive(-speed, 0.0, 0.0)
             return
         self.stop_drive(10)
@@ -4416,19 +5669,35 @@ class AutoDockNode(Node):
                 self, "post_lift_rear_opening_test_enabled", False
             )
             if hasattr(self, "config") else False
-        )
+        ) and self.location.split("_", 1)[0] == "DOCK"
         if opening_test_enabled:
             self.post_lift_reverse_target_m = None
             self.right_turn_clearance_wait_started_at = None
             self.post_lift_opening_started_at = time.monotonic()
             self.post_lift_opening_confirmation_count = 0
+            self.post_lift_opening_heading_yaw = self.odom_yaw
             self.post_lift_right_end_marker = None
             self.post_lift_right_end_seen_at = 0.0
             self.tape_reference = None
+            clear, blocking, turn_front_extent = self.right_turn_clearance_available()
+            if clear and self.odom_yaw is not None:
+                self.right_turn_target_yaw = normalize_angle(
+                    self.odom_yaw - math.radians(90.0)
+                )
+                self.state = "turning_right_for_ready"
+                self.publish_status(
+                    "running", "right_turn_90_started",
+                    turn_front_extent_cm=round(turn_front_extent * 100.0, 1),
+                )
+                return
             self.state = "post_lift_opening_search"
             self.publish_status(
-                "running", "post_lift_right_end_search_started",
-                direction="right",
+                "running", "post_lift_left_clearance_search_started",
+                direction="left",
+                blocking_range_cm=(
+                    None if blocking is None or not math.isfinite(blocking)
+                    else round(blocking * 100.0, 1)
+                ),
             )
             return
         clear, blocking, turn_front_extent = self.right_turn_clearance_available()
@@ -4489,40 +5758,99 @@ class AutoDockNode(Node):
         if now - started_at >= timeout:
             self.cancel("post_lift_right_end_search_timeout")
             return
+        clear, blocking, turn_front_extent = self.right_turn_clearance_available()
+        if turn_front_extent is None:
+            self.stop_drive()
+            self.post_lift_opening_confirmation_count = 0
+            self.publish_status("waiting", "post_lift_opening_scan_stale")
+            return
         required = int(self.number(
-            "post_lift_right_end_confirmation_frames", 3, 1, 10
+            "post_lift_turn_clear_confirmation_frames", 3, 1, 10
         ))
-        marker = getattr(self, "post_lift_right_end_marker", None)
-        marker_age = now - getattr(self, "post_lift_right_end_seen_at", 0.0)
+        if clear:
+            self.post_lift_opening_confirmation_count += 1
+        else:
+            self.post_lift_opening_confirmation_count = 0
         if (
             self.post_lift_opening_confirmation_count >= required
-            and isinstance(marker, dict)
-            and marker_age <= self.number(
-                "post_lift_right_end_max_age_sec", 0.50, 0.10, 2.0
-            )
+            and self.odom_yaw is not None
         ):
             self.stop_drive(10)
-            self.state = "ready"
-            self.drive_ready_pub.publish(Empty())
+            self.right_turn_target_yaw = normalize_angle(
+                self.odom_yaw - math.radians(90.0)
+            )
+            self.state = "turning_right_for_ready"
             self.publish_status(
-                "completed", "post_lift_right_end_confirmed_ready",
-                right_end_x_px=marker.get("x_px"),
-                right_end_confidence=marker.get("confidence"),
+                "running", "post_lift_turn_clear_right_turn_started",
                 confirmation_frames=self.post_lift_opening_confirmation_count,
+                turn_front_extent_cm=round(turn_front_extent * 100.0, 1),
             )
             return
-        lateral_speed = self.number(
-            "post_lift_opening_lateral_speed_m_s", 0.12, 0.05, 0.20
-        )
-        if AutoDockNode.command_warning_tape_search(
-            self, now, lateral_speed, -1.0, force_enabled=True
-        ):
+        if clear:
+            self.stop_drive()
+            self.publish_status(
+                "running", "post_lift_turn_clear_confirming",
+                confirmation_frames=self.post_lift_opening_confirmation_count,
+                required_frames=required,
+            )
             return
-        self.stop_drive()
+        left_distance, _left_angle, left_threshold = getattr(
+            self, "nearest_by_direction", {}
+        ).get("left", (math.inf, None, math.inf))
+        lateral_margin = self.number(
+            "post_lift_opening_left_margin_m", 0.03, 0.0, 0.30
+        )
+        if (
+            not math.isfinite(left_distance)
+            or not math.isfinite(left_threshold)
+            or left_distance <= left_threshold + lateral_margin
+        ):
+            self.stop_drive()
+            self.publish_status(
+                "waiting", "post_lift_left_clearance_blocked",
+                left_distance_cm=(
+                    None if not math.isfinite(left_distance)
+                    else round(left_distance * 100.0, 1)
+                ),
+                required_cm=(
+                    None if not math.isfinite(left_threshold)
+                    else round((left_threshold + lateral_margin) * 100.0, 1)
+                ),
+                right_turn_blocking_range_cm=(
+                    None if blocking is None or not math.isfinite(blocking)
+                    else round(blocking * 100.0, 1)
+                ),
+            )
+            return
+        heading = getattr(self, "post_lift_opening_heading_yaw", None)
+        if heading is None:
+            heading = self.odom_yaw
+            self.post_lift_opening_heading_yaw = heading
+        if heading is not None and self.odom_yaw is not None:
+            yaw_error = normalize_angle(heading - self.odom_yaw)
+            yaw_tolerance = math.radians(self.number(
+                "post_lift_opening_yaw_tolerance_deg", 3.0, 0.5, 15.0
+            ))
+            if abs(yaw_error) > yaw_tolerance:
+                angular = AutoDockNode.search_angular_command(self, yaw_error)
+                self.publish_drive(0.0, 0.0, angular)
+                self.publish_status(
+                    "running", "post_lift_left_search_yaw_correction",
+                    yaw_error_deg=round(math.degrees(yaw_error), 1),
+                )
+                return
+        lateral_speed = self.number(
+            "post_lift_opening_lateral_speed_m_s", 0.12, 0.10, 0.20
+        )
+        self.publish_drive(0.0, lateral_speed, 0.0)
         self.publish_status(
-            "waiting", "post_lift_warning_tape_not_detected",
-            right_end_confirmed_frames=self.post_lift_opening_confirmation_count,
-            required_frames=required,
+            "running", "post_lift_left_search_for_turn_clearance",
+            lateral_speed_m_s=round(lateral_speed, 3),
+            left_distance_cm=round(left_distance * 100.0, 1),
+            right_turn_blocking_range_cm=(
+                None if blocking is None or not math.isfinite(blocking)
+                else round(blocking * 100.0, 1)
+            ),
         )
 
     def tick_turning_right_for_ready(self):

@@ -131,6 +131,7 @@ def test_warning_tape_rejects_repeating_yellow_without_adjacent_black():
 
 def test_warning_tape_pose_jump_is_rejected_while_track_is_fresh():
     fake = type("FakeDock", (), {})()
+    fake.state = "search"
     fake.config = {}
     fake.number = lambda key, default, *_args: fake.config.get(key, default)
     fake.latest_tape_guidance = {"angle_deg": 0.0, "center_y_ratio": 0.99}
@@ -906,7 +907,23 @@ def test_structured_dock_pick_accepts_nearest_product_target():
         "target": {"type": "NEAREST"},
     }))
 
-    assert arrival["target"] == {"type": "NEAREST"}
+    assert arrival["target"] == {
+        "type": "NEAREST", "recognition_mode": "CURRENT"
+    }
+
+
+def test_structured_dock_pick_accepts_legacy_nearest_recognition():
+    arrival = parse_arrival(json.dumps({
+        "status": "SUCCEEDED",
+        "location": "DOCK_1",
+        "operation": "PICK",
+        "product_type": "NORMAL",
+        "target": {"type": "NEAREST", "recognition_mode": "LEGACY"},
+    }))
+
+    assert arrival["target"] == {
+        "type": "NEAREST", "recognition_mode": "LEGACY"
+    }
 
 
 def test_nearest_product_candidate_filters_product_and_uses_depth_distance():
@@ -940,10 +957,61 @@ def test_nearest_product_candidate_filters_product_and_uses_depth_distance():
         },
     ]}
 
-    candidate, _pnp = AutoDockNode.nearest_product_candidate(fake, detection)
+    candidate, pnp = AutoDockNode.nearest_product_candidate(fake, detection)
 
     assert candidate["entity_id"] == 10
     assert candidate["streak"] == 3
+    assert pnp["lateral_source"] == "pallet_box"
+    assert pnp["tag_lateral_ratio"] is None
+    assert pnp["lateral_ratio"] == pytest.approx(
+        math.tan(math.radians((350.0 - 320.0) / 320.0 * 30.0))
+    )
+
+
+def test_nearest_locked_candidate_uses_continuous_tracking_streak():
+    fake = type("FakeDock", (), {})()
+    fake.product_type = "NORMAL"
+    fake.target_entity_id = 10
+    fake.number = lambda _key, default, _minimum, _maximum: default
+    detection = {
+        "candidate": {"entity_id": 10, "streak": 8},
+        "entities": [{
+            "entity_id": 10,
+            "seen_count": 1,
+            "matrix": ["heart", "spade", "diamond", "clover"],
+            "image_pallet_box": [300, 200, 400, 260],
+            "pnp": {"forward_distance_cm": 24.0},
+            "depth_yaw": {"forward_distance_cm": 18.0, "yaw_deg": 1.0},
+        }],
+    }
+
+    candidate, _pnp = AutoDockNode.nearest_product_candidate(fake, detection)
+
+    assert candidate["entity_id"] == 10
+    assert candidate["streak"] == 8
+
+
+def test_legacy_nearest_uses_original_entity_seen_count():
+    fake = type("FakeDock", (), {})()
+    fake.product_type = "NORMAL"
+    fake.target_entity_id = 10
+    fake.nearest_recognition_mode = "LEGACY"
+    fake.number = lambda _key, default, _minimum, _maximum: default
+    detection = {
+        "candidate": {"entity_id": 10, "streak": 8},
+        "entities": [{
+            "entity_id": 10,
+            "seen_count": 1,
+            "matrix": ["heart", "spade", "diamond", "clover"],
+            "image_pallet_box": [300, 200, 400, 260],
+            "pnp": {"forward_distance_cm": 24.0},
+            "depth_yaw": {"forward_distance_cm": 18.0, "yaw_deg": 1.0},
+        }],
+    }
+
+    candidate, _pnp = AutoDockNode.nearest_product_candidate(fake, detection)
+
+    assert candidate["streak"] == 1
 
 
 def test_nearest_product_candidate_skips_inventory_blocked_entity():
@@ -1008,12 +1076,77 @@ def test_nearest_fresh_accepts_one_star_attached_to_a_pallet_face():
 
     candidate, pnp = AutoDockNode.nearest_product_candidate(fake, detection)
 
-    assert candidate["fresh_single_star"] is True
+    assert candidate["pallet_tag_candidate"] is True
     assert candidate["matrix"] == ["star"]
     assert candidate["pallet_box"] == [101, 381, 329, 406]
     assert candidate["depth_yaw"]["forward_distance_cm"] == pytest.approx(17.6)
     assert pnp["depth_fallback"] is True
     assert AutoDockNode.candidate_matches_best_entity(fake, candidate) == (True, None)
+
+
+@pytest.mark.parametrize(
+    ("product_type", "classes"),
+    [
+        ("NORMAL", ["heart"]),
+        ("FRESH", ["star"]),
+        ("FRESH", ["heart", "star"]),
+        ("FRESH", ["heart", "clover", "star"]),
+        ("FRESH", ["heart", "clover", "diamond", "star"]),
+    ],
+)
+def test_nearest_uses_one_to_four_tags_attached_to_pallet(product_type, classes):
+    fake = type("FakeDock", (), {})()
+    fake.product_type = product_type
+    fake.nearest_recognition_mode = "LEGACY"
+    fake.number = lambda _key, default, _minimum, _maximum: default
+    detections = [{
+        "class": name,
+        "confidence": 0.9,
+        "box": [150 + index * 50, 220, 190 + index * 50, 300],
+        "depth": {"forward_distance_cm": 25.0 + index},
+    } for index, name in enumerate(classes)]
+    detections.append({
+        "class": "pallet", "confidence": 0.8,
+        "box": [120, 310, 360, 370],
+    })
+
+    candidate, pnp = AutoDockNode.nearest_product_candidate(
+        fake, {"entities": [], "detections": detections}
+    )
+
+    assert candidate["pallet_tag_candidate"] is True
+    assert candidate["pallet_tag_count"] == len(classes)
+    assert candidate["matrix"] == classes
+    assert pnp["lateral_source"] == "pallet_box"
+    assert AutoDockNode.candidate_matches_best_entity(fake, candidate) == (True, None)
+
+
+def test_nearest_does_not_lock_partial_tag_pallet_cropped_at_image_edge():
+    fake = type("FakeDock", (), {})()
+    fake.product_type = "NORMAL"
+    fake.nearest_recognition_mode = "LEGACY"
+    fake.number = lambda _key, default, _minimum, _maximum: default
+    detection = {
+        "entities": [],
+        "detections": [
+            {
+                "class": "clover",
+                "confidence": 0.9,
+                "box": [560, 300, 610, 370],
+                "depth": {"forward_distance_cm": 20.0},
+            },
+            {
+                "class": "pallet",
+                "confidence": 0.8,
+                "box": [548, 390, 639, 440],
+            },
+        ],
+    }
+
+    candidate, pnp = AutoDockNode.nearest_product_candidate(fake, detection)
+
+    assert candidate is None
+    assert pnp is None
 
 
 def test_nearest_fresh_keeps_visual_candidate_while_star_depth_is_missing():
@@ -1073,7 +1206,7 @@ def test_nearest_fresh_accepts_one_star_in_any_face_quadrant(star_box):
 
     candidate, _pnp = AutoDockNode.nearest_product_candidate(fake, detection)
 
-    assert candidate["fresh_single_star"] is True
+    assert candidate["pallet_tag_candidate"] is True
     assert candidate["depth_yaw"]["forward_distance_cm"] == pytest.approx(180.0)
 
 
@@ -1238,6 +1371,8 @@ def test_insertion_completion_sends_operation_command(monkeypatch, operation, ex
 )
 def test_fork_completion_starts_reverse(fork_state, expected_load):
     fake = type("FakeDock", (), {})()
+    fake.operation = "PICK" if fork_state == "UP_COMPLETE" else "PLACE"
+    fake.location = "DOCK_1"
     fake.odom_yaw = 0.0
     fake.odom_position = (1.0, 2.0)
     fake.completed_insertion_distance_m = 0.27
@@ -1295,10 +1430,13 @@ def test_reverse_starts_right_turn_when_swept_circle_is_clear():
 def test_reverse_enters_enabled_right_dock_end_search(monkeypatch):
     fake = type("FakeDock", (), {})()
     fake.config = {"post_lift_rear_opening_test_enabled": True}
+    fake.location = "DOCK_1"
     fake.post_lift_reverse_start = (0.0, 0.0)
     fake.post_lift_reverse_start_yaw = 0.0
     fake.post_lift_reverse_target_m = 0.27
     fake.odom_position = (-0.28, 0.0)
+    fake.odom_yaw = 0.0
+    fake.right_turn_clearance_available = lambda: (False, 0.25, 0.50)
     fake.number = lambda key, default, *_args: default
     fake.stop_drive = lambda *_args: None
     statuses = []
@@ -1311,15 +1449,19 @@ def test_reverse_enters_enabled_right_dock_end_search(monkeypatch):
 
     assert fake.state == "post_lift_opening_search"
     assert fake.post_lift_reverse_target_m is None
-    assert statuses[-1][1] == "post_lift_right_end_search_started"
+    assert statuses[-1][1] == "post_lift_left_clearance_search_started"
 
 
-def test_post_lift_right_search_strafes_with_warning_tape_until_confirmed(monkeypatch):
+def test_post_lift_opening_search_strafes_left_until_turn_is_clear(monkeypatch):
     fake = type("FakeDock", (), {})()
     fake.post_lift_opening_started_at = 10.0
     fake.post_lift_opening_confirmation_count = 0
     fake.post_lift_right_end_marker = None
     fake.post_lift_right_end_seen_at = 0.0
+    fake.post_lift_opening_heading_yaw = 0.0
+    fake.odom_yaw = 0.0
+    fake.nearest_by_direction = {"left": (0.80, None, 0.20)}
+    fake.right_turn_clearance_available = lambda: (False, 0.25, 0.50)
     fake.number = lambda key, default, *_args: default
     fake.stop_drive = lambda *_args: None
     statuses = []
@@ -1327,27 +1469,24 @@ def test_post_lift_right_search_strafes_with_warning_tape_until_confirmed(monkey
         (state, reason, extra)
     )
     fake.cancel = lambda reason: pytest.fail(reason)
-    guidance_calls = []
-    monkeypatch.setattr(
-        AutoDockNode, "command_warning_tape_search",
-        lambda self, now, speed, direction, force_enabled=False: (
-            guidance_calls.append((speed, direction, force_enabled)) or True
-        ),
-    )
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
     monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
 
     AutoDockNode.tick_post_lift_opening_search(fake)
 
-    assert guidance_calls == [(0.12, -1.0, True)]
-    assert statuses == []
+    assert commands == [(0.0, 0.12, 0.0)]
+    assert statuses[-1][1] == "post_lift_left_search_for_turn_clearance"
 
 
-def test_post_lift_right_search_stops_without_extra_reverse(monkeypatch):
+def test_post_lift_opening_search_starts_right_turn_after_clear_confirmation(monkeypatch):
     fake = type("FakeDock", (), {})()
     fake.post_lift_opening_started_at = 10.0
-    fake.post_lift_opening_confirmation_count = 3
+    fake.post_lift_opening_confirmation_count = 2
     fake.post_lift_right_end_marker = {"x_px": 590.0, "confidence": 0.9}
     fake.post_lift_right_end_seen_at = 10.0
+    fake.odom_yaw = 0.5
+    fake.right_turn_clearance_available = lambda: (True, math.inf, 0.50)
     fake.number = lambda key, default, *_args: default
     commands = []
     fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
@@ -1363,9 +1502,10 @@ def test_post_lift_right_search_stops_without_extra_reverse(monkeypatch):
     AutoDockNode.tick_post_lift_opening_search(fake)
 
     assert commands == [(0.0, 0.0, 0.0)]
-    assert fake.state == "ready"
-    assert len(fake.drive_ready_pub.messages) == 1
-    assert statuses[-1][1] == "post_lift_right_end_confirmed_ready"
+    assert fake.state == "turning_right_for_ready"
+    assert fake.right_turn_target_yaw == pytest.approx(0.5 - math.pi / 2.0)
+    assert len(fake.drive_ready_pub.messages) == 0
+    assert statuses[-1][1] == "post_lift_turn_clear_right_turn_started"
 
 
 def test_reverse_waits_for_fresh_scan_before_skipping_turn(monkeypatch):
@@ -1477,6 +1617,59 @@ def test_first_matching_frame_schedules_stop_after_point_two_seconds(monkeypatch
     assert fake.candidate_stop_due_at == pytest.approx(10.2)
     assert stops == [True]
     assert commands == []
+
+
+def test_first_stable_nearest_candidate_stops_before_alignment(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    candidate = {"entity_id": 22, "streak": 6}
+    pnp = {"distance_source": "depth"}
+    fake.target_type = "NEAREST"
+    fake.candidate_stop_due_at = None
+    fake.candidate_retry_not_before = 0.0
+    fake.selected_candidate = lambda: (candidate, pnp)
+    fake.valid_measurement = lambda: (candidate, pnp, None)
+    stops = []
+    fake.stop_drive = lambda *_args: stops.append(True)
+    fake.number = lambda key, default, *_args: {
+        "candidate_stop_delay_sec": 0.2,
+    }.get(key, default)
+    fake.publish_status = lambda *_args, **_kwargs: None
+    fake.cancel = lambda reason: pytest.fail(reason)
+    fake.enter_alignment = lambda got_candidate, got_pnp: (
+        got_candidate == candidate and got_pnp == pnp
+    )
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
+
+    AutoDockNode.tick_search(fake)
+
+    assert fake.candidate_stop_due_at == pytest.approx(10.2)
+    assert stops == [True]
+
+
+def test_nearest_complete_entity_requires_three_stable_frames():
+    fake = type("FakeDock", (), {})()
+    candidate = {
+        "entity_id": 22,
+        "matrix": ["spade", "spade", "spade", "spade"],
+        "streak": 1,
+        "pallet_box": [100, 100, 300, 300],
+    }
+    fake.target_type = "NEAREST"
+    fake.target_entity_id = None
+    fake.selected_candidate = lambda: (candidate, {})
+    fake.boolean = lambda _key, default: False
+    fake.number = lambda _key, default, *_args: default
+
+    got_candidate, _pnp, reason = AutoDockNode.identity_measurement(fake)
+
+    assert got_candidate is None
+    assert reason == "unstable_detection"
+
+    candidate["streak"] = 3
+    got_candidate, _pnp, reason = AutoDockNode.identity_measurement(fake)
+
+    assert got_candidate == candidate
+    assert reason is None
 
 
 def test_experimental_scan_locks_valid_target_before_approach(monkeypatch):
@@ -1745,6 +1938,176 @@ def rear_lidar_search_fake(rear_distance_m):
         (state, reason, extra)
     )
     return fake
+
+
+def dock_reverse_search_fake(rear_distance_m, travelled_m=0.0):
+    fake = type("FakeDock", (), {})()
+    fake.config = {"dock_reverse_target_search_enabled": True}
+    fake.scan_updated_at = 10.0
+    fake.nearest_by_direction = {
+        "rear": (rear_distance_m, math.pi, 0.20),
+    }
+    fake.odom_position = (travelled_m, 0.0)
+    fake.dock_reverse_search_start_position = (0.0, 0.0)
+    fake.dock_reverse_search_clearance_recovery_active = False
+    fake.number = lambda key, default, *_args: {
+        "dock_reverse_target_search_min_rear_distance_cm": 25.0,
+        "dock_reverse_target_search_max_distance_cm": 15.0,
+        "dock_reverse_target_search_speed_m_s": 0.10,
+    }.get(key, default)
+    fake.commands = []
+    fake.statuses = []
+    fake.publish_drive = lambda x, y, yaw: fake.commands.append((x, y, yaw))
+    fake.stop_drive = lambda: fake.commands.append((0.0, 0.0, 0.0))
+    fake.publish_status = lambda state, reason, **extra: fake.statuses.append(
+        (state, reason, extra)
+    )
+    return fake
+
+
+def test_dock_missing_target_reverses_at_dead_zone_speed_with_clear_rear():
+    fake = dock_reverse_search_fake(0.45)
+
+    AutoDockNode.command_dock_reverse_target_search(fake, 10.1)
+
+    assert fake.commands == [(-0.10, 0.0, 0.0)]
+    assert fake.statuses[-1][1] == "dock_reverse_target_search"
+
+
+def test_dock_nearest_search_uses_reverse_instead_of_warning_tape(monkeypatch):
+    fake = dock_reverse_search_fake(0.45)
+    fake.location = "DOCK_1"
+    fake.candidate_stop_due_at = None
+    fake.candidate_retry_not_before = 0.0
+    fake.selected_candidate = lambda: (None, None)
+    fake.config.update({
+        "dock_warning_tape_search_enabled": False,
+        "search_lateral_direction": "left",
+    })
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.tick_search(fake)
+
+    assert fake.commands == [(-0.10, 0.0, 0.0)]
+    assert fake.statuses[-1][1] == "dock_reverse_target_search"
+
+
+def test_dock_missing_target_restores_twenty_five_centimetre_rear_clearance():
+    fake = dock_reverse_search_fake(0.24)
+
+    AutoDockNode.command_dock_reverse_target_search(fake, 10.1)
+
+    assert fake.commands == [(0.10, 0.0, 0.0)]
+    assert fake.statuses[-1][1] == "dock_reverse_search_restoring_clearance"
+
+
+def test_dock_clearance_recovery_resumes_lateral_without_reversing():
+    fake = dock_reverse_search_fake(0.27)
+    fake.dock_reverse_search_clearance_recovery_active = True
+    fake.dock_lateral_search_standoff_reached = True
+    fake.odom_position = (0.08, 0.0)
+
+    AutoDockNode.command_dock_reverse_target_search(fake, 10.1)
+
+    assert fake.commands == [(0.0, 0.12, 0.0)]
+    assert fake.statuses[-1][1] == "dock_rear_clearance_held_lateral_search"
+    assert fake.dock_reverse_search_clearance_recovery_active is False
+
+    AutoDockNode.command_dock_reverse_target_search(fake, 10.2)
+
+    assert fake.commands[-1] == (0.0, 0.12, 0.0)
+    assert fake.statuses[-1][1] == "dock_rear_clearance_held_lateral_search"
+
+
+def test_dock_missing_target_reverses_until_rear_standoff_not_odom_limit():
+    fake = dock_reverse_search_fake(0.49, travelled_m=0.15)
+
+    AutoDockNode.command_dock_reverse_target_search(fake, 10.1)
+
+    assert fake.commands == [(-0.10, 0.0, 0.0)]
+    assert fake.statuses[-1][1] == "dock_reverse_target_search"
+
+
+def test_dock_missing_target_skips_reverse_with_fifty_cm_rear_space():
+    fake = dock_reverse_search_fake(0.50)
+
+    AutoDockNode.command_dock_reverse_target_search(fake, 10.1)
+
+    assert fake.dock_lateral_search_standoff_reached is True
+    assert fake.commands == [(0.0, 0.12, 0.0)]
+    assert fake.statuses[-1][1] == "dock_rear_clearance_held_lateral_search"
+
+
+def test_dock_standoff_transitions_to_left_lateral_search():
+    fake = dock_reverse_search_fake(0.26)
+
+    AutoDockNode.command_dock_reverse_target_search(fake, 10.1)
+
+    assert fake.dock_lateral_search_standoff_reached is True
+    assert fake.commands == [(0.0, 0.12, 0.0)]
+    assert fake.statuses[-1][1] == "dock_rear_clearance_held_lateral_search"
+
+
+def test_dock_lateral_search_zeros_yaw_from_any_visible_entity(monkeypatch):
+    fake = dock_reverse_search_fake(0.26)
+    fake.dock_lateral_search_standoff_reached = True
+    fake.latest_detection_at = 10.0
+    fake.latest_detection = {"entities": [{
+        "visibility_score": 5000.0,
+        "depth_yaw": {"yaw_deg": 8.0},
+    }]}
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    AutoDockNode.command_dock_reverse_target_search(fake, 10.1)
+
+    assert fake.commands == [(0.0, 0.0, pytest.approx(0.35))]
+    assert fake.statuses[-1][1] == "dock_lateral_search_yaw_correction"
+    assert fake.statuses[-1][2]["yaw_source"] == "front_entity"
+
+
+def test_dock_lateral_yaw_reference_does_not_switch_entities(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.latest_detection_at = 10.0
+    fake.dock_lateral_yaw_entity_id = None
+    fake.latest_detection = {"entities": [
+        {
+            "entity_id": 10,
+            "visibility_score": 5000.0,
+            "depth_yaw": {"yaw_deg": 5.0},
+        },
+        {
+            "entity_id": 20,
+            "visibility_score": 4000.0,
+            "depth_yaw": {"yaw_deg": -3.0},
+        },
+    ]}
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    first = AutoDockNode.any_front_entity_yaw_error(fake)
+    assert math.degrees(first) == pytest.approx(5.0)
+    assert fake.dock_lateral_yaw_entity_id == 10
+
+    fake.latest_detection["entities"] = [
+        {
+            "entity_id": 10,
+            "visibility_score": 1000.0,
+            "depth_yaw": {"yaw_deg": 6.0},
+        },
+        {
+            "entity_id": 20,
+            "visibility_score": 9000.0,
+            "depth_yaw": {"yaw_deg": -20.0},
+        },
+    ]
+
+    second = AutoDockNode.any_front_entity_yaw_error(fake)
+    assert math.degrees(second) == pytest.approx(6.0)
+    assert fake.dock_lateral_yaw_entity_id == 10
+
+    fake.latest_detection["entities"] = [fake.latest_detection["entities"][1]]
+
+    assert AutoDockNode.any_front_entity_yaw_error(fake) is None
+    assert fake.dock_lateral_yaw_entity_id == 10
 
 
 def test_rear_lidar_search_corrects_forward_below_thirty_cm(monkeypatch):
@@ -2088,7 +2451,11 @@ def test_nearest_initial_entity_saves_pose_before_visual_tracking():
     fake.target_world = None
     fake.nearest_alignment_distance_cm = None
     fake.send_yolo_target = lambda: None
-    fake.enter_coarse_alignment = lambda reason: setattr(fake, "entered", reason)
+    fake.reset_coarse_alignment = lambda: None
+    statuses = []
+    fake.publish_status = lambda state, reason, **extra: statuses.append(
+        (state, reason, extra)
+    )
     fake.update_world_target = lambda *_args, **_kwargs: setattr(
         fake, "target_world", {"x": 1.0, "y": 2.0, "yaw": 0.0}
     ) or True
@@ -2105,7 +2472,8 @@ def test_nearest_initial_entity_saves_pose_before_visual_tracking():
     assert fake.target_entity_id == 155
     assert fake.target_world == {"x": 1.0, "y": 2.0, "yaw": 0.0}
     assert fake.target_last_center_error == pytest.approx(-0.4)
-    assert fake.entered == "nearest_candidate_centering"
+    assert fake.state == "docking"
+    assert statuses[-1][1] == "nearest_target_locked_odom_step"
 
 
 def test_visible_requested_top_pair_recovers_without_pallet_entity(monkeypatch):
@@ -2573,6 +2941,133 @@ def test_close_valid_target_pauses_before_insertion(monkeypatch):
     assert fake.insertion_entry_gap_m == pytest.approx(0.159)
 
 
+def test_nearest_reaches_odom_target_then_stops_for_fresh_frame(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.target_type = "NEAREST"
+    fake.target_entity_id = 40
+    fake.latest_detection = {"source_stamp_ns": 100}
+    fake.target_in_body = lambda: (0.20, 0.0, 0.0)
+    fake.number = lambda key, default, *_args: default
+    fake.insertion_start_due_at = None
+    fake.stop_drive = lambda *_args: None
+    fake.publish_status = lambda state, reason, **extra: setattr(
+        fake, "last_status", (state, reason, extra)
+    )
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
+
+    AutoDockNode.tick_docking(fake)
+
+    assert fake.nearest_step_settle_until == pytest.approx(10.5)
+    assert fake.nearest_step_source_stamp_ns == 100
+    assert fake.insertion_start_due_at is None
+    assert fake.last_status[1] == "nearest_odom_step_complete_settling"
+
+
+def test_nearest_recheck_requires_new_frame_before_relocking(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.target_type = "NEAREST"
+    fake.target_entity_id = 40
+    fake.latest_detection = {"source_stamp_ns": 100}
+    fake.nearest_step_settle_until = 10.0
+    fake.nearest_step_source_stamp_ns = 100
+    fake.nearest_step_wait_started_at = None
+    fake.nearest_step_count = 1
+    candidate = {"entity_id": 40}
+    pnp = {"depth_fallback": False}
+    fake.valid_measurement = lambda: (candidate, pnp, None)
+    fake.update_world_target = lambda *_args, **_kwargs: pytest.fail(
+        "stale frame must not relock the target"
+    )
+    fake.stop_drive = lambda *_args: None
+    fake.publish_status = lambda state, reason, **extra: setattr(
+        fake, "last_status", (state, reason, extra)
+    )
+    fake.insertion_start_due_at = None
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.5)
+
+    AutoDockNode.tick_docking(fake)
+
+    assert fake.last_status[1] == "nearest_waiting_fresh_recheck"
+    assert fake.nearest_step_settle_until == 10.0
+
+
+def test_nearest_recheck_accepts_locked_upper_pair_on_new_frame(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.target_type = "NEAREST"
+    fake.target_entity_id = 52
+    fake.latest_detection = {"source_stamp_ns": 101}
+    fake.nearest_step_settle_until = 10.0
+    fake.nearest_step_source_stamp_ns = 100
+    fake.nearest_step_wait_started_at = 9.0
+    fake.nearest_step_count = 1
+    fake.nearest_step_verified = False
+    partial = {"entity_id": 52, "depth_yaw": {"forward_distance_cm": 12.7}}
+    partial_pnp = {"depth_fallback": True, "lateral_ratio": -0.25}
+    fake.valid_measurement = lambda: (None, None, "no_selected_candidate")
+    fake.tracked_partial_measurement = lambda: (partial, partial_pnp, None)
+    updates = []
+    fake.update_world_target = lambda candidate, pnp, **kwargs: (
+        updates.append((candidate, pnp, kwargs)) or True
+    )
+    fake.target_in_body = lambda: (0.20, 0.0, 0.0)
+    fake.number = lambda key, default, *_args: default
+    fake.stop_drive = lambda *_args: None
+    fake.publish_status = lambda state, reason, **extra: setattr(
+        fake, "last_status", (state, reason, extra)
+    )
+    fake.insertion_start_due_at = None
+    fake.odom_position = (0.0, 0.0)
+    fake.odom_yaw = 0.0
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.5)
+
+    AutoDockNode.tick_docking(fake)
+
+    assert updates == [(partial, partial_pnp, {"blend_existing": False})]
+    assert fake.nearest_step_settle_until is None
+    assert fake.nearest_step_verified is True
+    assert fake.insertion_start_due_at == pytest.approx(10.6)
+
+
+def test_nearest_legacy_recheck_reselects_locked_or_pallet_candidate(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    fake.target_type = "NEAREST"
+    fake.target_entity_id = 52
+    fake.latest_detection = {"source_stamp_ns": 101}
+    fake.nearest_step_settle_until = 10.0
+    fake.nearest_step_source_stamp_ns = 100
+    fake.nearest_step_wait_started_at = 9.0
+    fake.nearest_step_count = 1
+    fake.nearest_step_verified = False
+    wrong = {"entity_id": 70}
+    pallet = {"entity_id": None, "depth_yaw": {"forward_distance_cm": 19.0}}
+    pallet_pnp = {"depth_fallback": True, "lateral_ratio": 0.0}
+    fake.valid_measurement = lambda: (wrong, {"depth_fallback": False}, None)
+    fake.nearest_product_candidate = lambda _detection, respect_lock: (
+        (pallet, pallet_pnp) if respect_lock else (wrong, {})
+    )
+    fake.tracked_partial_measurement = lambda: (None, None, "unused")
+    updates = []
+    fake.update_world_target = lambda candidate, pnp, **kwargs: (
+        updates.append((candidate, pnp, kwargs)) or True
+    )
+    fake.target_in_body = lambda: (0.20, 0.0, 0.0)
+    fake.number = lambda key, default, *_args: default
+    fake.stop_drive = lambda *_args: None
+    fake.publish_status = lambda state, reason, **extra: setattr(
+        fake, "last_status", (state, reason, extra)
+    )
+    fake.insertion_start_due_at = None
+    fake.odom_position = (0.0, 0.0)
+    fake.odom_yaw = 0.0
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.5)
+
+    AutoDockNode.tick_docking(fake)
+
+    assert updates == [(pallet, pallet_pnp, {"blend_existing": False})]
+    assert fake.nearest_step_verified is True
+    assert fake.insertion_start_due_at == pytest.approx(10.6)
+
+
 def test_aligned_top_pair_at_nine_cm_can_start_insertion(monkeypatch):
     fake = type("FakeDock", (), {})()
     fake.valid_measurement = lambda: (None, None, "top_pair_only")
@@ -2611,7 +3106,7 @@ def test_translation_first_alignment_limits_but_keeps_large_yaw_correction():
 
     AutoDockNode.tick_docking(fake)
 
-    assert commands == [(0.08, 0.064, 0.12)]
+    assert commands == [(0.08, 0.064, 0.20)]
 
 
 def test_translation_first_alignment_enforces_minimum_yaw_speed():
@@ -2634,7 +3129,25 @@ def test_translation_first_alignment_enforces_minimum_yaw_speed():
 
     AutoDockNode.tick_docking(fake)
 
-    assert commands == [(0.0, 0.0, 0.10)]
+    assert commands == [(0.0, 0.0, 0.20)]
+
+
+def test_nearest_odom_alignment_clamps_lateral_motion_above_dead_zone():
+    fake = type("FakeDock", (), {})()
+    fake.target_type = "NEAREST"
+    fake.target_entity_id = 40
+    fake.latest_detection = {"source_stamp_ns": 100}
+    fake.target_in_body = lambda: (0.20, -0.036, 0.0)
+    fake.config = {}
+    fake.number = lambda key, default, *_args: default
+    fake.insertion_start_due_at = None
+    fake.publish_status = lambda *_args, **_kwargs: None
+    commands = []
+    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
+
+    AutoDockNode.tick_docking(fake)
+
+    assert commands == [(0.0, -0.10, 0.0)]
 
 
 def test_alignment_keeps_locked_target_when_measurements_disagree():
@@ -2696,6 +3209,36 @@ def test_camera_target_is_converted_from_physical_to_calibrated_odom_units():
     assert AutoDockNode.update_world_target(fake, candidate, pnp)
     assert fake.target_world["x"] == pytest.approx(2.0)
     assert fake.target_world["y"] == pytest.approx(0.4)
+
+
+def test_world_target_uses_pnp_distance_when_depth_distance_is_missing():
+    fake = type("FakeDock", (), {})()
+    fake.odom_position = (0.0, 0.0)
+    fake.odom_yaw = 0.0
+    fake.target_world = None
+    fake.number = lambda key, default, *_args: default
+    candidate = {"depth_yaw": {"yaw_deg": 2.0}}
+    pnp = {
+        "distance_source": "depth",
+        "forward_distance_cm": 30.0,
+        "lateral_ratio": 0.0,
+        "depth_fallback": True,
+    }
+
+    assert AutoDockNode.update_world_target(fake, candidate, pnp) is True
+    assert fake.target_world["x"] == pytest.approx(0.30)
+
+
+def test_world_target_rejects_measurement_when_all_distances_are_missing():
+    fake = type("FakeDock", (), {})()
+    fake.odom_position = (0.0, 0.0)
+    fake.odom_yaw = 0.0
+    fake.target_world = None
+    fake.number = lambda key, default, *_args: default
+
+    assert AutoDockNode.update_world_target(
+        fake, {"depth_yaw": {}}, {"distance_source": "depth"}
+    ) is False
 
 
 def test_insertion_depth_is_measured_beyond_entry_gap_with_calibration():

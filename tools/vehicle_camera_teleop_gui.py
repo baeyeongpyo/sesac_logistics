@@ -87,16 +87,29 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from ros_robot_controller_msgs.msg import MotorsState
 from sensor_msgs.msg import Image, LaserScan
 from std_msgs.msg import Empty, String, UInt16
+from auto_dock.auto_dock_node import detect_y_slot_x
 
 
 VEHICLE_HOSTS = {1: "192.168.100.38", 2: "192.168.100.35"}
+DETECTION_COLORS = {
+    "star": (30, 220, 255),
+    "diamond": (255, 120, 30),
+    "pallet": (40, 210, 40),
+    "spade": (230, 80, 230),
+    "clover": (50, 180, 50),
+    "heart": (40, 40, 240),
+}
 
 
 def detect_warning_tape_debug(
-    frame, minimum_yellow_pixels=600, minimum_center_y_ratio=None
+    frame, minimum_yellow_pixels=600, minimum_center_y_ratio=None,
+    filter_config=None,
 ):
     """Run the auto-dock tape detector and retain its rejection evidence."""
     height, width = frame.shape[:2]
+    values = filter_config if isinstance(filter_config, dict) else {}
+    if minimum_center_y_ratio is None:
+        minimum_center_y_ratio = values.get("roi_top_ratio")
     roi_top = 0 if minimum_center_y_ratio is None else int(round(
         max(0.0, min(0.95, float(minimum_center_y_ratio))) * height
     ))
@@ -104,12 +117,31 @@ def detect_warning_tape_debug(
     roi_height = roi.shape[0]
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     raw_mask = cv2.inRange(
-        hsv, np.asarray((15, 90, 70), dtype=np.uint8),
-        np.asarray((42, 255, 255), dtype=np.uint8),
+        hsv,
+        np.asarray((
+            int(values.get("h_min", 15)),
+            int(values.get("s_min", 90)),
+            int(values.get("v_min", 70)),
+        ), dtype=np.uint8),
+        np.asarray((
+            int(values.get("h_max", 42)),
+            int(values.get("s_max", 255)),
+            int(values.get("v_max", 255)),
+        ), dtype=np.uint8),
     )
-    yellow = cv2.morphologyEx(
-        raw_mask, cv2.MORPH_OPEN, np.ones((3, 3), dtype=np.uint8)
-    )
+    yellow = raw_mask
+    for operation, key, default in (
+        (cv2.MORPH_OPEN, "open_kernel", 3),
+        (cv2.MORPH_CLOSE, "close_kernel", 1),
+    ):
+        kernel_size = int(values.get(key, default))
+        if kernel_size > 1:
+            if kernel_size % 2 == 0:
+                kernel_size += 1
+            yellow = cv2.morphologyEx(
+                yellow, operation,
+                np.ones((kernel_size, kernel_size), dtype=np.uint8),
+            )
     black = cv2.inRange(
         hsv, np.asarray((0, 0, 0), dtype=np.uint8),
         np.asarray((179, 255, 75), dtype=np.uint8),
@@ -121,9 +153,12 @@ def detect_warning_tape_debug(
         yellow, connectivity=8
     )
     candidates = []
+    minimum_component_pixels = int(values.get(
+        "min_component_pixels", 200 if filter_config is not None else 80
+    ))
     for label in range(1, count):
         x, y, component_width, component_height, area = stats[label]
-        if area < 80 or component_width < 12:
+        if area < minimum_component_pixels or component_width < 12:
             continue
         side_width = max(8, int(round(component_width * 0.75)))
         y0 = max(0, y)
@@ -222,6 +257,11 @@ def detect_warning_tape_debug(
         "black_adjacent_components": int(black_adjacent_components),
         "black_adjacent_candidates": int(len(candidates)),
         "span_px": 0 if not len(xs) else int(xs.max()) - int(xs.min()),
+        "x_min_px": None if not len(xs) else int(xs.min()),
+        "x_max_px": None if not len(xs) else int(xs.max()),
+        "center_x_px": None if not len(xs) else float(
+            0.5 * (int(xs.min()) + int(xs.max()))
+        ),
         "accepted_mask": accepted,
     }
     if accepted_components < 2:
@@ -268,6 +308,65 @@ def detect_warning_tape_debug(
         return debug
     debug["detected"] = True
     debug["reason"] = "ok"
+    return debug
+
+
+def detect_y_slot_x_debug(frame, minimum_yellow_pixels=600, filter_config=None):
+    """Run the exact AutoDock Y-slot X detector and retain overlay evidence."""
+    height, width = frame.shape[:2]
+    values = filter_config if isinstance(filter_config, dict) else {}
+    roi_top = int(round(max(0.0, min(
+        0.95, float(values.get("roi_top_ratio", 0.70))
+    )) * height))
+    hsv = cv2.cvtColor(frame[roi_top:, :], cv2.COLOR_BGR2HSV)
+    x_s_min = int(values.get("y_slot_x_s_min", 40))
+    raw_mask = cv2.inRange(
+        hsv,
+        np.asarray((
+            int(values.get("h_min", 15)), x_s_min,
+            int(values.get("v_min", 70)),
+        ), dtype=np.uint8),
+        np.asarray((
+            int(values.get("h_max", 42)), int(values.get("s_max", 255)),
+            int(values.get("v_max", 255)),
+        ), dtype=np.uint8),
+    )
+    result = detect_y_slot_x(
+        frame, minimum_yellow_pixels=minimum_yellow_pixels,
+        filter_config=filter_config,
+    )
+    accepted = np.zeros_like(raw_mask)
+    if result is not None:
+        x0 = max(0, int(result["x_min_px"]))
+        x1 = min(width, int(result["x_max_px"]))
+        accepted[:, x0:x1] = raw_mask[:, x0:x1]
+    debug = {
+        "detected": result is not None,
+        "reason": "ok" if result is not None else "yellow_x_shape_not_found",
+        "roi_top": roi_top,
+        "raw_yellow_pixels": int(cv2.countNonZero(raw_mask)),
+        "yellow_pixels": 0 if result is None else int(result["yellow_pixels"]),
+        "component_count": 0 if result is None else 1,
+        "black_adjacent_components": 0,
+        "black_adjacent_candidates": 0,
+        "span_px": 0 if result is None else int(
+            result["x_max_px"] - result["x_min_px"]
+        ),
+        "x_min_px": None if result is None else int(result["x_min_px"]),
+        "x_max_px": None if result is None else int(result["x_max_px"]),
+        "center_x_px": None if result is None else float(result["center_x_px"]),
+        "accepted_mask": accepted,
+        "line": None,
+    }
+    if result is not None:
+        debug.update({
+            "center_y_ratio": float(result["center_y_ratio"]),
+            "angle_deg": 0.0,
+            "x_lines": result.get("x_lines"),
+            "border_angle_deg": result.get("border_angle_deg"),
+            "border_line_count": int(result.get("border_line_count", 0)),
+            "border_lines": result.get("border_lines"),
+        })
     return debug
 
 
@@ -400,25 +499,49 @@ class DevControlClientNode(Node):
             String, args.entity_map_topic, self.on_entity_map, map_qos
         )
 
-    def publish_arrival(self, left, right):
+    def publish_arrival(
+        self, left, right, location="DOCK_1", operation="PICK",
+        product_type="NORMAL", insertion_distance_cm=None,
+        legacy_recognition=False,
+    ):
+        location = str(location).strip().upper()
+        operation = str(operation).strip().upper()
+        product_type = str(product_type).strip().upper()
+        target = (
+            {
+                "type": "NEAREST",
+                "recognition_mode": (
+                    "LEGACY" if legacy_recognition else "CURRENT"
+                ),
+            }
+            if location == "DOCK_1" and operation == "PICK"
+            else {"type": "NONE"}
+        )
         payload = {
             "status": "SUCCEEDED",
-            "location": "DOCK_1",
-            "operation": "PICK",
-            "product_type": "NORMAL",
-            "target": {"type": "SYMBOLS", "left": left, "right": right},
+            "location": location,
+            "operation": operation,
+            "product_type": product_type,
+            "target": target,
         }
+        if insertion_distance_cm is not None:
+            payload["insertion_distance_cm"] = float(insertion_distance_cm)
         self.arrival_pub.publish(String(data=json.dumps(
             payload, ensure_ascii=False, separators=(",", ":")
         )))
 
-    def publish_nearest_arrival(self, product_type):
+    def publish_nearest_arrival(self, product_type, legacy_recognition=False):
         payload = {
             "status": "SUCCEEDED",
             "location": "DOCK_1",
             "operation": "PICK",
             "product_type": str(product_type).strip().upper(),
-            "target": {"type": "NEAREST"},
+            "target": {
+                "type": "NEAREST",
+                "recognition_mode": (
+                    "LEGACY" if legacy_recognition else "CURRENT"
+                ),
+            },
         }
         self.arrival_pub.publish(String(data=json.dumps(
             payload, ensure_ascii=False, separators=(",", ":")
@@ -1049,6 +1172,9 @@ class TeleopWindow(QMainWindow):
         self.warning_tape_debug = None
         self.warning_tape_track = None
         self.warning_tape_track_at = 0.0
+        self.warning_tape_hsv_path = self.resolve_warning_tape_hsv_path()
+        self.warning_tape_hsv_cache = None
+        self.warning_tape_hsv_cache_mtime_ns = None
         self.dock_grid_revision = None
         self.dock_grid_occupied = {}
         self.dock_grid_last_signature = None
@@ -1216,6 +1342,8 @@ class TeleopWindow(QMainWindow):
         self.status.setObjectName("status")
         self.battery_label = QLabel("배터리: 수신 대기 | 충전 상태 판정 중")
         self.battery_label.setObjectName("status")
+        self.y_slot_center_label = QLabel("Y 슬롯 X 중심: arrival 대기")
+        self.y_slot_center_label.setObjectName("status")
 
         self.linear, self.linear_value = self.speed_slider(
             args.linear_speed, 0.01, 0.30, 0.01, " m/s"
@@ -1423,7 +1551,25 @@ class TeleopWindow(QMainWindow):
         self.arc_cancel_button.clicked.connect(
             lambda: self.cancel_arc_approach("사용자 취소")
         )
-        self.arrival_button = QPushButton("DOCK PICK Arrival 발행")
+        self.arrival_location = QComboBox()
+        for location in ("DOCK_1", "Y1", "Y2", "Y3", "Y4"):
+            self.arrival_location.addItem(location, location)
+        self.arrival_operation = QComboBox()
+        self.arrival_operation.addItem("PICK", "PICK")
+        self.arrival_operation.addItem("PLACE", "PLACE")
+        self.arrival_product = QComboBox()
+        self.arrival_product.addItem("NORMAL", "NORMAL")
+        self.arrival_product.addItem("FRESH", "FRESH")
+        self.y_slot_insertion_distance = QDoubleSpinBox()
+        self.y_slot_insertion_distance.setRange(1.0, 100.0)
+        self.y_slot_insertion_distance.setDecimals(1)
+        self.y_slot_insertion_distance.setValue(25.0)
+        self.y_slot_insertion_distance.setSuffix(" cm")
+        self.y_slot_insertion_distance.setEnabled(False)
+        self.arrival_location.currentIndexChanged.connect(
+            self.on_arrival_location_changed
+        )
+        self.arrival_button = QPushButton("선택 Arrival 발행")
         self.arrival_button.clicked.connect(self.publish_arrival_trigger)
         self.nearest_product = QComboBox()
         self.nearest_product.addItem("NORMAL", "NORMAL")
@@ -1432,6 +1578,8 @@ class TeleopWindow(QMainWindow):
         self.nearest_arrival_button.clicked.connect(
             self.publish_nearest_arrival_trigger
         )
+        self.legacy_entity_recognition = QCheckBox("이전 버전 엔티티 인식")
+        self.legacy_entity_recognition.setChecked(True)
         self.auto_dock_stop_button = QPushButton("AUTO-DOCK STOP 발행")
         self.auto_dock_stop_button.clicked.connect(self.publish_auto_dock_stop)
         self.auto_dock_status_label = QLabel("AUTO-DOCK 상태: 수신 대기")
@@ -1463,20 +1611,26 @@ class TeleopWindow(QMainWindow):
         arc_layout.addWidget(QLabel("자동 모드"), 2, 0)
         arc_layout.addWidget(self.run_mode, 2, 1, 1, 3)
         arc_layout.addWidget(self.run_mode_button, 2, 4)
-        arc_layout.addWidget(self.arrival_button, 3, 0, 1, 3)
-        arc_layout.addWidget(self.auto_dock_stop_button, 3, 3, 1, 2)
-        arc_layout.addWidget(QLabel("태그 미지정"), 4, 0)
-        arc_layout.addWidget(self.nearest_product, 4, 1)
-        arc_layout.addWidget(self.nearest_arrival_button, 4, 2, 1, 3)
-        arc_layout.addWidget(self.auto_dock_status_label, 5, 0, 1, 5)
-        arc_layout.addWidget(self.fork_flow_status_label, 6, 0, 1, 5)
-        arc_layout.addWidget(self.arc_label, 7, 0, 1, 5)
-        arc_layout.addWidget(QLabel("전후차 (+덜 감)"), 8, 0)
-        arc_layout.addWidget(self.arc_forward_error, 8, 1)
-        arc_layout.addWidget(QLabel("좌우차 (+왼쪽)"), 8, 2)
-        arc_layout.addWidget(self.arc_lateral_error, 8, 3)
-        arc_layout.addWidget(self.arc_sample_save, 8, 4)
-        arc_layout.addWidget(self.arc_sample_label, 9, 0, 1, 5)
+        arc_layout.addWidget(self.arrival_location, 3, 0)
+        arc_layout.addWidget(self.arrival_operation, 3, 1)
+        arc_layout.addWidget(self.arrival_product, 3, 2)
+        arc_layout.addWidget(self.arrival_button, 3, 3, 1, 2)
+        arc_layout.addWidget(QLabel("Y 삽입 직진거리"), 4, 0)
+        arc_layout.addWidget(self.y_slot_insertion_distance, 4, 1)
+        arc_layout.addWidget(self.auto_dock_stop_button, 4, 3, 1, 2)
+        arc_layout.addWidget(QLabel("태그 미지정"), 5, 0)
+        arc_layout.addWidget(self.nearest_product, 5, 1)
+        arc_layout.addWidget(self.nearest_arrival_button, 5, 2)
+        arc_layout.addWidget(self.legacy_entity_recognition, 5, 3, 1, 2)
+        arc_layout.addWidget(self.auto_dock_status_label, 6, 0, 1, 5)
+        arc_layout.addWidget(self.fork_flow_status_label, 7, 0, 1, 5)
+        arc_layout.addWidget(self.arc_label, 8, 0, 1, 5)
+        arc_layout.addWidget(QLabel("전후차 (+덜 감)"), 9, 0)
+        arc_layout.addWidget(self.arc_forward_error, 9, 1)
+        arc_layout.addWidget(QLabel("좌우차 (+왼쪽)"), 9, 2)
+        arc_layout.addWidget(self.arc_lateral_error, 9, 3)
+        arc_layout.addWidget(self.arc_sample_save, 9, 4)
+        arc_layout.addWidget(self.arc_sample_label, 10, 0, 1, 5)
 
         self.memo = QPlainTextEdit()
         self.memo.setPlaceholderText("캡처 메모 (이미지와 별도 JSON으로 저장)")
@@ -1569,17 +1723,25 @@ class TeleopWindow(QMainWindow):
         main_row.addWidget(vehicle_panel, 1, Qt.AlignTop)
         control_panel = QGroupBox("설정 및 캡처")
         control_layout = QVBoxLayout()
+        self.control_details = QWidget()
+        control_details_layout = QVBoxLayout()
+        control_details_layout.setContentsMargins(0, 0, 0, 0)
+        self.control_details.setLayout(control_details_layout)
+        self.control_details.setHidden(True)
+        self.control_collapse_button = QPushButton("▼ 상세 설정 펼치기")
+        self.control_collapse_button.clicked.connect(self.toggle_control_details)
+        control_layout.addWidget(self.control_collapse_button)
         self.open_test_panel_button = QPushButton(
             "Control GUI 종료 → 테스트 패널 열기"
         )
         self.open_test_panel_button.clicked.connect(self.switch_to_test_panel)
-        control_layout.addWidget(self.open_test_panel_button)
+        control_details_layout.addWidget(self.open_test_panel_button)
         mapping_panel = QGroupBox("중앙 목표 매핑")
         mapping_panel.setLayout(mapping_layout)
-        control_layout.addWidget(mapping_panel)
+        control_details_layout.addWidget(mapping_panel)
         arc_panel = QGroupBox("ARC 정면 진입")
         arc_panel.setLayout(arc_layout)
-        control_layout.addWidget(arc_panel)
+        control_details_layout.addWidget(arc_panel)
         camera_calibration_panel = QGroupBox("카메라 2점 Calibration")
         camera_calibration_panel.setLayout(camera_calibration_layout)
         preset_panel = QGroupBox("Motion Calibration Preset")
@@ -1596,10 +1758,10 @@ class TeleopWindow(QMainWindow):
         self.calibration_window.setLayout(calibration_window_layout)
         self.open_calibration_button = QPushButton("Calibration 창 열기")
         self.open_calibration_button.clicked.connect(self.open_calibration_window)
-        control_layout.addWidget(self.open_calibration_button)
+        control_details_layout.addWidget(self.open_calibration_button)
         self.open_pose_config_button = QPushButton("공통 설정 JSON 열기")
         self.open_pose_config_button.clicked.connect(self.open_pose_config_editor)
-        control_layout.addWidget(self.open_pose_config_button)
+        control_details_layout.addWidget(self.open_pose_config_button)
         self.log_filter = QComboBox()
         for label, value in (
             ("전체", "all"), ("녹화", "recording"), ("캡처", "capture"),
@@ -1641,16 +1803,20 @@ class TeleopWindow(QMainWindow):
         self.log_window.setLayout(log_window_layout)
         self.open_log_button = QPushButton("기록 검토 / 폐기 창 열기")
         self.open_log_button.clicked.connect(self.open_log_window)
-        control_layout.addWidget(self.open_log_button)
-        control_layout.addLayout(controls)
-        control_layout.addWidget(QLabel(
+        control_details_layout.addWidget(self.open_log_button)
+        controls_widget = QWidget()
+        controls_widget.setLayout(controls)
+        control_details_layout.addWidget(controls_widget)
+        control_details_layout.addWidget(QLabel(
             "주행: W A S D / 제자리 회전: Q E / 리프트: 방향키 / 비상정지: SPACE"
         ))
         control_layout.addWidget(self.status)
         control_layout.addWidget(self.battery_label)
+        control_layout.addWidget(self.y_slot_center_label)
         control_layout.addLayout(record_row)
         control_layout.addWidget(self.memo)
         control_layout.addLayout(capture_row)
+        control_layout.addWidget(self.control_details)
         control_panel.setLayout(control_layout)
         main_row.addWidget(control_panel, 1, Qt.AlignTop)
         layout.addLayout(main_row, 1)
@@ -1667,6 +1833,13 @@ class TeleopWindow(QMainWindow):
         self.on_target_changed()
         self.load_rotation_calibration()
 
+    def toggle_control_details(self):
+        collapsed = not self.control_details.isHidden()
+        self.control_details.setHidden(collapsed)
+        self.control_collapse_button.setText(
+            "▼ 상세 설정 펼치기" if collapsed else "▲ 상세 설정 접기"
+        )
+
     def on_target_changed(self, _index=None):
         self.arc_plan = None
         if hasattr(self, "arc_execute_button"):
@@ -1680,6 +1853,22 @@ class TeleopWindow(QMainWindow):
         index = combo.findData(symbol)
         if index >= 0:
             combo.setCurrentIndex(index)
+
+    def on_arrival_location_changed(self, _index=None):
+        location = str(self.arrival_location.currentData() or "")
+        if location in {"Y1", "Y2", "Y3", "Y4"}:
+            self.y_slot_insertion_distance.setEnabled(True)
+            self.arrival_operation.setCurrentIndex(
+                self.arrival_operation.findData("PLACE")
+            )
+            self.arrival_product.setCurrentIndex(
+                self.arrival_product.findData("FRESH")
+            )
+        elif location == "DOCK_1":
+            self.y_slot_insertion_distance.setEnabled(False)
+            self.arrival_operation.setCurrentIndex(
+                self.arrival_operation.findData("PICK")
+            )
 
     def open_calibration_window(self):
         self.calibration_window.show()
@@ -3941,23 +4130,47 @@ class TeleopWindow(QMainWindow):
         self.start_arc_approach()
 
     def publish_arrival_trigger(self):
-        """Publish a structured DOCK/PICK arrival for the Auto Dock node."""
+        """Publish the structured arrival selected in the Control GUI."""
         if self.args.http_viewer_only:
             self.arc_label.setText("HTTP 화면 전용 모드에서는 arrival 발행 불가")
             return
         left = self.target_left.currentData()
         right = self.target_right.currentData()
-        self.node.publish_arrival(left, right)
-        self.arc_label.setText(f"DOCK PICK Arrival 발행: {left} / {right}")
+        location = self.arrival_location.currentData()
+        operation = self.arrival_operation.currentData()
+        product_type = self.arrival_product.currentData()
+        self.node.publish_arrival(
+            left, right, location=location, operation=operation,
+            product_type=product_type,
+            insertion_distance_cm=(
+                self.y_slot_insertion_distance.value()
+                if location in {"Y1", "Y2", "Y3", "Y4"} else None
+            ),
+            legacy_recognition=self.legacy_entity_recognition.isChecked(),
+        )
+        target_text = (
+            " | NEAREST LEGACY"
+            if location == "DOCK_1" and operation == "PICK"
+            and self.legacy_entity_recognition.isChecked()
+            else " | NEAREST"
+            if location == "DOCK_1" and operation == "PICK" else ""
+        )
+        self.arc_label.setText(
+            f"Arrival 발행: {location} {operation} {product_type}{target_text}"
+        )
 
     def publish_nearest_arrival_trigger(self):
         if self.args.http_viewer_only:
             self.arc_label.setText("HTTP 화면 전용 모드에서는 arrival 발행 불가")
             return
         product_type = self.nearest_product.currentData()
-        self.node.publish_nearest_arrival(product_type)
+        legacy = self.legacy_entity_recognition.isChecked()
+        self.node.publish_nearest_arrival(
+            product_type, legacy_recognition=legacy
+        )
         self.arc_label.setText(
             f"DOCK 최근접 {product_type} PICK Arrival 발행"
+            + (" | 이전 인식" if legacy else " | 현재 인식")
         )
 
     def publish_auto_dock_stop(self):
@@ -5236,6 +5449,44 @@ class TeleopWindow(QMainWindow):
         )
         return frame
 
+    def resolve_warning_tape_hsv_path(self):
+        configured = str(self.args.warning_tape_hsv_config or "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        pose_config_path = Path(str(self.args.pose_config or "")).expanduser()
+        try:
+            pose_config = json.loads(pose_config_path.read_text(encoding="utf-8"))
+            configured = str(
+                pose_config.get("warning_tape_hsv_config_path", "")
+            ).strip()
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            configured = ""
+        return Path(configured or "/home/ubuntu/warning_tape_hsv.json").expanduser()
+
+    def warning_tape_filter_values(self):
+        """Reload the same GUI-authored HSV config consumed by Auto Dock."""
+        try:
+            mtime_ns = self.warning_tape_hsv_path.stat().st_mtime_ns
+        except OSError:
+            return None
+        if (
+            self.warning_tape_hsv_cache is not None
+            and self.warning_tape_hsv_cache_mtime_ns == mtime_ns
+        ):
+            return self.warning_tape_hsv_cache
+        try:
+            payload = json.loads(
+                self.warning_tape_hsv_path.read_text(encoding="utf-8")
+            )
+            if not isinstance(payload, dict):
+                return None
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+        payload.setdefault("min_component_pixels", 200)
+        self.warning_tape_hsv_cache = payload
+        self.warning_tape_hsv_cache_mtime_ns = mtime_ns
+        return self.warning_tape_hsv_cache
+
     def render_warning_tape_overlay(self, frame):
         """Show exactly which yellow pixels pass the auto-dock tape gates."""
         now = time.monotonic()
@@ -5248,11 +5499,7 @@ class TeleopWindow(QMainWindow):
                 "reason": "raw_frame_stale",
                 "source_age_sec": None if self.node.tape_frame is None else tape_age,
             }
-            cv2.rectangle(frame, (4, 4), (330, 31), (0, 0, 0), -1)
-            cv2.putText(
-                frame, "TAPE LOST raw camera stale", (9, 24),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 0, 255), 2,
-            )
+            self.render_auto_dock_status_banner(frame)
             return frame
         tape_frame = self.node.tape_frame.copy()
         if tape_frame.shape[:2] != frame.shape[:2]:
@@ -5260,20 +5507,91 @@ class TeleopWindow(QMainWindow):
                 tape_frame, (frame.shape[1], frame.shape[0]),
                 interpolation=cv2.INTER_AREA,
             )
+        location = str(
+            (self.node.auto_dock_status or {}).get("location", "")
+        ).strip().upper()
+        is_y_slot = location in {"Y1", "Y2", "Y3", "Y4"}
+        auto_state = str(
+            (self.node.auto_dock_status or {}).get("state", "")
+        ).strip().upper()
+        if is_y_slot and auto_state in {"IDLE", "READY", "ERROR"}:
+            self.warning_tape_track = None
+            self.warning_tape_track_at = 0.0
         track_age = now - self.warning_tape_track_at
         tracked_minimum = None
-        if self.warning_tape_track is not None and track_age <= 0.75:
+        if (
+            self.warning_tape_track is not None
+            and (is_y_slot or track_age <= 0.75)
+        ):
             tracked_minimum = max(
                 0.0, float(self.warning_tape_track["center_y_ratio"]) - 0.12
             )
         else:
             self.warning_tape_track = None
-        debug = detect_warning_tape_debug(
-            tape_frame, minimum_center_y_ratio=tracked_minimum
-        )
+        filter_config = self.warning_tape_filter_values()
+        if is_y_slot and auto_state == "ALIGNING":
+            debug = detect_y_slot_x_debug(
+                tape_frame, filter_config=filter_config,
+            )
+        elif is_y_slot:
+            values = filter_config if isinstance(filter_config, dict) else {}
+            roi_top = int(round(max(0.0, min(
+                0.95, float(values.get("roi_top_ratio", 0.70))
+            )) * tape_frame.shape[0]))
+            accepted_mask = np.zeros(
+                (tape_frame.shape[0] - roi_top, tape_frame.shape[1]),
+                dtype=np.uint8,
+            )
+            if self.warning_tape_track is not None:
+                debug = dict(self.warning_tape_track)
+                debug.update({
+                    "detected": True,
+                    "reason": "insertion_latched",
+                    "roi_top": roi_top,
+                    "accepted_mask": accepted_mask,
+                    "line": None,
+                    "x_lines": None,
+                    "border_lines": None,
+                })
+            else:
+                debug = {
+                    "detected": False,
+                    "reason": "x_detection_inactive",
+                    "roi_top": roi_top,
+                    "raw_yellow_pixels": 0,
+                    "yellow_pixels": 0,
+                    "component_count": 0,
+                    "black_adjacent_components": 0,
+                    "black_adjacent_candidates": 0,
+                    "span_px": 0,
+                    "x_min_px": None,
+                    "x_max_px": None,
+                    "center_x_px": None,
+                    "accepted_mask": accepted_mask,
+                    "line": None,
+                }
+        else:
+            debug = detect_warning_tape_debug(
+                tape_frame, minimum_center_y_ratio=tracked_minimum,
+                filter_config=filter_config,
+            )
         accepted = debug.pop("accepted_mask")
         line = debug.pop("line", None)
-        if debug["detected"] and self.warning_tape_track is not None:
+        x_lines = debug.pop("x_lines", None)
+        border_lines = debug.pop("border_lines", None)
+        if (
+            is_y_slot
+            and not debug["detected"]
+            and self.warning_tape_track is not None
+        ):
+            debug.update(self.warning_tape_track)
+            debug["detected"] = True
+            debug["reason"] = "latched"
+        if (
+            not is_y_slot
+            and debug["detected"]
+            and self.warning_tape_track is not None
+        ):
             angle_delta = math.degrees(math.atan2(
                 math.sin(math.radians(
                     float(debug["angle_deg"])
@@ -5297,6 +5615,8 @@ class TeleopWindow(QMainWindow):
             self.warning_tape_track_at = now
         debug["source_age_sec"] = tape_age
         debug["source_topic"] = self.args.tape_image_topic
+        debug["hsv_config_path"] = str(self.warning_tape_hsv_path)
+        debug["hsv_config_loaded"] = filter_config is not None
         self.warning_tape_debug = dict(debug)
         roi_top = int(debug["roi_top"])
         cv2.line(frame, (0, roi_top), (frame.shape[1] - 1, roi_top),
@@ -5306,39 +5626,102 @@ class TeleopWindow(QMainWindow):
         )
         shifted = [contour + np.asarray([[[0, roi_top]]]) for contour in contours]
         cv2.drawContours(frame, shifted, -1, (255, 0, 255), 2)
-        if debug["detected"] and line is not None:
-            vx, vy, line_x, line_y = line
-            left_y = int(round(line_y + (vy / vx) * (0.0 - line_x) + roi_top))
-            right_x = frame.shape[1] - 1
-            right_y = int(round(
-                line_y + (vy / vx) * (right_x - line_x) + roi_top
-            ))
-            cv2.line(frame, (0, left_y), (right_x, right_y), (0, 255, 255), 3)
+        if debug["detected"]:
+            if line is not None:
+                vx, vy, line_x, line_y = line
+                left_y = int(round(
+                    line_y + (vy / vx) * (0.0 - line_x) + roi_top
+                ))
+                right_x = frame.shape[1] - 1
+                right_y = int(round(
+                    line_y + (vy / vx) * (right_x - line_x) + roi_top
+                ))
+                cv2.line(
+                    frame, (0, left_y), (right_x, right_y), (0, 255, 255), 3
+                )
+            if x_lines is not None:
+                for x1, y1, x2, y2 in x_lines:
+                    cv2.line(
+                        frame, (int(x1), int(y1 + roi_top)),
+                        (int(x2), int(y2 + roi_top)), (0, 255, 255), 3,
+                    )
+            if border_lines is not None:
+                for x1, y1, x2, y2 in border_lines:
+                    cv2.line(
+                        frame, (int(x1), int(y1 + roi_top)),
+                        (int(x2), int(y2 + roi_top)), (0, 165, 255), 2,
+                    )
             center = (
-                frame.shape[1] // 2,
+                int(round(float(debug.get(
+                    "center_x_px", frame.shape[1] * 0.5
+                )))),
                 int(round(float(debug["center_y_ratio"]) * frame.shape[0])),
             )
             cv2.circle(frame, center, 7, (0, 255, 255), -1)
-            text_line = (
-                f"TAPE OK angle:{debug['angle_deg']:+.1f}deg "
-                f"y:{debug['center_y_ratio']:.3f} px:{debug['yellow_pixels']} "
-                f"comp:{debug['component_count']}"
+        self.render_auto_dock_status_banner(frame)
+        if location in {"Y1", "Y2", "Y3", "Y4"}:
+            target_center_ratio = float(getattr(
+                self.args, "y_slot_target_center_x_ratio", 0.5
+            ))
+            target_center_x = target_center_ratio * frame.shape[1]
+            center_x = debug.get("center_x_px") if debug["detected"] else None
+            cv2.line(
+                frame, (int(round(target_center_x)), 0),
+                (int(round(target_center_x)), frame.shape[0] - 1),
+                (255, 255, 0), 1,
             )
-            color = (0, 220, 0)
+            if center_x is None:
+                center_text = f"{location} SLOT X: tape detection waiting"
+                self.y_slot_center_label.setText(
+                    f"{location} 슬롯 X 중심: 주의선 검출 대기"
+                )
+            else:
+                offset_px = float(center_x) - target_center_x
+                cv2.line(
+                    frame, (int(round(center_x)), 0),
+                    (int(round(center_x)), frame.shape[0] - 1),
+                    (255, 0, 255), 2,
+                )
+                center_text = (
+                    f"{location} SLOT X {center_x:.1f}px | "
+                    f"CENTER DELTA {offset_px:+.1f}px"
+                )
+                self.y_slot_center_label.setText(
+                    f"{location} 슬롯 X 중심: {center_x:.1f}px | "
+                    f"차량 직진축 {target_center_x:.1f}px 대비 "
+                    f"{offset_px:+.1f}px (오른쪽 +)"
+                )
+            cv2.rectangle(
+                frame, (4, frame.shape[0] - 33),
+                (min(frame.shape[1] - 4, 500), frame.shape[0] - 4),
+                (0, 0, 0), -1,
+            )
+            cv2.putText(
+                frame, center_text, (9, frame.shape[0] - 12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 0), 2,
+            )
         else:
-            text_line = (
-                f"TAPE LOST {debug['reason']} raw:{debug['raw_yellow_pixels']} "
-                f"pass:{debug['yellow_pixels']} comp:{debug['component_count']} "
-                f"span:{debug['span_px']}px"
-            )
-            color = (0, 0, 255)
+            self.y_slot_center_label.setText("Y 슬롯 X 중심: arrival 대기")
+        return frame
+
+    def render_auto_dock_status_banner(self, frame):
+        status = self.node.auto_dock_status or {}
+        state = str(status.get("state", "UNKNOWN")).strip().upper() or "UNKNOWN"
+        reason = str(status.get("reason", "no_status")).strip() or "no_status"
+        text_line = f"AUTO {state} | {reason}"
+        color = {
+            "SEARCHING": (0, 220, 255),
+            "ALIGNING": (255, 200, 0),
+            "INSERTING": (0, 220, 0),
+            "READY": (0, 220, 0),
+            "ERROR": (0, 0, 255),
+        }.get(state, (220, 220, 220))
         text_width = min(frame.shape[1] - 6, max(280, len(text_line) * 9))
         cv2.rectangle(frame, (4, 4), (text_width, 31), (0, 0, 0), -1)
         cv2.putText(
             frame, text_line, (9, 24), cv2.FONT_HERSHEY_SIMPLEX,
             0.52, color, 2,
         )
-        return frame
 
     def render_inventory_entity_overlay(self, frame):
         """Draw only complete pallet groups used by the inventory tracker."""
@@ -5411,10 +5794,11 @@ class TeleopWindow(QMainWindow):
             x1, y1, x2, y2 = (int(round(value)) for value in box)
             label = str(item.get("class", "?"))
             confidence = float(item.get("confidence", 0.0))
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 220, 0), 2)
+            color = DETECTION_COLORS.get(label, (0, 220, 0))
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(
                 frame, f"{label} {confidence:.2f}", (x1, max(18, y1 - 6)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.52, (0, 220, 0), 2,
+                cv2.FONT_HERSHEY_SIMPLEX, 0.52, color, 2,
             )
         candidate = detection.get("candidate") or {}
         for point in candidate.get("tag_centers", []):
@@ -5423,7 +5807,7 @@ class TeleopWindow(QMainWindow):
                     frame, (int(round(point[0])), int(round(point[1]))),
                     5, (0, 255, 255), -1,
                 )
-        return frame
+        return self.render_inventory_entity_overlay(frame)
 
     @staticmethod
     def show_frame(frame, label):
@@ -5835,6 +6219,7 @@ def main():
     parser.add_argument("--camera-pitch-deg", type=float, default=0.0)
     parser.add_argument("--friction-coefficient", type=float, default=1.0)
     parser.add_argument("--pose-config", default="")
+    parser.add_argument("--warning-tape-hsv-config", default="")
     parser.add_argument("--stop-distance", type=float, default=0.20)
     parser.add_argument("--safety-min-valid-range", type=float, default=0.25)
     parser.add_argument("--record-fps", type=float, default=15.0)
@@ -5921,6 +6306,9 @@ def main():
             )
             args.friction_coefficient = float(
                 pose_config.get("friction_coefficient", args.friction_coefficient)
+            )
+            args.y_slot_target_center_x_ratio = float(
+                pose_config.get("y_slot_target_center_x_ratio", 0.5)
             )
             if args.disable_external_webcams is None:
                 args.disable_external_webcams = bool(

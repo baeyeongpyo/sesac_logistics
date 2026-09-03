@@ -44,6 +44,7 @@ CHECKBOX_FIELDS = (
     ),
     ("manual_lateral_yaw_hold_enabled", "수동 A/D 횡이동 yaw hold"),
     ("dock_inventory_scan_enabled", "개발 · DOCK 최근접 슬롯 인식"),
+    ("dock_reverse_target_search_enabled", "DOCK 최근접 직선후진 탐색"),
 )
 CHECKBOX_KEYS = {key for key, _label in CHECKBOX_FIELDS}
 TUNING_FIELDS = (
@@ -60,6 +61,14 @@ TUNING_FIELDS = (
     ("manual_lateral_yaw_hold_tolerance_deg", "수동 yaw hold 허용각(°)", 3.0, float, 0.5, 15.0),
     ("manual_lateral_yaw_hold_speed_rad_s", "수동 yaw hold 회전속도(rad/s)", 0.35, float, 0.10, 0.50),
     ("dock_inventory_scan_enabled", "DOCK 최근접 슬롯 인식(1/0)", 0, int, 0, 1),
+    ("dock_reverse_target_search_enabled", "DOCK 최근접 직선후진(1/0)", 1, int, 0, 1),
+    ("dock_reverse_target_search_speed_m_s", "DOCK 탐색 후진속도(m/s)", 0.10, float, 0.10, 0.20),
+    ("dock_reverse_target_search_forward_speed_m_s", "DOCK 후방간격 복구 전진속도(m/s)", 0.10, float, 0.10, 0.20),
+    ("dock_reverse_target_search_min_rear_distance_cm", "DOCK 탐색 후방한계(cm)", 25.0, float, 5.0, 100.0),
+    ("dock_reverse_target_search_restore_margin_cm", "DOCK 후방간격 복구여유(cm)", 2.0, float, 0.0, 20.0),
+    ("dock_reverse_target_search_skip_above_rear_distance_cm", "DOCK 후진생략 후방거리(cm)", 50.0, float, 27.0, 300.0),
+    ("dock_reverse_target_search_max_distance_cm", "DOCK 탐색 최대후진(cm)", 15.0, float, 1.0, 100.0),
+    ("dock_reverse_target_search_lidar_max_age_sec", "DOCK 탐색 LiDAR 유효(초)", 0.50, float, 0.10, 2.0),
     ("dock_inventory_scan_interval_sec", "DOCK 인식 주기(초)", 0.50, float, 0.20, 5.0),
     ("dock_inventory_minimum_red_pixels", "DOCK 빨간끝선 최소픽셀", 180, int, 50, 5000),
     ("dock_inventory_first_row_center_ratio", "우측끝→R1 중심 비율", 0.65, float, 0.20, 1.50),
@@ -94,8 +103,8 @@ TUNING_FIELDS = (
     ("search_rear_lidar_forward_speed_m_s", "옵션2 전진보정(m/s)", 0.12, float, 0.05, 0.20),
     ("translation_first_alignment_enabled", "이동우선 정렬(1/0)", 0, int, 0, 1),
     ("alignment_max_trusted_yaw_deg", "신뢰 회전오차 한계(°)", 12.0, float, 3.0, 30.0),
-    ("translation_alignment_min_angular_speed_rad_s", "이동정렬 최소회전(rad/s)", 0.10, float, 0.0, 0.20),
-    ("translation_alignment_max_angular_speed_rad_s", "이동정렬 최대회전(rad/s)", 0.12, float, 0.0, 0.20),
+    ("translation_alignment_min_angular_speed_rad_s", "이동정렬 최소회전(rad/s)", 0.20, float, 0.0, 0.20),
+    ("translation_alignment_max_angular_speed_rad_s", "이동정렬 최대회전(rad/s)", 0.20, float, 0.0, 0.20),
     ("nav2_scan_approach_enabled", "도착후 회전스캔 접근(1/0)", 0, int, 0, 1),
     ("nav2_scan_angle_deg", "회전스캔 좌우각(°)", 20.0, float, 2.0, 30.0),
     ("nav2_scan_angular_speed_rad_s", "회전스캔 속도(rad/s)", 0.18, float, 0.05, 0.40),
