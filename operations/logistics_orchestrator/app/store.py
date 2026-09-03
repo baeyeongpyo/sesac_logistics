@@ -233,7 +233,11 @@ class OrchestratorStore:
             )
 
     def create_or_get_pallet3_mission(
-        self, robot_id: str, mission_id: str | None = None
+        self,
+        robot_id: str,
+        mission_id: str | None = None,
+        *,
+        replace_active: bool = False,
     ) -> tuple[Pallet3Mission, bool]:
         timestamp = _format_time(_now())
         with self._lock, self._connection:
@@ -245,7 +249,20 @@ class OrchestratorStore:
                 (robot_id,),
             ).fetchone()
             if active is not None:
-                return _pallet3_mission_from_row(active), False
+                if not replace_active:
+                    return _pallet3_mission_from_row(active), False
+                self._connection.execute(
+                    """
+                    UPDATE pallet3_poc_missions
+                    SET phase = 'FAILED', failure_detail = ?, updated_at = ?
+                    WHERE mission_id = ?
+                    """,
+                    (
+                        "SUPERSEDED_BY_NEW_POC_REQUEST",
+                        timestamp,
+                        active["mission_id"],
+                    ),
+                )
             mission_id = mission_id or str(uuid4())
             self._connection.execute(
                 """

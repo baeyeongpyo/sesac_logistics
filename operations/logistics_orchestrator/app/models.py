@@ -66,3 +66,4 @@ class Pallet3MissionRequest(BaseModel):
 
     robot_id: str = Field(min_length=1)
     bypass_pick: bool = False
+    new_mission: bool = False

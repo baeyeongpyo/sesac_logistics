@@ -65,11 +65,19 @@ class OrchestratorService:
         self.reconcile()
 
     def start_pallet3_mission(
-        self, robot_id: str, *, bypass_pick: bool = False
+        self,
+        robot_id: str,
+        *,
+        bypass_pick: bool = False,
+        new_mission: bool = False,
     ) -> Pallet3Mission:
         robot_id = robot_id.strip()
         if not robot_id:
             raise ValueError("robot_id must be a non-empty string")
+        if new_mission and not bypass_pick:
+            raise Pallet3MissionConflictError(
+                "new_mission is allowed only with bypass_pick for the pallet 3 POC"
+            )
         try:
             vehicles = self._fleet.list_vehicles()
         except Exception as error:
@@ -102,7 +110,11 @@ class OrchestratorService:
                     "AUTO_DOCK_PICK_COMPLETED must include the pickup operation_id"
                 )
         self._store.clear_error("pallet3_vehicle_snapshot")
-        mission, created = self._store.create_or_get_pallet3_mission(robot_id, mission_id)
+        mission, created = self._store.create_or_get_pallet3_mission(
+            robot_id,
+            mission_id,
+            replace_active=new_mission,
+        )
         if created:
             self._deliver_pallet3_command(
                 mission,

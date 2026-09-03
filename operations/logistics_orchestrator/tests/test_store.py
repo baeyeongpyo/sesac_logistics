@@ -79,6 +79,22 @@ class OrchestratorStoreTest(unittest.TestCase):
         self.assertEqual(restored.phase, "FORK_DOWN_SENT")
         self.assertIsNotNone(restored.unload_confirmed_at)
 
+    def test_pallet3_mission_replaces_an_active_poc_with_a_new_mission(self) -> None:
+        # This catches a repeat POC request being trapped by a stale active mission.
+        original, created = self.store.create_or_get_pallet3_mission("robot_1")
+
+        replacement, replacement_created = self.store.create_or_get_pallet3_mission(
+            "robot_1", replace_active=True
+        )
+
+        replaced = self.store.get_pallet3_mission(original.mission_id)
+        self.assertTrue(created)
+        self.assertTrue(replacement_created)
+        self.assertNotEqual(replacement.mission_id, original.mission_id)
+        self.assertEqual(replacement.phase, "OUTBOUND_SENT")
+        self.assertEqual(replaced.phase, "FAILED")
+        self.assertEqual(replaced.failure_detail, "SUPERSEDED_BY_NEW_POC_REQUEST")
+
 
 if __name__ == "__main__":
     unittest.main()

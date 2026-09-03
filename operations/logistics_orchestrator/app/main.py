@@ -55,7 +55,9 @@ def create_app(
         service = _require_service(request)
         try:
             return service.start_pallet3_mission(
-                body.robot_id, bypass_pick=body.bypass_pick
+                body.robot_id,
+                bypass_pick=body.bypass_pick,
+                new_mission=body.new_mission,
             )
         except KeyError as error:
             raise HTTPException(

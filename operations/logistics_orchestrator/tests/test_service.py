@@ -323,6 +323,45 @@ class OrchestratorServiceTest(unittest.TestCase):
             ],
         )
 
+    def test_new_pallet3_poc_mission_supersedes_an_idle_bypass_mission(self) -> None:
+        # This catches repeated POC execution reusing a stale mission instead of sending a fresh route.
+        inventory = FakeInventory(stocks=[], active_operations=[])
+        fleet = FakeFleet([{
+            "robot_id": "robot_1", "state": "WAIT",
+            "source": "API", "detail": "OPERATOR_READY",
+        }])
+        service = OrchestratorService(self.store, inventory, fleet)
+        original = service.start_pallet3_mission("robot_1", bypass_pick=True)
+
+        replacement = service.start_pallet3_mission(
+            "robot_1", bypass_pick=True, new_mission=True
+        )
+
+        replaced = self.store.get_pallet3_mission(original.mission_id)
+        self.assertNotEqual(replacement.mission_id, original.mission_id)
+        self.assertEqual(replaced.phase, "FAILED")
+        self.assertEqual(replaced.failure_detail, "SUPERSEDED_BY_NEW_POC_REQUEST")
+        self.assertEqual(
+            [command[2]["operation_id"] for command in fleet.commands],
+            [original.mission_id, replacement.mission_id],
+        )
+
+    def test_new_pallet3_poc_mission_requires_explicit_pick_bypass(self) -> None:
+        # This catches replacing an Auto Dock-linked mission without a safe new operation identity.
+        inventory = FakeInventory(stocks=[], active_operations=[])
+        fleet = FakeFleet([{
+            "robot_id": "robot_1", "state": "WAIT",
+            "operation_id": "73d5b9af-5a12-4f34-a96c-5de116df1e8e",
+            "source": "AUTO_DOCK", "detail": "AUTO_DOCK_PICK_COMPLETED",
+        }])
+
+        with self.assertRaisesRegex(ValueError, "only with bypass_pick"):
+            OrchestratorService(self.store, inventory, fleet).start_pallet3_mission(
+                "robot_1", new_mission=True
+            )
+
+        self.assertEqual(fleet.commands, [])
+
     def test_pallet3_mission_requires_arrival_confirmation_and_ignores_stale_fork_event(self) -> None:
         inventory = FakeInventory(stocks=[_stock("docker", "FRESH", 1)], active_operations=[])
         fleet = FakeFleet([{

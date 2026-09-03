@@ -136,6 +136,18 @@ curl --fail-with-body -X POST http://127.0.0.1:8083/api/v1/poc/pallet-3-missions
 응답의 `mission_id`로 상태를 조회합니다. 동일 차량에 활성 POC가 있으면 같은 미션을
 반환하므로 시작 요청을 재전송해도 Nav2 명령을 중복 발행하지 않습니다.
 
+반복 주행 POC에서 이전 활성 미션을 명시적으로 끝내고 새 `mission_id`로 다시 출발하려면
+`bypass_pick: true`와 함께 `new_mission: true`를 사용합니다. Fleet 상태가 `WAIT`일 때만
+허용되며, 기존 활성 POC는 `FAILED` / `SUPERSEDED_BY_NEW_POC_REQUEST`로 기록한 뒤 새 outbound
+waypoint 명령을 발행합니다. 이동·fork 동작 중에는 사용하지 마십시오. Auto Dock PICK에 연결된
+기본 POC에는 새 작업 ID를 안전하게 만들 수 없으므로 `new_mission`을 사용할 수 없습니다.
+
+```bash
+curl --fail-with-body -X POST http://127.0.0.1:8083/api/v1/poc/pallet-3-missions \
+  -H 'Content-Type: application/json' \
+  -d '{"robot_id":"robot_1","bypass_pick":true,"new_mission":true}'
+```
+
 ```bash
 curl --fail-with-body http://127.0.0.1:8083/api/v1/poc/pallet-3-missions/{mission_id}
 curl --fail-with-body -X POST \
