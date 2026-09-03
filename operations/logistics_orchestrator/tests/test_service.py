@@ -97,6 +97,16 @@ class FakeInventory:
         for operation in self.active_operations:
             if operation["operation_id"] == operation_id:
                 operation["status"] = "TO_PLACE"
+                for stock in self.stocks:
+                    if (
+                        stock["zone_id"] == operation["source_zone_id"]
+                        and stock["payload_type"] == operation["payload_type"]
+                    ):
+                        stock["quantity"] -= 1
+                        stock["reserved_quantity"] -= 1
+                        stock["available_quantity"] = (
+                            stock["quantity"] - stock["reserved_quantity"]
+                        )
                 self.pallet_states[robot_id] = {
                     "robot_id": robot_id,
                     "has_pallet": True,
@@ -105,6 +115,20 @@ class FakeInventory:
 
     def complete_place(self, operation_id: str, robot_id: str, idempotency_key: str) -> None:
         self.place_completion_keys.append(idempotency_key)
+        operation = next(
+            item
+            for item in self.active_operations
+            if item["operation_id"] == operation_id
+        )
+        for stock in self.stocks:
+            if (
+                stock["zone_id"] == operation["destination_zone_id"]
+                and stock["payload_type"] == operation["payload_type"]
+            ):
+                stock["quantity"] += 1
+                stock["available_quantity"] = (
+                    stock["quantity"] - stock["reserved_quantity"]
+                )
         self.active_operations = [
             operation
             for operation in self.active_operations
@@ -268,6 +292,260 @@ class OrchestratorServiceTest(unittest.TestCase):
         self.assertEqual(inventory.active_operations[0]["status"], "TO_PLACE")
         self.assertTrue(inventory.pallet_state("robot_1")["has_pallet"])
         self.assertEqual(fleet.commands, [])
+
+    def test_manual_pallet3_pick_wait_starts_outbound_without_docker_navigation(self) -> None:
+        # This catches WAIT after manual loading restarting the normal Docker Auto Dock route.
+        inventory = FakeInventory(stocks=[], active_operations=[_pallet3_operation()])
+        fleet = FakeFleet([
+            {"robot_id": "robot_1", "state": "INIT", "detail": "VEHICLE_BOOTED"}
+        ])
+        service = OrchestratorService(self.store, inventory, fleet)
+
+        service.confirm_pallet3_manual_pick("operation-1", True)
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1",
+            "state": "WAIT",
+            "source": "API",
+            "detail": "OPERATOR_READY",
+        }
+        service.reconcile()
+
+        self.assertEqual([command[0] for command in fleet.commands], ["navigate_waypoints"])
+        self.assertEqual(fleet.commands[0][2]["operation_id"], "operation-1")
+        self.assertEqual(fleet.commands[0][2]["waypoints"][-1]["y"], -2.4)
+        self.assertEqual(self.store.get_pallet3_workflow("operation-1").phase, "OUTBOUND_SENT")
+
+    def test_manual_pallet3_pick_is_rejected_after_automatic_pick_navigation_started(self) -> None:
+        # This catches bypass racing an already dispatched Docker approach command.
+        inventory = FakeInventory(stocks=[], active_operations=[_pallet3_operation()])
+        fleet = FakeFleet([
+            {"robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"}
+        ])
+        service = OrchestratorService(self.store, inventory, fleet)
+
+        service.reconcile()
+
+        with self.assertRaisesRegex(ValueError, "automatic pick has already started"):
+            service.confirm_pallet3_manual_pick("operation-1", True)
+        self.assertEqual(inventory.pick_completion_keys, [])
+
+    def test_auto_pallet3_recipe_down_completes_inventory_then_reverses_and_returns(self) -> None:
+        # This catches p3 stock changing before the physical Fork DOWN completion.
+        inventory = FakeInventory(
+            stocks=[_stock("docker", "FRESH", 1, 1), _stock("p3", "FRESH", 0)],
+            active_operations=[_pallet3_operation()],
+        )
+        fleet = FakeFleet([
+            {
+                "robot_id": "robot_1",
+                "state": "WAIT",
+                "operation_id": "operation-1",
+                "source": "AUTO_DOCK",
+                "detail": "AUTO_DOCK_PICK_COMPLETED",
+            }
+        ])
+        service = OrchestratorService(self.store, inventory, fleet)
+
+        service.reconcile()
+
+        self.assertEqual(inventory.pick_completion_keys, ["operation-1:pick"])
+        self.assertEqual(inventory.stocks[0]["quantity"], 0)
+        self.assertEqual(fleet.commands[-1][0:2], ("navigate_waypoints", "robot_1"))
+        self.assertEqual(fleet.commands[-1][2]["operation_id"], "operation-1")
+        self.assertEqual(self.store.get_pallet3_workflow("operation-1").phase, "OUTBOUND_SENT")
+
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1",
+            "state": "WAIT",
+            "operation_id": "operation-1",
+            "source": "NAV2",
+            "detail": "NAVIGATION_SUCCEEDED",
+        }
+        service.reconcile()
+
+        self.assertEqual(fleet.commands[-1], ("fork_down", "robot_1", {"operation_id": "operation-1"}))
+        self.assertEqual(inventory.place_completion_keys, [])
+
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1",
+            "state": "WAIT",
+            "operation_id": "operation-1",
+            "source": "FORK",
+            "detail": "FORK_DOWN_COMPLETE",
+        }
+        service.reconcile()
+
+        self.assertEqual(inventory.place_completion_keys, ["operation-1:place"])
+        self.assertEqual(inventory.stocks[1]["quantity"], 1)
+        self.assertEqual(
+            fleet.commands[-1],
+            (
+                "command_velocity",
+                "robot_1",
+                {
+                    "operation_id": "operation-1",
+                    "linear_x": -0.18,
+                    "linear_y": 0.0,
+                    "angular_z": 0.0,
+                    "hold_ms": 1000,
+                },
+            ),
+        )
+
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1",
+            "state": "WAIT",
+            "operation_id": "operation-1",
+            "source": "API",
+            "detail": "MANUAL_COMMAND_EXPIRED",
+        }
+        service.reconcile()
+
+        self.assertEqual(fleet.commands[-1][0:2], ("navigate_waypoints", "robot_1"))
+        self.assertEqual(fleet.commands[-1][2]["waypoints"][-1], {
+            "frame_id": "map", "x": 0.085, "y": -0.905, "yaw": 0.0,
+        })
+
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1",
+            "state": "WAIT",
+            "operation_id": "operation-1",
+            "source": "NAV2",
+            "detail": "NAVIGATION_SUCCEEDED",
+        }
+        service.reconcile()
+
+        workflow = self.store.get_pallet3_workflow("operation-1")
+        self.assertEqual(workflow.phase, "COMPLETED")
+        self.assertEqual(inventory.place_completion_keys, ["operation-1:place"])
+
+    def test_pallet3_operation_uses_its_own_zone_validation(self) -> None:
+        # This catches unrelated f/n configuration blocking an already reserved docker-to-p3 run.
+        inventory = FakeInventory(stocks=[], active_operations=[_pallet3_operation()])
+        inventory.zones = _zones(disabled={"f1"})
+        fleet = FakeFleet([
+            {"robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"}
+        ])
+
+        OrchestratorService(self.store, inventory, fleet).reconcile()
+
+        self.assertEqual(fleet.commands[0][0:2], ("navigate", "robot_1"))
+        self.assertEqual(fleet.commands[0][2]["purpose"], "PICK")
+
+    def test_pallet3_pick_phase_recovers_only_after_operator_ready(self) -> None:
+        # This catches recovery emitting a second Docker command before the operator makes it safe.
+        inventory = FakeInventory(stocks=[], active_operations=[_pallet3_operation()])
+        fleet = FakeFleet([
+            {"robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"}
+        ])
+        service = OrchestratorService(self.store, inventory, fleet)
+
+        service.reconcile()
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1", "state": "FAIL", "detail": "NAVIGATION_FAILED"
+        }
+        service.reconcile()
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"
+        }
+        service.reconcile()
+
+        self.assertEqual([command[0] for command in fleet.commands], ["navigate", "navigate"])
+        self.assertEqual(fleet.commands[-1][2]["purpose"], "PICK")
+
+    def test_pallet3_outbound_recovers_after_operator_ready(self) -> None:
+        # This catches a failed route to p3 becoming unrecoverable even though cargo is still loaded.
+        inventory = FakeInventory(stocks=[], active_operations=[_pallet3_operation()])
+        fleet = FakeFleet([
+            {"robot_id": "robot_1", "state": "INIT", "detail": "VEHICLE_BOOTED"}
+        ])
+        service = OrchestratorService(self.store, inventory, fleet)
+
+        service.confirm_pallet3_manual_pick("operation-1", True)
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"
+        }
+        service.reconcile()
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1", "state": "FAIL", "detail": "NAVIGATION_FAILED"
+        }
+        service.reconcile()
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"
+        }
+        service.reconcile()
+
+        self.assertEqual(
+            [command[0] for command in fleet.commands],
+            ["navigate_waypoints", "navigate_waypoints"],
+        )
+        self.assertEqual(self.store.get_pallet3_workflow("operation-1").phase, "OUTBOUND_SENT")
+
+    def test_pallet3_fork_down_failure_stops_without_reissuing_the_fork_command(self) -> None:
+        # This catches automatic retry of a Fork DOWN whose physical execution is unknown.
+        inventory = FakeInventory(stocks=[], active_operations=[_pallet3_operation("TO_PLACE")])
+        self.store.create_or_get_pallet3_workflow("operation-1", "robot_1")
+        self.store.transition_pallet3_workflow(
+            "operation-1", "PICK_PENDING", "OUTBOUND_SENT"
+        )
+        self.store.transition_pallet3_workflow(
+            "operation-1", "OUTBOUND_SENT", "FORK_DOWN_SENT"
+        )
+        fleet = FakeFleet([
+            {"robot_id": "robot_1", "state": "FAIL", "detail": "FORK_DOWN_TIMEOUT"}
+        ])
+        service = OrchestratorService(self.store, inventory, fleet)
+
+        service.reconcile()
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1", "state": "WAIT", "detail": "OPERATOR_READY"
+        }
+        service.reconcile()
+
+        workflow = self.store.get_pallet3_workflow("operation-1")
+        self.assertEqual(workflow.phase, "FAILED")
+        self.assertEqual(workflow.failure_detail, "FORK_DOWN_TIMEOUT")
+        self.assertEqual(fleet.commands, [("stop", "robot_1", {})])
+
+    def test_pallet3_ignores_navigation_and_fork_events_for_other_operations(self) -> None:
+        # This catches a stale vehicle report changing another pallet's inventory or fork state.
+        inventory = FakeInventory(stocks=[], active_operations=[_pallet3_operation("TO_PLACE")])
+        self.store.create_or_get_pallet3_workflow("operation-1", "robot_1")
+        self.store.transition_pallet3_workflow(
+            "operation-1", "PICK_PENDING", "OUTBOUND_SENT"
+        )
+        fleet = FakeFleet([
+            {
+                "robot_id": "robot_1",
+                "state": "WAIT",
+                "operation_id": "other-operation",
+                "source": "NAV2",
+                "detail": "NAVIGATION_SUCCEEDED",
+            }
+        ])
+        service = OrchestratorService(self.store, inventory, fleet)
+
+        service.reconcile()
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1",
+            "state": "WAIT",
+            "operation_id": "operation-1",
+            "source": "NAV2",
+            "detail": "NAVIGATION_SUCCEEDED",
+        }
+        service.reconcile()
+        fleet.vehicles[0] = {
+            "robot_id": "robot_1",
+            "state": "WAIT",
+            "operation_id": "other-operation",
+            "source": "FORK",
+            "detail": "FORK_DOWN_COMPLETE",
+        }
+        service.reconcile()
+
+        self.assertEqual([command[0] for command in fleet.commands], ["fork_down"])
+        self.assertEqual(inventory.place_completion_keys, [])
+        self.assertEqual(self.store.get_pallet3_workflow("operation-1").phase, "FORK_DOWN_SENT")
 
     def test_pallet3_mission_runs_waypoints_then_confirmed_unload_reverse_and_return(self) -> None:
         inventory = FakeInventory(stocks=[], active_operations=[])

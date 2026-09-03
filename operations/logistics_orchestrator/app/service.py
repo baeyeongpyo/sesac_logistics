@@ -249,8 +249,8 @@ class OrchestratorService:
             self._store.set_error(
                 "inventory_configuration", "; ".join(configuration_errors)
             )
-            return
-        self._store.clear_error("inventory_configuration")
+        else:
+            self._store.clear_error("inventory_configuration")
         self._store.clear_error("snapshot")
 
         snapshot = InventorySnapshot(
@@ -263,6 +263,11 @@ class OrchestratorService:
             for operation in inventory["active_operations"]
             if operation.get("robot_id")
         }
+        active_operation_ids = {
+            str(operation["operation_id"])
+            for operation in inventory["active_operations"]
+            if operation.get("operation_id")
+        }
         for vehicle in sorted(vehicles, key=lambda value: str(value["robot_id"])):
             robot_id = str(vehicle["robot_id"])
             if robot_id in active_poc_robot_ids:
@@ -271,9 +276,26 @@ class OrchestratorService:
             vehicle_state = str(vehicle.get("state", ""))
             if vehicle_state == "FAIL":
                 if operation is not None:
-                    self._store.mark_recovery_required(
-                        str(operation["operation_id"]), robot_id
+                    operation_id = str(operation["operation_id"])
+                    self._store.mark_recovery_required(operation_id, robot_id)
+                    if _is_pallet3_operation(operation):
+                        self._handle_failed_pallet3_operation(
+                            operation_id,
+                            str(vehicle.get("detail") or "VEHICLE_FAIL"),
+                        )
+                continue
+            if operation is not None and _is_pallet3_operation(operation):
+                pallet3_errors = _pallet3_configuration_errors(zones)
+                if pallet3_errors:
+                    self._store.set_error(
+                        "pallet3_inventory_configuration", "; ".join(pallet3_errors)
                     )
+                    continue
+                self._store.clear_error("pallet3_inventory_configuration")
+                if vehicle_state == "WAIT":
+                    self._continue_pallet3_operation(robot_id, vehicle, operation, zones)
+                continue
+            if configuration_errors:
                 continue
             if vehicle_state != "WAIT":
                 continue
@@ -281,6 +303,258 @@ class OrchestratorService:
                 self._assign_next_operation(robot_id, vehicle, snapshot)
             else:
                 self._continue_operation(robot_id, vehicle, operation, zones)
+
+        for workflow in self._store.list_active_pallet3_workflows():
+            if workflow.operation_id in active_operation_ids:
+                continue
+            if workflow.robot_id in active_poc_robot_ids:
+                continue
+            vehicle = vehicles_by_robot.get(workflow.robot_id)
+            if vehicle is None:
+                continue
+            if str(vehicle.get("state")) == "FAIL":
+                self._fail_pallet3_workflow(
+                    workflow, str(vehicle.get("detail") or "VEHICLE_FAIL")
+                )
+                continue
+            if str(vehicle.get("state")) == "WAIT":
+                self._continue_pallet3_return(workflow, vehicle)
+
+    def _continue_pallet3_operation(
+        self,
+        robot_id: str,
+        vehicle: dict[str, Any],
+        operation: dict[str, Any],
+        zones: list[dict[str, Any]],
+    ) -> None:
+        operation_id = str(operation["operation_id"])
+        workflow, _created = self._store.create_or_get_pallet3_workflow(
+            operation_id, robot_id
+        )
+        status = str(operation["status"])
+        detail = str(vehicle.get("detail", ""))
+        recovery = self._store.recovery_required(operation_id)
+
+        if status == "TO_PICK":
+            if (
+                detail == "NAVIGATION_SUCCEEDED"
+                and _vehicle_report_matches(vehicle, operation_id, source="NAV2")
+            ):
+                self._auto_dock_for_operation(operation, purpose="PICK")
+                return
+            if (
+                detail == "AUTO_DOCK_PICK_COMPLETED"
+                and _vehicle_report_matches(vehicle, operation_id, source="AUTO_DOCK")
+            ):
+                self._complete_pallet3_pick(operation, workflow)
+                return
+            if detail == "OPERATOR_READY":
+                self._navigate_for_operation(
+                    operation, zones, purpose="PICK", recovery=recovery
+                )
+                if recovery:
+                    self._store.clear_recovery_required(operation_id)
+            return
+
+        if status != "TO_PLACE" or workflow.phase in {"COMPLETED", "FAILED"}:
+            return
+        if workflow.phase == "PICK_PENDING" and detail == "OPERATOR_READY":
+            self._send_pallet3_outbound(workflow, recovery=recovery)
+            if recovery:
+                self._store.clear_recovery_required(operation_id)
+            return
+        if workflow.phase == "OUTBOUND_SENT":
+            if (
+                detail == "NAVIGATION_SUCCEEDED"
+                and _vehicle_report_matches(vehicle, operation_id, source="NAV2")
+            ):
+                next_workflow, transitioned = self._store.transition_pallet3_workflow(
+                    operation_id, "OUTBOUND_SENT", "FORK_DOWN_SENT"
+                )
+                if transitioned and next_workflow is not None:
+                    self._deliver_pallet3_workflow_command(
+                        next_workflow,
+                        "P3_FORK_DOWN",
+                        {"operation_id": operation_id},
+                        self._fleet.fork_down,
+                    )
+                return
+            if detail == "OPERATOR_READY" and recovery:
+                self._send_pallet3_outbound(workflow, recovery=True)
+                self._store.clear_recovery_required(operation_id)
+            return
+        if workflow.phase == "FORK_DOWN_SENT":
+            if not (
+                detail == "FORK_DOWN_COMPLETE"
+                and _vehicle_report_matches(vehicle, operation_id, source="FORK")
+            ):
+                return
+            try:
+                self._inventory.complete_place(
+                    operation_id, robot_id, f"{operation_id}:place"
+                )
+            except Exception as error:
+                self._store.set_error("pallet3_place_completion", str(error))
+                return
+            self._store.clear_error("pallet3_place_completion")
+            next_workflow, transitioned = self._store.transition_pallet3_workflow(
+                operation_id, "FORK_DOWN_SENT", "REVERSE_SENT"
+            )
+            if transitioned and next_workflow is not None:
+                self._deliver_pallet3_workflow_command(
+                    next_workflow,
+                    "P3_REVERSE",
+                    {
+                        "operation_id": operation_id,
+                        "linear_x": -0.18,
+                        "linear_y": 0.0,
+                        "angular_z": 0.0,
+                        "hold_ms": 1000,
+                    },
+                    self._fleet.command_velocity,
+                )
+            return
+        if workflow.phase == "REVERSE_SENT":
+            if not (
+                detail == "MANUAL_COMMAND_EXPIRED"
+                and _vehicle_report_matches(vehicle, operation_id, source="API")
+            ):
+                return
+            next_workflow, transitioned = self._store.transition_pallet3_workflow(
+                operation_id, "REVERSE_SENT", "RETURN_SENT"
+            )
+            if transitioned and next_workflow is not None:
+                self._deliver_pallet3_workflow_command(
+                    next_workflow,
+                    "P3_RETURN_WAYPOINTS",
+                    {
+                        "operation_id": operation_id,
+                        "purpose": "RETURN_DOCK_1",
+                        "waypoints": RETURN_DOCK1_WAYPOINTS,
+                    },
+                    self._fleet.navigate_waypoints,
+                )
+            return
+        if (
+            workflow.phase == "RETURN_SENT"
+            and detail == "NAVIGATION_SUCCEEDED"
+            and _vehicle_report_matches(vehicle, operation_id, source="NAV2")
+        ):
+            self._store.transition_pallet3_workflow(
+                operation_id, "RETURN_SENT", "COMPLETED"
+            )
+
+    def _complete_pallet3_pick(
+        self, operation: dict[str, Any], workflow: Pallet3OperationWorkflow
+    ) -> None:
+        operation_id = str(operation["operation_id"])
+        robot_id = str(operation["robot_id"])
+        try:
+            self._inventory.complete_pick(operation_id, robot_id, f"{operation_id}:pick")
+        except Exception as error:
+            self._store.set_error("pallet3_pick_completion", str(error))
+            return
+        self._store.clear_error("pallet3_pick_completion")
+        self._send_pallet3_outbound(workflow)
+
+    def _continue_pallet3_return(
+        self, workflow: Pallet3OperationWorkflow, vehicle: dict[str, Any]
+    ) -> None:
+        operation_id = workflow.operation_id
+        detail = str(vehicle.get("detail", ""))
+        if workflow.phase == "REVERSE_SENT":
+            if not (
+                detail == "MANUAL_COMMAND_EXPIRED"
+                and _vehicle_report_matches(vehicle, operation_id, source="API")
+            ):
+                return
+            next_workflow, transitioned = self._store.transition_pallet3_workflow(
+                operation_id, "REVERSE_SENT", "RETURN_SENT"
+            )
+            if transitioned and next_workflow is not None:
+                self._deliver_pallet3_workflow_command(
+                    next_workflow,
+                    "P3_RETURN_WAYPOINTS",
+                    {
+                        "operation_id": operation_id,
+                        "purpose": "RETURN_DOCK_1",
+                        "waypoints": RETURN_DOCK1_WAYPOINTS,
+                    },
+                    self._fleet.navigate_waypoints,
+                )
+            return
+        if (
+            workflow.phase == "RETURN_SENT"
+            and detail == "NAVIGATION_SUCCEEDED"
+            and _vehicle_report_matches(vehicle, operation_id, source="NAV2")
+        ):
+            self._store.transition_pallet3_workflow(
+                operation_id, "RETURN_SENT", "COMPLETED"
+            )
+
+    def _send_pallet3_outbound(
+        self, workflow: Pallet3OperationWorkflow, *, recovery: bool = False
+    ) -> None:
+        operation_id = workflow.operation_id
+        if workflow.phase == "PICK_PENDING":
+            workflow, transitioned = self._store.transition_pallet3_workflow(
+                operation_id, "PICK_PENDING", "OUTBOUND_SENT"
+            )
+            if not transitioned or workflow is None:
+                return
+        elif workflow.phase != "OUTBOUND_SENT" or not recovery:
+            return
+        command_type = "P3_OUTBOUND_WAYPOINTS"
+        if recovery and self._store.has_command(operation_id, command_type):
+            command_type = "P3_OUTBOUND_WAYPOINTS_RECOVERY"
+        self._deliver_pallet3_workflow_command(
+            workflow,
+            command_type,
+            {
+                "operation_id": operation_id,
+                "purpose": "PLACE",
+                "waypoints": OUTBOUND_PALLET3_WAYPOINTS,
+            },
+            self._fleet.navigate_waypoints,
+        )
+
+    def _deliver_pallet3_workflow_command(
+        self,
+        workflow: Pallet3OperationWorkflow,
+        command_type: str,
+        payload: dict[str, Any],
+        send: Any,
+    ) -> None:
+        command = self._deliver_command(
+            workflow.operation_id,
+            workflow.robot_id,
+            command_type,
+            payload,
+            send,
+        )
+        delivered = self._store.get_command(command.command_id)
+        if delivered is not None and delivered.status != "SENT":
+            detail = delivered.last_error or delivered.status
+            self._fail_pallet3_workflow(workflow, f"{command_type}:{detail}")
+
+    def _handle_failed_pallet3_operation(self, operation_id: str, detail: str) -> None:
+        workflow = self._store.get_pallet3_workflow(operation_id)
+        if workflow is None or workflow.phase in {"PICK_PENDING", "OUTBOUND_SENT"}:
+            return
+        self._fail_pallet3_workflow(workflow, detail)
+
+    def _fail_pallet3_workflow(
+        self, workflow: Pallet3OperationWorkflow, detail: str
+    ) -> None:
+        failed = self._store.fail_pallet3_workflow(workflow.operation_id, detail)
+        if failed is not None and failed.phase == "FAILED":
+            self._deliver_command(
+                workflow.operation_id,
+                workflow.robot_id,
+                "P3_SAFETY_STOP",
+                {},
+                lambda robot_id, _payload: self._fleet.stop(robot_id),
+            )
 
     def _reconcile_pallet3_mission(
         self, mission: Pallet3Mission, vehicle: dict[str, Any]
@@ -587,6 +861,28 @@ def _is_pallet3_operation(operation: dict[str, Any]) -> bool:
     return (
         str(operation.get("source_zone_id", "")).lower() == "docker"
         and str(operation.get("destination_zone_id", "")).lower() == "p3"
+    )
+
+
+def _pallet3_configuration_errors(zones: list[dict[str, Any]]) -> list[str]:
+    indexed = {str(zone.get("zone_id", "")).lower(): zone for zone in zones}
+    errors: list[str] = []
+    for zone_id in ("docker", "p3"):
+        zone = indexed.get(zone_id)
+        if zone is None:
+            errors.append(f"{zone_id} missing")
+        elif not bool(zone.get("enabled", False)):
+            errors.append(f"{zone_id} disabled")
+    return errors
+
+
+def _vehicle_report_matches(
+    vehicle: dict[str, Any], operation_id: str, *, source: str
+) -> bool:
+    return (
+        str(vehicle.get("state")) == "WAIT"
+        and str(vehicle.get("operation_id")) == operation_id
+        and str(vehicle.get("source")) == source
     )
 
 

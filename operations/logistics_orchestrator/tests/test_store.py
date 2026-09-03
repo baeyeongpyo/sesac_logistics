@@ -137,6 +137,23 @@ class OrchestratorStoreTest(unittest.TestCase):
         self.assertEqual(restored.phase, "COMPLETED")
         self.assertIsNotNone(restored.manual_pick_confirmed_at)
 
+    def test_active_pallet3_workflows_exclude_completed_and_failed_operations(self) -> None:
+        # This catches the return leg being lost after Inventory records PLACE completion.
+        first, _ = self.store.create_or_get_pallet3_workflow("operation-1", "robot_1")
+        second, _ = self.store.create_or_get_pallet3_workflow("operation-2", "robot_2")
+        self.store.transition_pallet3_workflow(
+            first.operation_id, "PICK_PENDING", "COMPLETED"
+        )
+        self.store.fail_pallet3_workflow(second.operation_id, "FORK_DOWN_TIMEOUT")
+        active, _ = self.store.create_or_get_pallet3_workflow("operation-3", "robot_3")
+
+        workflows = self.store.list_active_pallet3_workflows()
+
+        self.assertEqual(
+            [(workflow.operation_id, workflow.robot_id) for workflow in workflows],
+            [(active.operation_id, active.robot_id)],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

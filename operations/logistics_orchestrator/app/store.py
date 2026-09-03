@@ -282,6 +282,17 @@ class OrchestratorStore:
             ).fetchone()
         return _pallet3_workflow_from_row(row) if row is not None else None
 
+    def list_active_pallet3_workflows(self) -> list[Pallet3OperationWorkflow]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT * FROM pallet3_operation_workflows
+                WHERE phase NOT IN ('COMPLETED', 'FAILED')
+                ORDER BY created_at, operation_id
+                """
+            ).fetchall()
+        return [_pallet3_workflow_from_row(row) for row in rows]
+
     def confirm_pallet3_manual_pick(
         self, operation_id: str
     ) -> tuple[Pallet3OperationWorkflow | None, bool]:
