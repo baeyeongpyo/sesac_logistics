@@ -15,13 +15,16 @@ import time
 import urllib.request
 from pathlib import Path
 
-# The server routes vehicles; use the default DDS domain without per-vehicle IDs.
+# Select the vehicle DDS domain before rclpy is imported.
 _bootstrap_parser = argparse.ArgumentParser(add_help=False)
 _bootstrap_parser.add_argument("--vehicle", type=int, choices=(1, 2))
 _bootstrap_parser.add_argument("--ros-domain-id", type=int, default=None)
 _bootstrap_args, _ = _bootstrap_parser.parse_known_args()
-_bootstrap_domain = None
-os.environ.pop("ROS_DOMAIN_ID", None)
+_bootstrap_domain = _bootstrap_args.ros_domain_id
+if _bootstrap_domain is None and _bootstrap_args.vehicle in (1, 2):
+    _bootstrap_domain = 214 + _bootstrap_args.vehicle
+if _bootstrap_domain is not None:
+    os.environ["ROS_DOMAIN_ID"] = str(_bootstrap_domain)
 
 # The vehicle container defaults to the POSIX locale, which makes Qt render
 # Korean UI text and notes incorrectly even though metadata is written as UTF-8.
@@ -48,7 +51,8 @@ if not os.environ.get("VEHICLE_GUI_ROS_READY"):
             setup_commands.append(f"source {shlex.quote(str(workspace_setup))}")
         environment = os.environ.copy()
         environment["VEHICLE_GUI_ROS_READY"] = "1"
-        environment.pop("ROS_DOMAIN_ID", None)
+        if _bootstrap_domain is not None:
+            environment["ROS_DOMAIN_ID"] = str(_bootstrap_domain)
         # Conda's Python and libstdc++ are incompatible with the system ROS 2
         # extension modules.  Prefer the OS Python whenever the GUI is started
         # from an activated Conda shell.
@@ -6162,6 +6166,7 @@ class TeleopWindow(QMainWindow):
         self.replacement_command = [
             sys.executable, str(target),
             "--vehicle", str(self.args.vehicle),
+            "--ros-domain-id", str(self.args.ros_domain_id),
             "--config", str(self.args.pose_config),
             "--image-topic", str(self.args.tape_image_topic),
         ]
@@ -6312,8 +6317,10 @@ def main():
     if args.disable_external_webcams is None:
         args.disable_external_webcams = True
 
-    args.ros_domain_id = None
-    os.environ.pop("ROS_DOMAIN_ID", None)
+    args.ros_domain_id = (
+        214 + args.vehicle if args.ros_domain_id is None else args.ros_domain_id
+    )
+    os.environ["ROS_DOMAIN_ID"] = str(args.ros_domain_id)
     os.environ["RMW_IMPLEMENTATION"] = "rmw_fastrtps_cpp"
     # Vehicle bringup currently uses normal Fast DDS discovery. Inheriting an
     # old/dead discovery-server setting isolates this GUI from every topic.

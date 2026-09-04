@@ -1412,8 +1412,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    args.ros_domain_id = None
-    os.environ.pop("ROS_DOMAIN_ID", None)
+    os.environ["ROS_DOMAIN_ID"] = str(args.ros_domain_id or 214 + args.vehicle)
     rclpy.init()
     root = tk.Tk()
     panel = TestPanel(root, args)
