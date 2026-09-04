@@ -209,7 +209,12 @@ class DirectPallet3Runner:
             raise RunnerError("vehicle is not ready: expected state WAIT")
 
     def _request(self, method: str, url: str, body: dict[str, Any] | None) -> ApiResponse:
-        return self._transport.request(method, url, body, self.config.request_timeout_sec)
+        response = self._transport.request(
+            method, url, body, self.config.request_timeout_sec
+        )
+        if not 200 <= response.status < 300:
+            raise TransportError(f"HTTP {response.status} from {url}")
+        return response
 
     def _post_inventory(self, path: str, body: dict[str, Any]) -> None:
         self._request("POST", self._inventory(path), body)

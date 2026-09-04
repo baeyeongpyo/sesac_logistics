@@ -125,6 +125,61 @@ class DirectPallet3RunnerTests(unittest.TestCase):
             "frame_id": "map", "x": -0.420, "y": -2.000, "yaw": -1.5707963268,
         })
 
+    def test_run_does_not_return_when_place_completion_is_not_successful(self):
+        runner = self.runner_with_successful_p3_sequence("op-1")
+        self.transport._responses[-2] = response("POST", "/place-completions", 500, {})
+
+        with self.assertRaises(RunnerError):
+            runner.run()
+
+        self.assertEqual(
+            self.transport.post_paths().count(
+                "/api/v1/vehicles/robot_1/commands/navigation/waypoints"
+            ),
+            1,
+        )
+
+    def test_navigation_gate_waits_for_matching_to_place_report_before_fork_down(self):
+        transport = ScriptedTransport([
+            response("POST", "/navigation/waypoints", 202, {}),
+            response("GET", "/operations/active", 200, [
+                {"operation_id": "op-1", "status": "TO_PLACE"},
+            ]),
+            response("GET", "/vehicles/robot_1", 200, {
+                "operation_id": "op-1",
+                "source": "FORK",
+                "detail": "NAVIGATION_SUCCEEDED",
+            }),
+            response("GET", "/operations/active", 200, [
+                {"operation_id": "op-1", "status": "TO_PICK"},
+            ]),
+            response("GET", "/vehicles/robot_1", 200, {
+                "operation_id": "op-1",
+                "source": "NAV2",
+                "detail": "NAVIGATION_SUCCEEDED",
+            }),
+            response("GET", "/operations/active", 200, [
+                {"operation_id": "op-1", "status": "TO_PLACE"},
+            ]),
+            response("GET", "/vehicles/robot_1", 200, {
+                "operation_id": "op-1",
+                "source": "NAV2",
+                "detail": "NAVIGATION_SUCCEEDED",
+            }),
+            response("POST", "/fork/down", 202, {}),
+        ])
+        runner = DirectPallet3Runner(config(), transport, sleep=lambda _: None)
+
+        runner.send_outbound_route("op-1")
+        runner.wait_for_report("op-1", "NAVIGATION_SUCCEEDED", "TO_PLACE")
+        runner.send_fork_down("op-1")
+
+        self.assertEqual(transport.post_paths(), [
+            "/api/v1/vehicles/robot_1/commands/navigation/waypoints",
+            "/api/v1/vehicles/robot_1/commands/fork/down",
+        ])
+        self.assertEqual(len(transport.get_paths()), 6)
+
     def test_auto_dock_completion_gates_pick_completion_and_outbound_route(self):
         transport = ScriptedTransport([
             response("POST", "/auto-dock", 202, {}),
