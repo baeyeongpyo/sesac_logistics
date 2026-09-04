@@ -180,6 +180,62 @@ class DirectPallet3RunnerTests(unittest.TestCase):
         ])
         self.assertEqual(len(transport.get_paths()), 6)
 
+    def test_navigation_gate_blocks_fork_until_operation_detail_and_to_place_all_match(self):
+        transport = ScriptedTransport([
+            response("POST", "/navigation/waypoints", 202, {}),
+            response("GET", "/operations/active", 200, [
+                {"operation_id": "op-1", "status": "TO_PLACE"},
+            ]),
+            response("GET", "/vehicles/robot_1", 200, {
+                "operation_id": "other-op",
+                "source": "NAV2",
+                "detail": "NAVIGATION_SUCCEEDED",
+            }),
+            response("GET", "/operations/active", 200, [
+                {"operation_id": "op-1", "status": "TO_PLACE"},
+            ]),
+            response("GET", "/vehicles/robot_1", 200, {
+                "operation_id": "op-1",
+                "source": "NAV2",
+                "detail": "NAVIGATION_FAILED",
+            }),
+            response("GET", "/operations/active", 200, [
+                {"operation_id": "op-1", "status": "TO_PICK"},
+            ]),
+            response("GET", "/vehicles/robot_1", 200, {
+                "operation_id": "op-1",
+                "source": "NAV2",
+                "detail": "NAVIGATION_SUCCEEDED",
+            }),
+            response("GET", "/operations/active", 200, [
+                {"operation_id": "op-1", "status": "TO_PLACE"},
+            ]),
+            response("GET", "/vehicles/robot_1", 200, {
+                "operation_id": "op-1",
+                "source": "NAV2",
+                "detail": "NAVIGATION_SUCCEEDED",
+            }),
+            response("POST", "/fork/down", 202, {}),
+        ])
+        fork_path = "/api/v1/vehicles/robot_1/commands/fork/down"
+        blocked_polls = 0
+
+        def assert_fork_is_blocked(_: float) -> None:
+            nonlocal blocked_polls
+            blocked_polls += 1
+            self.assertNotIn(fork_path, transport.post_paths())
+
+        runner = DirectPallet3Runner(config(), transport, sleep=assert_fork_is_blocked)
+        runner.send_outbound_route("op-1")
+        runner.wait_for_report("op-1", "NAVIGATION_SUCCEEDED", "TO_PLACE")
+        runner.send_fork_down("op-1")
+
+        self.assertEqual(blocked_polls, 3)
+        self.assertEqual(transport.post_paths(), [
+            "/api/v1/vehicles/robot_1/commands/navigation/waypoints",
+            fork_path,
+        ])
+
     def test_auto_dock_completion_gates_pick_completion_and_outbound_route(self):
         transport = ScriptedTransport([
             response("POST", "/auto-dock", 202, {}),
