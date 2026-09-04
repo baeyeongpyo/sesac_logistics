@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import socket
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
@@ -21,7 +22,7 @@ class TransportError(RunnerError):
 @dataclass(frozen=True)
 class ApiResponse:
     status: int
-    body: dict[str, Any]
+    body: Any
 
 
 class ApiTransport(Protocol):
@@ -59,8 +60,8 @@ class UrllibTransport:
                     parsed_body = json.loads(raw_body.decode("utf-8")) if raw_body else {}
                 except (UnicodeDecodeError, json.JSONDecodeError) as error:
                     raise TransportError(f"invalid JSON response from {url}") from error
-                if not isinstance(parsed_body, dict):
-                    raise TransportError(f"JSON response from {url} must be an object")
+                if not isinstance(parsed_body, (dict, list)):
+                    raise TransportError(f"JSON response from {url} must be an object or array")
                 return ApiResponse(status=response.status, body=parsed_body)
         except HTTPError as error:
             raise TransportError(f"HTTP {error.code} from {url}") from error
@@ -85,7 +86,7 @@ class DirectPallet3Runner:
     ) -> None:
         self.config = config
         self._transport = transport or UrllibTransport()
-        self._sleep = sleep
+        self._sleep = sleep or time.sleep
 
     def create_operation(self) -> str:
         self._require_vehicle_wait()
@@ -102,6 +103,60 @@ class DirectPallet3Runner:
         )
         return self._required_string(response.body, "operation_id")
 
+    def send_auto_dock_pick(self, operation_id: str) -> None:
+        self._post_fleet("/commands/auto-dock", {
+            "operation_id": operation_id,
+            "operation": "PICK",
+            "product_type": "NORMAL",
+            "location": "DOCK_1",
+            "target": {"type": "NEAREST"},
+        })
+
+    def wait_for_report(
+        self, operation_id: str, detail: str, expected_inventory_status: str
+    ) -> None:
+        expected_source = {
+            "AUTO_DOCK_PICK_COMPLETED": "AUTO_DOCK",
+            "NAVIGATION_SUCCEEDED": "NAV2",
+        }.get(detail)
+        if expected_source is None:
+            raise RunnerError(f"unsupported completion detail: {detail}")
+
+        while True:
+            active_operations = self._request(
+                "GET", self._inventory("/api/v1/operations/active"), None
+            ).body
+            vehicle = self._request(
+                "GET", self._fleet(f"/api/v1/vehicles/{self.config.robot_id}"), None
+            ).body
+            if (
+                self._has_active_operation(
+                    active_operations, operation_id, expected_inventory_status
+                )
+                and vehicle.get("operation_id") == operation_id
+                and vehicle.get("source") == expected_source
+                and vehicle.get("detail") == detail
+            ):
+                return
+            self._sleep(0.5)
+
+    def complete_pick(self, operation_id: str) -> None:
+        self._post_inventory(f"/api/v1/operations/{operation_id}/pick-completions", {
+            "robot_id": self.config.robot_id,
+            "idempotency_key": f"{operation_id}:pick",
+        })
+
+    def send_outbound_route(self, operation_id: str) -> None:
+        self._post_fleet("/commands/navigation/waypoints", {
+            "operation_id": operation_id,
+            "purpose": "PLACE",
+            "waypoints": [
+                {"frame_id": "map", "x": -0.440, "y": -0.900, "yaw": 0.0},
+                {"frame_id": "map", "x": -0.440, "y": -1.690, "yaw": -1.5707963267948966},
+                {"frame_id": "map", "x": -0.440, "y": -2.340, "yaw": -1.5707963267948966},
+            ],
+        })
+
     def _require_vehicle_wait(self) -> None:
         response = self._request(
             "GET", self._fleet(f"/api/v1/vehicles/{self.config.robot_id}"), None
@@ -112,11 +167,32 @@ class DirectPallet3Runner:
     def _request(self, method: str, url: str, body: dict[str, Any] | None) -> ApiResponse:
         return self._transport.request(method, url, body, self.config.request_timeout_sec)
 
+    def _post_inventory(self, path: str, body: dict[str, Any]) -> None:
+        self._request("POST", self._inventory(path), body)
+
+    def _post_fleet(self, path: str, body: dict[str, Any]) -> None:
+        self._request(
+            "POST",
+            self._fleet(f"/api/v1/vehicles/{self.config.robot_id}{path}"),
+            body,
+        )
+
     def _inventory(self, path: str) -> str:
         return f"{self.config.inventory_url.rstrip('/')}{path}"
 
     def _fleet(self, path: str) -> str:
         return f"{self.config.fleet_url.rstrip('/')}{path}"
+
+    @staticmethod
+    def _has_active_operation(
+        active_operations: Any, operation_id: str, expected_status: str
+    ) -> bool:
+        return isinstance(active_operations, list) and any(
+            operation.get("operation_id") == operation_id
+            and operation.get("status") == expected_status
+            for operation in active_operations
+            if isinstance(operation, dict)
+        )
 
     @staticmethod
     def _required_string(body: dict[str, Any], key: str) -> str:
