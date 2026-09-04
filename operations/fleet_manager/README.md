@@ -15,6 +15,32 @@ docker compose --env-file .env up --build
 
 기본 API 주소는 `.env`의 `FLEET_MANAGER_API_PORT`를 사용합니다.
 
+### Pallet 3 직접 실행 runner
+
+Logistics Orchestrator를 거치지 않고 `NORMAL` 파렛트 하나를 `docker`에서
+`p3`로 옮길 때는 Fleet Manager 호스트에서 다음과 같이 실행합니다.
+
+```bash
+cd /opt/logistics/operations/fleet_manager
+python3 pallet3_direct_runner.py --robot-id robot_1
+```
+
+runner는 기본적으로 Inventory `http://192.168.100.27:8081`과 Fleet Manager
+`http://192.168.100.27:8090`을 사용합니다. 배포 환경이 다르면
+`--inventory-url`, `--fleet-url`, `--request-timeout-sec`로 덮어쓸 수 있습니다.
+차량의 `:8083` Logistics Orchestrator나 ROS action/topic을 직접 호출하지 않으며,
+모든 차량 명령은 Fleet Manager와 Fleet Bridge를 통과합니다. 따라서 기존 Fleet
+상태 보고와 대시보드에서 주행 및 장치 보고를 계속 확인할 수 있습니다.
+
+P3의 `place-completions`가 성공해 물류 `PLACE_COMPLETE`에 도달하면 Inventory 작업은
+종료됩니다. 이후 Dock 1 복귀 명령에는 원래 `operation_id`가 없고, runner는 복귀
+완료 보고를 기다리지 않습니다. `COMMUNICATION_LOST`(`CommunicationLost`),
+`OPERATION_STATE_MISMATCH`(`OperationStateMismatch`), 동일 작업의 Fleet `FAIL`,
+명령 전달 실패, `SIGINT` 또는 `SIGTERM`이면 runner는 실패 종료합니다. 이때
+Inventory 작업을 자동 완료하거나 취소하지 않으므로 운영자가 활성 작업을 확인해
+복구해야 합니다. signal 종료는 Fleet Manager stop 명령을 한 번 best-effort로
+요청합니다.
+
 `VEHICLE_REGISTRY_PATH`의 기본값은 `/app/config/vehicles.yaml`입니다. 통합
 `operations/compose.local.yaml`에서는 이 파일이 모델별 Bridge endpoint와 차량별
 모델 할당을 정의합니다.

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import argparse
 import json
+import signal
 import socket
+import sys
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
@@ -17,6 +21,31 @@ class RunnerError(RuntimeError):
 
 class TransportError(RunnerError):
     """An HTTP request could not complete successfully."""
+
+
+class CommunicationLost(RunnerError):
+    """Inventory connectivity stayed unavailable past the safety grace period."""
+
+
+class OperationStateMismatch(RunnerError):
+    """The tracked Inventory operation is absent or in an unexpected state."""
+
+    def __init__(
+        self, operation_id: str, expected_status: str, operation: Any
+    ) -> None:
+        actual_status = operation.get("status") if isinstance(operation, dict) else None
+        super().__init__(
+            f"operation {operation_id} expected active status {expected_status}, "
+            f"got {actual_status!r}"
+        )
+
+
+class FleetFailure(RunnerError):
+    """The Fleet snapshot reports failure for the tracked operation."""
+
+
+class RunnerInterrupted(RunnerError):
+    """The direct runner was interrupted after a best-effort vehicle stop."""
 
 
 @dataclass(frozen=True)
@@ -82,11 +111,15 @@ class DirectPallet3Runner:
         self,
         config: RunnerConfig,
         transport: ApiTransport | None = None,
-        sleep: Any = None,
+        sleep: Callable[[float], None] | None = None,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
         self.config = config
         self._transport = transport or UrllibTransport()
         self._sleep = sleep or time.sleep
+        self._monotonic = monotonic or time.monotonic
+        self._inventory_outage_started_at: float | None = None
+        self._stop_requested = False
 
     def create_operation(self) -> str:
         self._require_vehicle_wait()
@@ -125,17 +158,25 @@ class DirectPallet3Runner:
             raise RunnerError(f"unsupported completion detail: {detail}")
 
         while True:
-            active_operations = self._request(
-                "GET", self._inventory("/api/v1/operations/active"), None
-            ).body
-            vehicle = self._request(
-                "GET", self._fleet(f"/api/v1/vehicles/{self.config.robot_id}"), None
-            ).body
+            self._require_active_operation(operation_id, expected_inventory_status)
+            vehicle = self._require_object(
+                self._request(
+                    "GET",
+                    self._fleet(f"/api/v1/vehicles/{self.config.robot_id}"),
+                    None,
+                ).body,
+                "Fleet vehicle snapshot",
+            )
             if (
-                self._has_active_operation(
-                    active_operations, operation_id, expected_inventory_status
+                vehicle.get("operation_id") == operation_id
+                and vehicle.get("state") == "FAIL"
+            ):
+                raise FleetFailure(
+                    f"vehicle {self.config.robot_id} reported FAIL for operation "
+                    f"{operation_id}"
                 )
-                and vehicle.get("operation_id") == operation_id
+            if (
+                vehicle.get("operation_id") == operation_id
                 and vehicle.get("source") == expected_source
                 and vehicle.get("detail") == detail
             ):
@@ -201,12 +242,62 @@ class DirectPallet3Runner:
         self.complete_place(operation_id)
         self.send_return_route()
 
+    def request_stop(self, _signum: int | None = None, _frame: Any = None) -> None:
+        if not self._stop_requested:
+            self._stop_requested = True
+            try:
+                self._post_fleet("/commands/stop", {})
+            except Exception:
+                pass
+        raise RunnerInterrupted("direct pallet 3 runner interrupted")
+
     def _require_vehicle_wait(self) -> None:
-        response = self._request(
-            "GET", self._fleet(f"/api/v1/vehicles/{self.config.robot_id}"), None
+        vehicle = self._require_object(
+            self._request(
+                "GET", self._fleet(f"/api/v1/vehicles/{self.config.robot_id}"), None
+            ).body,
+            "Fleet vehicle snapshot",
         )
-        if response.body.get("state") != "WAIT":
+        if vehicle.get("state") != "WAIT":
             raise RunnerError("vehicle is not ready: expected state WAIT")
+
+    def _require_active_operation(
+        self, operation_id: str, expected_status: str
+    ) -> None:
+        while True:
+            try:
+                operations = self._request(
+                    "GET", self._inventory("/api/v1/operations/active"), None
+                ).body
+            except TransportError as error:
+                self._record_inventory_outage(error)
+                continue
+
+            self._inventory_outage_started_at = None
+            if not isinstance(operations, list):
+                raise RunnerError("Inventory active operations response must be an array")
+            operation = next(
+                (
+                    item
+                    for item in operations
+                    if isinstance(item, dict)
+                    and item.get("operation_id") == operation_id
+                ),
+                None,
+            )
+            if operation is None or operation.get("status") != expected_status:
+                raise OperationStateMismatch(operation_id, expected_status, operation)
+            return
+
+    def _record_inventory_outage(self, error: TransportError) -> None:
+        now = self._monotonic()
+        if self._inventory_outage_started_at is None:
+            self._inventory_outage_started_at = now
+        if now - self._inventory_outage_started_at >= 5.0:
+            raise CommunicationLost(
+                f"Inventory communication lost for 5.0 seconds: {error}"
+            ) from error
+        self._sleep(0.5)
 
     def _request(self, method: str, url: str, body: dict[str, Any] | None) -> ApiResponse:
         response = self._transport.request(
@@ -233,19 +324,63 @@ class DirectPallet3Runner:
         return f"{self.config.fleet_url.rstrip('/')}{path}"
 
     @staticmethod
-    def _has_active_operation(
-        active_operations: Any, operation_id: str, expected_status: str
-    ) -> bool:
-        return isinstance(active_operations, list) and any(
-            operation.get("operation_id") == operation_id
-            and operation.get("status") == expected_status
-            for operation in active_operations
-            if isinstance(operation, dict)
-        )
+    def _require_object(body: Any, context: str) -> dict[str, Any]:
+        if not isinstance(body, dict):
+            raise RunnerError(f"{context} response must be a JSON object")
+        return body
 
-    @staticmethod
-    def _required_string(body: dict[str, Any], key: str) -> str:
+    @classmethod
+    def _required_string(cls, body: Any, key: str) -> str:
+        body = cls._require_object(body, "API")
         value = body.get(key)
         if not isinstance(value, str) or not value:
             raise RunnerError(f"response is missing required string field: {key}")
         return value
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run one direct NORMAL pallet delivery from docker to P3."
+    )
+    parser.add_argument("--robot-id", required=True, help="Fleet robot identifier")
+    parser.add_argument(
+        "--inventory-url",
+        default=RunnerConfig.inventory_url,
+        help="Inventory API base URL (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--fleet-url",
+        default=RunnerConfig.fleet_url,
+        help="Fleet Manager API base URL (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--request-timeout-sec",
+        type=float,
+        default=RunnerConfig.request_timeout_sec,
+        help="HTTP request timeout in seconds (default: %(default)s)",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    runner = DirectPallet3Runner(
+        RunnerConfig(
+            robot_id=args.robot_id,
+            inventory_url=args.inventory_url,
+            fleet_url=args.fleet_url,
+            request_timeout_sec=args.request_timeout_sec,
+        )
+    )
+    signal.signal(signal.SIGINT, runner.request_stop)
+    signal.signal(signal.SIGTERM, runner.request_stop)
+    try:
+        runner.run()
+    except RunnerError as error:
+        print(f"{type(error).__name__}: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
