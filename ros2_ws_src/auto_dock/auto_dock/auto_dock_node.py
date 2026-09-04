@@ -4786,15 +4786,27 @@ class AutoDockNode(Node):
                         if getattr(
                             self, "nearest_center_reconfirm_pending", False
                         ):
-                            self.stop_drive()
-                            self.publish_status(
-                                "waiting",
-                                "nearest_center_recheck_waiting_visual",
-                                measurement_reason=(
-                                    partial_reason or identity_reason
-                                ),
-                                entity_id=self.target_entity_id,
+                            due_at = getattr(
+                                self, "nearest_center_reconfirm_due_at", None
                             )
+                            if due_at is not None:
+                                center_tolerance = self.number(
+                                    "coarse_center_error_max",
+                                    0.10, 0.01, 0.50,
+                                )
+                                AutoDockNode.tick_nearest_optimal_recheck(
+                                    self, now, center_tolerance
+                                )
+                            else:
+                                self.stop_drive()
+                                self.publish_status(
+                                    "waiting",
+                                    "nearest_center_recheck_waiting_visual",
+                                    measurement_reason=(
+                                        partial_reason or identity_reason
+                                    ),
+                                    entity_id=self.target_entity_id,
+                                )
                             return
                         self.stop_drive()
                         self.state = "docking"

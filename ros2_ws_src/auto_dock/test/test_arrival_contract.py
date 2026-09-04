@@ -2649,6 +2649,53 @@ def test_nearest_recheck_wait_ignores_center_error_until_deadline(monkeypatch):
     assert statuses[-1][2]["remaining_sec"] == pytest.approx(2.0)
 
 
+def test_nearest_recheck_rebinds_when_locked_entity_disappears(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    optimal_candidate = {
+        "entity_id": 182,
+        "matrix": ["diamond", "clover", "heart", "diamond"],
+        "center_error": 0.01,
+        "pnp": {"forward_distance_cm": 30.0},
+    }
+    fake.target_type = "NEAREST"
+    fake.target_entity_id = 204
+    fake.target_left = "clover"
+    fake.target_right = "clover"
+    fake.target_world = {"x": 1.0, "y": 0.0, "yaw": 0.0}
+    fake.nearest_center_reconfirm_pending = True
+    fake.nearest_center_reconfirm_due_at = 10.0
+    fake.nearest_center_reconfirm_source_stamp_ns = 100
+    fake.latest_detection = {"source_stamp_ns": 101}
+    fake.identity_measurement = lambda: (None, None, "locked_entity_mismatch")
+    fake.tracked_partial_measurement = lambda: (
+        None, None, "partial_entity_unavailable"
+    )
+    fake.visible_target_top_pair_measurement = lambda: (
+        None, None, "visible_target_top_pair_unavailable"
+    )
+    fake.valid_measurement = lambda: (
+        optimal_candidate, optimal_candidate["pnp"], None
+    )
+    fake.number = lambda key, default, *_args: default
+    fake.stop_drive = lambda *_args: None
+    fake.send_yolo_target = lambda: None
+    fake.update_world_target = lambda *_args, **_kwargs: True
+    fake.reset_coarse_alignment = lambda: None
+    statuses = []
+    fake.publish_status = lambda state, reason, **extra: statuses.append(
+        (state, reason, extra)
+    )
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.5)
+
+    AutoDockNode.tick_coarse_align(fake)
+
+    assert fake.target_entity_id == 182
+    assert [fake.target_left, fake.target_right] == ["diamond", "clover"]
+    assert fake.nearest_center_reconfirm_pending is False
+    assert fake.state == "docking"
+    assert statuses[-1][1] == "nearest_optimal_target_reconfirmed"
+
+
 def test_nearest_uses_fresh_optimal_target_after_center_recheck(monkeypatch):
     fake = type("FakeDock", (), {})()
     candidate = {
