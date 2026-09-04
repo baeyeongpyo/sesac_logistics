@@ -2599,7 +2599,9 @@ def test_nearest_centered_waits_before_optimal_target_recheck(monkeypatch):
     fake.coarse_alignment_started_at = 10.0
     fake.coarse_depth_fallback_frames = 0
     fake.coarse_last_counted_stamp = None
-    fake.number = lambda key, default, *_args: default
+    fake.number = lambda key, default, *_args: (
+        3.1 if key == "nearest_optimal_recheck_delay_sec" else default
+    )
     fake.stop_drive = lambda *_args: None
     fake.publish_drive = lambda *_args: pytest.fail("must remain stopped")
     statuses = []
@@ -2610,7 +2612,7 @@ def test_nearest_centered_waits_before_optimal_target_recheck(monkeypatch):
 
     AutoDockNode.tick_coarse_align(fake)
 
-    assert fake.nearest_center_reconfirm_due_at == pytest.approx(12.3)
+    assert fake.nearest_center_reconfirm_due_at == pytest.approx(13.1)
     assert statuses[-1][1] == "nearest_centered_waiting_optimal_recheck"
 
 

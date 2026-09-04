@@ -4847,7 +4847,7 @@ class AutoDockNode(Node):
             due_at = getattr(self, "nearest_center_reconfirm_due_at", None)
             if due_at is None:
                 delay = self.number(
-                    "candidate_stop_delay_sec", 2.3, 0.0, 5.0
+                    "nearest_optimal_recheck_delay_sec", 2.3, 0.0, 10.0
                 )
                 self.nearest_center_reconfirm_due_at = now + delay
                 self.nearest_center_reconfirm_source_stamp_ns = (
