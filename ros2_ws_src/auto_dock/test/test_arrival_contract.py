@@ -2616,6 +2616,39 @@ def test_nearest_centered_waits_before_optimal_target_recheck(monkeypatch):
     assert statuses[-1][1] == "nearest_centered_waiting_optimal_recheck"
 
 
+def test_nearest_recheck_wait_ignores_center_error_until_deadline(monkeypatch):
+    fake = type("FakeDock", (), {})()
+    candidate = {"entity_id": 8, "center_error": 0.47}
+    pnp = {"depth_fallback": False}
+    fake.target_type = "NEAREST"
+    fake.target_entity_id = 8
+    fake.target_world = {"x": 1.0, "y": 0.0, "yaw": 0.0}
+    fake.nearest_center_reconfirm_pending = True
+    fake.nearest_center_reconfirm_due_at = 13.0
+    fake.nearest_center_reconfirm_source_stamp_ns = 100
+    fake.latest_detection = {"source_stamp_ns": 101}
+    fake.identity_measurement = lambda: (candidate, pnp, None)
+    fake.tracked_partial_measurement = lambda: (None, None, None)
+    fake.valid_measurement = lambda: (candidate, pnp, None)
+    fake.coarse_alignment_started_at = 10.0
+    fake.number = lambda key, default, *_args: default
+    fake.stop_drive = lambda *_args: None
+    fake.publish_drive = lambda *_args: pytest.fail(
+        "recheck delay must remain stationary"
+    )
+    statuses = []
+    fake.publish_status = lambda state, reason, **extra: statuses.append(
+        (state, reason, extra)
+    )
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 11.0)
+
+    AutoDockNode.tick_coarse_align(fake)
+
+    assert fake.nearest_center_reconfirm_due_at == pytest.approx(13.0)
+    assert statuses[-1][1] == "nearest_centered_waiting_optimal_recheck"
+    assert statuses[-1][2]["remaining_sec"] == pytest.approx(2.0)
+
+
 def test_nearest_uses_fresh_optimal_target_after_center_recheck(monkeypatch):
     fake = type("FakeDock", (), {})()
     candidate = {

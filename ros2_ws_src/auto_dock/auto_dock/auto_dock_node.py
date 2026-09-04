@@ -4684,6 +4684,84 @@ class AutoDockNode(Node):
         self.candidate_confirmation_started_at = None
         self.candidate_retry_not_before = 0.0
 
+    def tick_nearest_optimal_recheck(self, now, center_tolerance):
+        """Hold still for the full delay, then re-evaluate on a fresh frame."""
+        self.stop_drive()
+        due_at = self.nearest_center_reconfirm_due_at
+        if now < due_at:
+            self.publish_status(
+                "running", "nearest_centered_waiting_optimal_recheck",
+                remaining_sec=round(due_at - now, 2),
+                entity_id=self.target_entity_id,
+            )
+            return
+        source_stamp = (self.latest_detection or {}).get("source_stamp_ns")
+        if (
+            source_stamp is None
+            or source_stamp == self.nearest_center_reconfirm_source_stamp_ns
+        ):
+            self.publish_status(
+                "waiting", "nearest_optimal_recheck_waiting_fresh_frame",
+                entity_id=self.target_entity_id,
+            )
+            return
+        previous_entity_id = self.target_entity_id
+        self.target_entity_id = None
+        optimal_candidate, optimal_pnp, optimal_reason = self.valid_measurement()
+        self.target_entity_id = previous_entity_id
+        if optimal_candidate is None:
+            self.publish_status(
+                "waiting", "nearest_optimal_recheck_not_confirmed",
+                measurement_reason=optimal_reason,
+                previous_entity_id=previous_entity_id,
+                nearest_decision=getattr(self, "last_nearest_decision", None),
+            )
+            return
+        self.target_entity_id = optimal_candidate.get("entity_id")
+        matrix = optimal_candidate.get("matrix") or []
+        if len(matrix) >= 2:
+            self.target_left, self.target_right = matrix[:2]
+            self.send_yolo_target()
+        self.target_last_center_error = optimal_candidate.get("center_error")
+        self.nearest_alignment_distance_cm = (
+            DockInventoryTracker.entity_distance_cm(optimal_candidate)
+        )
+        if not self.update_world_target(optimal_candidate, optimal_pnp):
+            self.cancel("odom_missing")
+            return
+        try:
+            optimal_center_error = float(
+                optimal_candidate.get("center_error", 999.0)
+            )
+        except (TypeError, ValueError):
+            optimal_center_error = 999.0
+        if (
+            not math.isfinite(optimal_center_error)
+            or abs(optimal_center_error) > center_tolerance
+        ):
+            self.nearest_center_reconfirm_due_at = None
+            self.nearest_center_reconfirm_source_stamp_ns = None
+            self.reset_coarse_alignment()
+            self.publish_status(
+                "running", "nearest_optimal_target_recenter",
+                previous_entity_id=previous_entity_id,
+                entity_id=self.target_entity_id,
+                center_error=round(optimal_center_error, 4),
+                nearest_decision=getattr(self, "last_nearest_decision", None),
+            )
+            return
+        self.nearest_center_reconfirm_pending = False
+        self.nearest_center_reconfirm_due_at = None
+        self.nearest_center_reconfirm_source_stamp_ns = None
+        self.state = "docking"
+        self.reset_coarse_alignment()
+        self.publish_status(
+            "running", "nearest_optimal_target_reconfirmed",
+            previous_entity_id=previous_entity_id,
+            entity_id=self.target_entity_id,
+            nearest_decision=getattr(self, "last_nearest_decision", None),
+        )
+
     def tick_coarse_align(self):
         now = time.monotonic()
         if (
@@ -4709,7 +4787,6 @@ class AutoDockNode(Node):
                             self, "nearest_center_reconfirm_pending", False
                         ):
                             self.stop_drive()
-                            self.nearest_center_reconfirm_due_at = None
                             self.publish_status(
                                 "waiting",
                                 "nearest_center_recheck_waiting_visual",
@@ -4793,6 +4870,15 @@ class AutoDockNode(Node):
             self.publish_status("running", "coarse_center_error_invalid")
             return
         center_tolerance = self.number("coarse_center_error_max", 0.10, 0.01, 0.50)
+        if (
+            getattr(self, "target_type", "SYMBOLS") == "NEAREST"
+            and getattr(self, "nearest_center_reconfirm_pending", False)
+            and getattr(self, "nearest_center_reconfirm_due_at", None) is not None
+        ):
+            AutoDockNode.tick_nearest_optimal_recheck(
+                self, now, center_tolerance
+            )
+            return
         if abs(center_error) > center_tolerance:
             self.target_last_center_error = center_error
             self.coarse_depth_fallback_frames = 0
@@ -4844,104 +4930,17 @@ class AutoDockNode(Node):
             getattr(self, "target_type", "SYMBOLS") == "NEAREST"
             and getattr(self, "nearest_center_reconfirm_pending", False)
         ):
-            due_at = getattr(self, "nearest_center_reconfirm_due_at", None)
-            if due_at is None:
-                delay = self.number(
-                    "nearest_optimal_recheck_delay_sec", 2.3, 0.0, 10.0
-                )
-                self.nearest_center_reconfirm_due_at = now + delay
-                self.nearest_center_reconfirm_source_stamp_ns = (
-                    (self.latest_detection or {}).get("source_stamp_ns")
-                )
-                self.publish_status(
-                    "running", "nearest_centered_waiting_optimal_recheck",
-                    delay_sec=delay,
-                    entity_id=self.target_entity_id,
-                )
-                return
-            if now < due_at:
-                self.publish_status(
-                    "running", "nearest_centered_waiting_optimal_recheck",
-                    remaining_sec=round(due_at - now, 2),
-                    entity_id=self.target_entity_id,
-                )
-                return
-            source_stamp = (self.latest_detection or {}).get("source_stamp_ns")
-            if (
-                source_stamp is None
-                or source_stamp
-                == getattr(
-                    self, "nearest_center_reconfirm_source_stamp_ns", None
-                )
-            ):
-                self.publish_status(
-                    "waiting", "nearest_optimal_recheck_waiting_fresh_frame",
-                    entity_id=self.target_entity_id,
-                )
-                return
-            previous_entity_id = self.target_entity_id
-            self.target_entity_id = None
-            optimal_candidate, optimal_pnp, optimal_reason = (
-                self.valid_measurement()
+            delay = self.number(
+                "nearest_optimal_recheck_delay_sec", 2.3, 0.0, 10.0
             )
-            self.target_entity_id = previous_entity_id
-            if optimal_candidate is None:
-                self.publish_status(
-                    "waiting", "nearest_optimal_recheck_not_confirmed",
-                    measurement_reason=optimal_reason,
-                    previous_entity_id=previous_entity_id,
-                    nearest_decision=getattr(
-                        self, "last_nearest_decision", None
-                    ),
-                )
-                return
-            self.target_entity_id = optimal_candidate.get("entity_id")
-            matrix = optimal_candidate.get("matrix") or []
-            if len(matrix) >= 2:
-                self.target_left, self.target_right = matrix[:2]
-                self.send_yolo_target()
-            self.target_last_center_error = optimal_candidate.get(
-                "center_error"
+            self.nearest_center_reconfirm_due_at = now + delay
+            self.nearest_center_reconfirm_source_stamp_ns = (
+                (self.latest_detection or {}).get("source_stamp_ns")
             )
-            self.nearest_alignment_distance_cm = (
-                DockInventoryTracker.entity_distance_cm(optimal_candidate)
-            )
-            if not self.update_world_target(optimal_candidate, optimal_pnp):
-                self.cancel("odom_missing")
-                return
-            try:
-                optimal_center_error = float(
-                    optimal_candidate.get("center_error", 999.0)
-                )
-            except (TypeError, ValueError):
-                optimal_center_error = 999.0
-            if (
-                not math.isfinite(optimal_center_error)
-                or abs(optimal_center_error) > center_tolerance
-            ):
-                self.nearest_center_reconfirm_due_at = None
-                self.nearest_center_reconfirm_source_stamp_ns = None
-                self.reset_coarse_alignment()
-                self.publish_status(
-                    "running", "nearest_optimal_target_recenter",
-                    previous_entity_id=previous_entity_id,
-                    entity_id=self.target_entity_id,
-                    center_error=round(optimal_center_error, 4),
-                    nearest_decision=getattr(
-                        self, "last_nearest_decision", None
-                    ),
-                )
-                return
-            self.nearest_center_reconfirm_pending = False
-            self.nearest_center_reconfirm_due_at = None
-            self.nearest_center_reconfirm_source_stamp_ns = None
-            self.state = "docking"
-            self.reset_coarse_alignment()
             self.publish_status(
-                "running", "nearest_optimal_target_reconfirmed",
-                previous_entity_id=previous_entity_id,
+                "running", "nearest_centered_waiting_optimal_recheck",
+                delay_sec=delay,
                 entity_id=self.target_entity_id,
-                nearest_decision=getattr(self, "last_nearest_decision", None),
             )
             return
         if (
