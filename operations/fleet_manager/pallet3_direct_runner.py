@@ -243,13 +243,16 @@ class DirectPallet3Runner:
         self.send_return_route()
 
     def request_stop(self, _signum: int | None = None, _frame: Any = None) -> None:
+        self._best_effort_stop()
+        raise RunnerInterrupted("direct pallet 3 runner interrupted")
+
+    def _best_effort_stop(self) -> None:
         if not self._stop_requested:
             self._stop_requested = True
             try:
                 self._post_fleet("/commands/stop", {})
             except Exception:
                 pass
-        raise RunnerInterrupted("direct pallet 3 runner interrupted")
 
     def _require_vehicle_wait(self) -> None:
         vehicle = self._require_object(
@@ -294,6 +297,7 @@ class DirectPallet3Runner:
         if self._inventory_outage_started_at is None:
             self._inventory_outage_started_at = now
         if now - self._inventory_outage_started_at >= 5.0:
+            self._best_effort_stop()
             raise CommunicationLost(
                 f"Inventory communication lost for 5.0 seconds: {error}"
             ) from error

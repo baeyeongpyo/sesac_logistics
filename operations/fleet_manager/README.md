@@ -20,6 +20,29 @@ docker compose --env-file .env up --build
 Logistics Orchestrator를 거치지 않고 `NORMAL` 파렛트 하나를 `docker`에서
 `p3`로 옮길 때는 Fleet Manager 호스트에서 다음과 같이 실행합니다.
 
+실행 전 다음 fail-closed preflight를 모두 충족해야 합니다. 하나라도 확인할 수
+없으면 runner를 실행하지 마십시오.
+
+1. runner가 실행되는 동안 Logistics Orchestrator 프로세스/컨테이너를 중지합니다.
+   통합 Compose의 실제 서비스 이름은 `logistics-orchestrator-api`입니다.
+2. Fleet Manager의 런타임 `ORCHESTRATOR_EVENT_URL`을 빈 값으로 설정하고
+   `fleet-manager-api`를 재생성 또는 재시작합니다. 실행 중인 컨테이너 밖에서 환경
+   변수만 바꾸는 것으로는 충분하지 않습니다.
+3. Orchestrator가 중지됐고 Fleet Manager가 Fleet report를 `:8083`으로 forwarding하지
+   않는 상태임을 운영자가 확인한 뒤에만 runner를 시작합니다. runner 자체는 이 서비스
+   설정을 확인할 수 없습니다.
+
+저장소의 통합 Compose 구성을 사용하는 예시는 다음과 같습니다.
+
+```bash
+cd /opt/logistics/operations
+docker compose -f compose.local.yaml stop logistics-orchestrator-api
+ORCHESTRATOR_EVENT_URL= docker compose -f compose.local.yaml up -d --force-recreate fleet-manager-api
+```
+
+`ORCHESTRATOR_EVENT_URL`을 비워도 Fleet Manager의 SQLite 상태 저장과 상태 변경 로그,
+대시보드 표시는 유지됩니다. 차단되는 것은 Orchestrator `:8083`으로의 event forwarding뿐입니다.
+
 ```bash
 cd /opt/logistics/operations/fleet_manager
 python3 pallet3_direct_runner.py --robot-id robot_1
@@ -34,12 +57,18 @@ runner는 기본적으로 Inventory `http://192.168.100.27:8081`과 Fleet Manage
 
 P3의 `place-completions`가 성공해 물류 `PLACE_COMPLETE`에 도달하면 Inventory 작업은
 종료됩니다. 이후 Dock 1 복귀 명령에는 원래 `operation_id`가 없고, runner는 복귀
-완료 보고를 기다리지 않습니다. `COMMUNICATION_LOST`(`CommunicationLost`),
-`OPERATION_STATE_MISMATCH`(`OperationStateMismatch`), 동일 작업의 Fleet `FAIL`,
-명령 전달 실패, `SIGINT` 또는 `SIGTERM`이면 runner는 실패 종료합니다. 이때
-Inventory 작업을 자동 완료하거나 취소하지 않으므로 운영자가 활성 작업을 확인해
-복구해야 합니다. signal 종료는 Fleet Manager stop 명령을 한 번 best-effort로
-요청합니다.
+완료 보고를 기다리지 않습니다.
+
+`place-completions` 성공 전 `COMMUNICATION_LOST`(`CommunicationLost`),
+`OPERATION_STATE_MISMATCH`(`OperationStateMismatch`), 동일 작업의 Fleet `FAIL`, 차량
+명령 전달 실패, `SIGINT` 또는 `SIGTERM`으로 종료되면 Inventory 작업을 자동 완료하거나
+취소하지 않습니다. 작업은 active 상태로 남으므로 운영자가 Inventory와 차량 상태를
+확인해 복구해야 합니다. 5초 Inventory 통신 단절과 local signal 종료는 Fleet Manager
+stop 명령을 한 번 best-effort로 요청합니다.
+
+반대로 `place-completions` 성공 뒤 `operation_id` 없는 Dock 1 복귀 명령 전송이
+실패하면 물류 작업은 이미 완료됐습니다. 이 경우 Inventory 작업을 복구하거나 다시
+완료하지 말고, 차량 복귀만 별도의 운영 절차로 회복합니다.
 
 `VEHICLE_REGISTRY_PATH`의 기본값은 `/app/config/vehicles.yaml`입니다. 통합
 `operations/compose.local.yaml`에서는 이 파일이 모델별 Bridge endpoint와 차량별

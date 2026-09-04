@@ -365,7 +365,8 @@ class DirectPallet3RunnerTests(unittest.TestCase):
     def test_active_operation_outage_allows_five_seconds_then_stops(self):
         clock = FakeClock()
         transport = ScriptedTransport([
-            TransportError("inventory unavailable") for _ in range(11)
+            *[TransportError("inventory unavailable") for _ in range(11)],
+            response("POST", "/commands/stop", 503, {}),
         ])
         runner = DirectPallet3Runner(
             config(), transport, sleep=clock.sleep, monotonic=clock.monotonic
@@ -378,6 +379,9 @@ class DirectPallet3RunnerTests(unittest.TestCase):
         self.assertEqual(transport.get_paths(), [
             "/api/v1/operations/active",
         ] * 11)
+        self.assertEqual(transport.post_paths(), [
+            "/api/v1/vehicles/robot_1/commands/stop",
+        ])
 
     def test_successful_inventory_response_resets_outage_timer(self):
         clock = FakeClock()
@@ -419,6 +423,18 @@ class DirectPallet3RunnerTests(unittest.TestCase):
             runner.wait_for_report("op-1", "NAVIGATION_SUCCEEDED", "TO_PLACE")
 
         self.assertEqual(transport.get_paths(), ["/api/v1/operations/active"])
+
+    def test_absent_active_operation_stops_before_fleet_poll_or_followup_command(self):
+        transport = ScriptedTransport([
+            response("GET", "/operations/active", 200, []),
+        ])
+        runner = DirectPallet3Runner(config(), transport, sleep=lambda _: None)
+
+        with self.assertRaises(OperationStateMismatch):
+            runner.wait_for_report("op-1", "NAVIGATION_SUCCEEDED", "TO_PLACE")
+
+        self.assertEqual(transport.get_paths(), ["/api/v1/operations/active"])
+        self.assertEqual(transport.post_paths(), [])
 
     def test_matching_fleet_fail_stops_run_before_next_command_and_completion(self):
         runner = self.runner_with_successful_p3_sequence("op-1")
@@ -474,6 +490,19 @@ class DirectPallet3RunnerTests(unittest.TestCase):
         runner = DirectPallet3Runner(config(), transport, sleep=lambda _: None)
 
         with self.assertRaises(TransportError):
+            runner.send_fork_down("op-1")
+
+        self.assertEqual(transport.post_paths(), [
+            "/api/v1/vehicles/robot_1/commands/fork/down",
+        ])
+
+    def test_command_transport_timeout_is_not_retried(self):
+        transport = ScriptedTransport([
+            TransportError("timeout"),
+        ])
+        runner = DirectPallet3Runner(config(), transport, sleep=lambda _: None)
+
+        with self.assertRaisesRegex(TransportError, "timeout"):
             runner.send_fork_down("op-1")
 
         self.assertEqual(transport.post_paths(), [
