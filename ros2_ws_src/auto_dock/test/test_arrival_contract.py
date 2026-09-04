@@ -1124,6 +1124,39 @@ def test_nearest_uses_one_to_four_tags_attached_to_pallet(product_type, classes)
     assert AutoDockNode.candidate_matches_best_entity(fake, candidate) == (True, None)
 
 
+def test_nearest_normal_deduplicates_nested_pallet_boxes_before_tag_assignment():
+    fake = type("FakeDock", (), {})()
+    fake.product_type = "NORMAL"
+    fake.number = lambda _key, default, *_args: default
+    detections = [
+        {
+            "class": name,
+            "confidence": 0.9,
+            "box": box,
+            "depth": {"forward_distance_cm": distance},
+        }
+        for name, box, distance in [
+            ("clover", [138, 167, 236, 252], 20.7),
+            ("spade", [237, 155, 328, 254], 21.3),
+            ("heart", [148, 272, 240, 334], 24.0),
+            ("clover", [241, 260, 325, 330], 24.5),
+        ]
+    ]
+    detections.extend([
+        {"class": "pallet", "confidence": 0.69, "box": [136, 337, 343, 372]},
+        {"class": "pallet", "confidence": 0.61, "box": [136, 342, 239, 370]},
+        {"class": "pallet", "confidence": 0.36, "box": [233, 335, 338, 369]},
+    ])
+
+    candidate, _pnp = AutoDockNode.nearest_product_candidate(
+        fake, {"entities": [], "detections": detections}
+    )
+
+    assert candidate["pallet_tag_candidate"] is True
+    assert candidate["pallet_tag_count"] == 4
+    assert candidate["pallet_box"] == [136, 337, 343, 372]
+
+
 @pytest.mark.parametrize(
     ("product_type", "classes"),
     [
@@ -1921,6 +1954,31 @@ def test_dock_missing_target_skips_reverse_with_fifty_cm_rear_space():
     assert fake.statuses[-1][1] == "dock_rear_clearance_held_lateral_search"
 
 
+def test_dock_lateral_search_moves_forward_when_tape_is_above_bottom_five_percent():
+    fake = dock_reverse_search_fake(0.78)
+    fake.latest_tape_guidance = {"center_y_ratio": 0.82}
+    fake.latest_tape_guidance_at = 10.0
+
+    AutoDockNode.command_dock_reverse_target_search(fake, 10.1)
+
+    assert fake.commands == [(pytest.approx(0.02), 0.12, 0.0)]
+    assert fake.statuses[-1][2]["tape_visible"] is True
+    assert fake.statuses[-1][2]["forward_command_m_s"] == 0.02
+
+
+def test_dock_lateral_search_does_not_advance_for_bottom_or_missing_tape():
+    fake = dock_reverse_search_fake(0.78)
+    fake.latest_tape_guidance = {"center_y_ratio": 0.96}
+    fake.latest_tape_guidance_at = 10.0
+
+    AutoDockNode.command_dock_reverse_target_search(fake, 10.1)
+    assert fake.commands[-1] == (0.0, 0.12, 0.0)
+
+    fake.latest_tape_guidance_at = 9.0
+    AutoDockNode.command_dock_reverse_target_search(fake, 10.2)
+    assert fake.commands[-1] == (0.0, 0.12, 0.0)
+
+
 def test_dock_standoff_transitions_to_left_lateral_search():
     fake = dock_reverse_search_fake(0.26)
 
@@ -2659,6 +2717,7 @@ def test_nearest_recheck_rebinds_when_locked_entity_disappears(monkeypatch):
     }
     fake.target_type = "NEAREST"
     fake.target_entity_id = 204
+    fake.nearest_alignment_distance_cm = 40.0
     fake.target_left = "clover"
     fake.target_right = "clover"
     fake.target_world = {"x": 1.0, "y": 0.0, "yaw": 0.0}
@@ -2707,6 +2766,7 @@ def test_nearest_uses_fresh_optimal_target_after_center_recheck(monkeypatch):
     pnp = candidate["pnp"]
     fake.target_type = "NEAREST"
     fake.target_entity_id = 8
+    fake.nearest_alignment_distance_cm = 40.0
     fake.target_world = {"x": 1.0, "y": 0.0, "yaw": 0.0}
     fake.nearest_center_reconfirm_pending = True
     fake.nearest_center_reconfirm_due_at = 10.0
@@ -2776,6 +2836,55 @@ def test_nearest_same_target_proceeds_despite_recheck_center_jitter(monkeypatch)
     assert fake.nearest_center_reconfirm_pending is False
     assert fake.state == "docking"
     assert statuses[-1][1] == "nearest_optimal_target_reconfirmed"
+
+
+def test_nearest_recheck_rejected_candidate_continues_with_centered_lock(
+    monkeypatch,
+):
+    fake = type("FakeDock", (), {})()
+    optimal = {
+        "entity_id": 3,
+        "matrix": ["spade", "clover", "heart", "diamond"],
+        "center_error": 0.48,
+        "pnp": {"forward_distance_cm": 27.0},
+    }
+    locked = {
+        "entity_id": 13,
+        "matrix": ["clover", "spade", "heart", "clover"],
+        "center_error": 0.05,
+        "pnp": {"forward_distance_cm": 34.0},
+    }
+    fake.target_type = "NEAREST"
+    fake.product_type = "NORMAL"
+    fake.target_entity_id = 13
+    fake.target_left = "clover"
+    fake.target_right = "spade"
+    fake.nearest_alignment_distance_cm = 32.0
+    fake.nearest_center_reconfirm_pending = True
+    fake.nearest_center_reconfirm_due_at = 10.0
+    fake.nearest_center_reconfirm_source_stamp_ns = 100
+    fake.latest_detection = {"source_stamp_ns": 101}
+    fake.valid_measurement = lambda: (
+        (optimal, optimal["pnp"], None)
+        if fake.target_entity_id is None
+        else (locked, locked["pnp"], None)
+    )
+    fake.number = lambda _key, default, *_args: default
+    fake.stop_drive = lambda *_args: None
+    fake.send_yolo_target = lambda: None
+    fake.update_world_target = lambda *_args, **_kwargs: True
+    fake.reset_coarse_alignment = lambda: None
+    fake.publish_status = lambda state, reason, **extra: setattr(
+        fake, "last_status", (state, reason, extra)
+    )
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.5)
+
+    AutoDockNode.tick_nearest_optimal_recheck(fake, 10.5, 0.10)
+
+    assert fake.target_entity_id == 13
+    assert fake.state == "docking"
+    assert fake.nearest_center_reconfirm_pending is False
+    assert fake.last_status[1] == "nearest_locked_target_kept_docking"
 
 
 def test_nearest_centered_visual_pair_uses_saved_pose(monkeypatch):
@@ -3557,6 +3666,10 @@ def test_nearest_centering_switches_to_stable_closer_visible_candidate(monkeypat
             "lateral_ratio": 0.0,
             "reprojection_error_px": 1.0,
         },
+        "depth_yaw": {
+            "forward_distance_cm": 20.0,
+            "yaw_deg": 0.0,
+        },
         "visibility_score": 8000,
     }]}
     statuses = []
@@ -3573,6 +3686,167 @@ def test_nearest_centering_switches_to_stable_closer_visible_candidate(monkeypat
     assert fake.nearest_alignment_distance_cm == pytest.approx(20.0)
     assert fake.target_world == {"x": 2.0}
     assert statuses[-1][0] == ("running", "nearest_centering_target_switched")
+
+
+def test_nearest_reassociates_changed_id_when_pose_is_continuous():
+    fake = type("FakeDock", (), {})()
+    fake.product_type = "NORMAL"
+    fake.target_entity_id = 41
+    fake.nearest_alignment_distance_cm = 30.0
+    fake.nearest_lock_signature = {
+        "distance_cm": 30.0,
+        "yaw_deg": 2.0,
+        "center_error": 0.10,
+        "matrix": ["heart", "spade", "diamond", "clover"],
+        "pallet_box": [280, 180, 380, 260],
+    }
+    fake.number = lambda _key, default, *_args: default
+    detection = {"entities": [{
+        "entity_id": 99,
+        "seen_count": 3,
+        "matrix": ["heart", "spade", "diamond", "clover"],
+        "image_pallet_box": [290, 180, 390, 260],
+        "pnp": {"forward_distance_cm": 27.0},
+        "depth_yaw": {"forward_distance_cm": 27.0, "yaw_deg": 5.0},
+    }]}
+
+    candidate, _pnp = AutoDockNode.nearest_product_candidate(fake, detection)
+
+    assert candidate["entity_id"] == 99
+
+
+def test_centerline_offset_changes_the_zero_error_at_current_depth():
+    fake = type("FakeDock", (), {})()
+    fake.number = lambda key, default, *_args: {
+        "centerline_offset_cm": 2.0,
+        "camera_horizontal_fov_deg": 60.0,
+    }.get(key, default)
+    candidate = {"depth_yaw": {"forward_distance_cm": 30.0}}
+    desired_error = 2.0 * math.atan(2.0 / 30.0) / math.radians(60.0)
+
+    corrected = AutoDockNode.centerline_corrected_error(
+        fake, candidate, desired_error
+    )
+
+    assert corrected == pytest.approx(0.0)
+
+
+def test_nearest_initial_selection_rejects_closer_side_face():
+    fake = type("FakeDock", (), {})()
+    fake.product_type = "NORMAL"
+    fake.number = lambda _key, default, *_args: default
+
+    def entity(entity_id, distance_cm, yaw_deg):
+        return {
+            "entity_id": entity_id,
+            "seen_count": 3,
+            "matrix": ["heart", "spade", "diamond", "clover"],
+            "image_pallet_box": [270, 180, 370, 260],
+            "pnp": {"forward_distance_cm": distance_cm},
+            "depth_yaw": {
+                "forward_distance_cm": distance_cm,
+                "yaw_deg": yaw_deg,
+            },
+        }
+
+    candidate, _pnp = AutoDockNode.nearest_product_candidate(
+        fake, {"entities": [entity(1, 10.0, 35.0), entity(2, 20.0, 2.0)]}
+    )
+
+    assert candidate["entity_id"] == 2
+
+
+def test_nearest_initial_selection_uses_pnp_yaw_when_depth_yaw_is_missing():
+    fake = type("FakeDock", (), {})()
+    fake.product_type = "NORMAL"
+    fake.number = lambda _key, default, *_args: default
+
+    def entity(entity_id, distance_cm, yaw_deg):
+        return {
+            "entity_id": entity_id,
+            "seen_count": 3,
+            "matrix": ["heart", "spade", "diamond", "clover"],
+            "image_pallet_box": [270, 180, 370, 260],
+            "pnp": {
+                "forward_distance_cm": distance_cm,
+                "yaw_deg": yaw_deg,
+                "reprojection_error_px": 1.0,
+            },
+            "depth_yaw": None,
+        }
+
+    candidate, _pnp = AutoDockNode.nearest_product_candidate(
+        fake, {"entities": [
+            entity(1, 20.0, 44.0),
+            entity(2, 30.0, 5.0),
+            entity(3, 35.0, 8.0),
+        ]}
+    )
+
+    assert candidate["entity_id"] == 2
+
+
+def test_nearest_locked_reacquire_timeout_resumes_search():
+    fake = type("FakeDock", (), {})()
+    optimal = {
+        "entity_id": None,
+        "matrix": ["spade", "clover", "heart", "diamond"],
+        "center_error": 0.2,
+        "pnp": {"forward_distance_cm": 38.0, "yaw_deg": 0.0},
+    }
+    fake.target_type = "NEAREST"
+    fake.product_type = "NORMAL"
+    fake.target_entity_id = 1
+    fake.target_world = {"x": 1.0, "y": 0.0, "yaw": 0.0}
+    fake.nearest_alignment_distance_cm = 34.5
+    fake.nearest_center_reconfirm_pending = True
+    fake.nearest_center_reconfirm_due_at = 10.0
+    fake.nearest_center_reconfirm_source_stamp_ns = 100
+    fake.latest_detection = {"source_stamp_ns": 101}
+    fake.valid_measurement = lambda: (
+        (optimal, optimal["pnp"], None)
+        if fake.target_entity_id is None
+        else (None, None, "no_selected_candidate")
+    )
+    fake.number = lambda _key, default, *_args: default
+    fake.stop_drive = lambda *_args: None
+    fake.reset_coarse_alignment = lambda: None
+    fake.latch_search_heading = lambda: None
+    fake.publish_status = lambda state, reason, **extra: setattr(
+        fake, "last_status", (state, reason, extra)
+    )
+
+    AutoDockNode.tick_nearest_optimal_recheck(fake, 10.5, 0.10)
+    AutoDockNode.tick_nearest_optimal_recheck(fake, 11.4, 0.10)
+
+    assert fake.target_entity_id is None
+    assert fake.target_world is None
+    assert fake.state == "search"
+    assert fake.last_status[1] == "nearest_locked_target_lost_resume_search"
+
+
+def test_nearest_centering_keeps_lock_for_only_slightly_closer_candidate(
+    monkeypatch,
+):
+    fake = type("FakeDock", (), {})()
+    fake.number = lambda _key, default, *_args: default
+    fake.target_type = "NEAREST"
+    fake.product_type = "NORMAL"
+    fake.target_entity_id = 113
+    fake.nearest_alignment_distance_cm = 28.0
+    fake.latest_detection_at = 10.0
+    fake.latest_detection = {"entities": [{
+        "entity_id": 124,
+        "seen_count": 2,
+        "matrix": ["clover", "diamond", "clover", "diamond"],
+        "image_pallet_box": [300, 200, 450, 280],
+        "pnp": {"forward_distance_cm": 24.0},
+        "depth_yaw": {"forward_distance_cm": 24.0, "yaw_deg": 0.0},
+    }]}
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
+
+    assert AutoDockNode.maybe_switch_nearest_alignment_target(fake) is False
+    assert fake.target_entity_id == 113
 
 
 def test_warning_tape_must_be_below_visible_pallet_box():

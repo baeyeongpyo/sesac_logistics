@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>auto_dock</name>
-  <version>1.5.0</version>
+  <version>1.6.0</version>
   <description>Headless pallet search, alignment, insertion, and lift runner.</description>
   <maintainer email="robotics@example.com">sesac</maintainer>
   <license>Apache-2.0</license>
