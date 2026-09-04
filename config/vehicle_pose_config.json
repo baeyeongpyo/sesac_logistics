@@ -94,7 +94,7 @@
   "_comment_disable_external_webcams": "실차 실행 중 외부 웹캠 입력을 사용하지 않을지 여부",
   "disable_external_webcams": true,
   "_comment_candidate_stop_delay_sec": "목표와 일치하는 첫 후보를 본 뒤 정지할 때까지 더 이동하는 시간(초)",
-  "candidate_stop_delay_sec": 1.8,
+  "candidate_stop_delay_sec": 2.3,
   "_comment_stable_detection_frames": "목표를 확정하기 위해 연속 검출되어야 하는 프레임 수",
   "stable_detection_frames": 2,
   "_comment_depth_camera_to_fork_tip_offset_cm": "깊이 카메라 기준점과 포크 끝 사이의 전후 거리(cm)",
