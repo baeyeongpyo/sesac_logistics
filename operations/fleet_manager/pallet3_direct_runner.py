@@ -118,6 +118,8 @@ class DirectPallet3Runner:
         expected_source = {
             "AUTO_DOCK_PICK_COMPLETED": "AUTO_DOCK",
             "NAVIGATION_SUCCEEDED": "NAV2",
+            "FORK_DOWN_COMPLETE": "FORK",
+            "MANUAL_COMMAND_EXPIRED": "API",
         }.get(detail)
         if expected_source is None:
             raise RunnerError(f"unsupported completion detail: {detail}")
@@ -156,6 +158,48 @@ class DirectPallet3Runner:
                 {"frame_id": "map", "x": -0.440, "y": -2.340, "yaw": -1.5707963267948966},
             ],
         })
+
+    def send_fork_down(self, operation_id: str) -> None:
+        self._post_fleet("/commands/fork/down", {"operation_id": operation_id})
+
+    def send_reverse(self, operation_id: str) -> None:
+        self._post_fleet("/commands/cmd-vel", {
+            "operation_id": operation_id,
+            "linear_x": -0.18,
+            "linear_y": 0.0,
+            "angular_z": 0.0,
+            "hold_ms": 1000,
+        })
+
+    def complete_place(self, operation_id: str) -> None:
+        self._post_inventory(f"/api/v1/operations/{operation_id}/place-completions", {
+            "robot_id": self.config.robot_id,
+            "idempotency_key": f"{operation_id}:place",
+        })
+
+    def send_return_route(self) -> None:
+        self._post_fleet("/commands/navigation/waypoints", {
+            "purpose": "PLACE",
+            "waypoints": [
+                {"frame_id": "map", "x": -0.420, "y": -2.000, "yaw": -1.5707963268},
+                {"frame_id": "map", "x": -0.440, "y": -0.900, "yaw": 0.0},
+                {"frame_id": "map", "x": 0.085, "y": -0.905, "yaw": 0.0},
+            ],
+        })
+
+    def run(self) -> None:
+        operation_id = self.create_operation()
+        self.send_auto_dock_pick(operation_id)
+        self.wait_for_report(operation_id, "AUTO_DOCK_PICK_COMPLETED", "TO_PICK")
+        self.complete_pick(operation_id)
+        self.send_outbound_route(operation_id)
+        self.wait_for_report(operation_id, "NAVIGATION_SUCCEEDED", "TO_PLACE")
+        self.send_fork_down(operation_id)
+        self.wait_for_report(operation_id, "FORK_DOWN_COMPLETE", "TO_PLACE")
+        self.send_reverse(operation_id)
+        self.wait_for_report(operation_id, "MANUAL_COMMAND_EXPIRED", "TO_PLACE")
+        self.complete_place(operation_id)
+        self.send_return_route()
 
     def _require_vehicle_wait(self) -> None:
         response = self._request(

@@ -35,6 +35,18 @@ class ScriptedTransport:
     def get_paths(self) -> list[str]:
         return [urlparse(call.path).path for call in self.calls if call.method == "GET"]
 
+    def body_for(self, path: str) -> dict[str, Any] | None:
+        for call in self.calls:
+            if urlparse(call.path).path == path:
+                return call.body
+        return None
+
+    def last_body_for(self, path: str) -> dict[str, Any] | None:
+        for call in reversed(self.calls):
+            if urlparse(call.path).path == path:
+                return call.body
+        return None
+
 
 def response(method: str, path: str, status: int, body: dict[str, Any]) -> ApiResponse:
     del method, path
@@ -50,6 +62,69 @@ def config() -> RunnerConfig:
 
 
 class DirectPallet3RunnerTests(unittest.TestCase):
+    def runner_with_successful_p3_sequence(self, operation_id: str) -> DirectPallet3Runner:
+        transport = ScriptedTransport([
+            response("GET", "/vehicles/robot_1", 200, {"state": "WAIT"}),
+            response("POST", "/operations", 201, {"operation_id": operation_id}),
+            response("POST", "/auto-dock", 202, {}),
+            response("GET", "/operations/active", 200, [
+                {"operation_id": operation_id, "status": "TO_PICK"},
+            ]),
+            response("GET", "/vehicles/robot_1", 200, {
+                "operation_id": operation_id,
+                "source": "AUTO_DOCK",
+                "detail": "AUTO_DOCK_PICK_COMPLETED",
+            }),
+            response("POST", "/pick-completions", 200, {}),
+            response("POST", "/navigation/waypoints", 202, {}),
+            response("GET", "/operations/active", 200, [
+                {"operation_id": operation_id, "status": "TO_PLACE"},
+            ]),
+            response("GET", "/vehicles/robot_1", 200, {
+                "operation_id": operation_id,
+                "source": "NAV2",
+                "detail": "NAVIGATION_SUCCEEDED",
+            }),
+            response("POST", "/fork", 202, {}),
+            response("GET", "/operations/active", 200, [
+                {"operation_id": operation_id, "status": "TO_PLACE"},
+            ]),
+            response("GET", "/vehicles/robot_1", 200, {
+                "operation_id": operation_id,
+                "source": "FORK",
+                "detail": "FORK_DOWN_COMPLETE",
+            }),
+            response("POST", "/manual", 202, {}),
+            response("GET", "/operations/active", 200, [
+                {"operation_id": operation_id, "status": "TO_PLACE"},
+            ]),
+            response("GET", "/vehicles/robot_1", 200, {
+                "operation_id": operation_id,
+                "source": "API",
+                "detail": "MANUAL_COMMAND_EXPIRED",
+            }),
+            response("POST", "/place-completions", 200, {}),
+            response("POST", "/navigation/waypoints", 202, {}),
+        ])
+        self.transport = transport
+        return DirectPallet3Runner(config(), transport, sleep=lambda _: None)
+
+    def test_run_places_after_reverse_then_returns_without_transport_operation_id(self):
+        runner = self.runner_with_successful_p3_sequence("op-1")
+
+        runner.run()
+
+        self.assertEqual(self.transport.body_for("/api/v1/operations/op-1/place-completions"), {
+            "robot_id": "robot_1", "idempotency_key": "op-1:place",
+        })
+        return_body = self.transport.last_body_for(
+            "/api/v1/vehicles/robot_1/commands/navigation/waypoints"
+        )
+        self.assertNotIn("operation_id", return_body)
+        self.assertEqual(return_body["waypoints"][0], {
+            "frame_id": "map", "x": -0.420, "y": -2.000, "yaw": -1.5707963268,
+        })
+
     def test_auto_dock_completion_gates_pick_completion_and_outbound_route(self):
         transport = ScriptedTransport([
             response("POST", "/auto-dock", 202, {}),
