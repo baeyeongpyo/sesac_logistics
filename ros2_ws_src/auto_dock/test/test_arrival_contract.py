@@ -417,7 +417,10 @@ def test_dock_end_marker_rejects_single_red_or_low_saturation_edge_object():
 
 @pytest.mark.parametrize(("matrix", "expected"), [
     (["spade", "heart", "clover", "diamond"], "NORMAL"),
-    (["star", "heart", "clover", "diamond"], "FRESH"),
+    (["star"], "FRESH"),
+    (["star", "star", "star", "star"], "FRESH"),
+    (["star", "heart", "clover", "diamond"], None),
+    (["heart"], None),
 ])
 def test_pallet_product_type_uses_star_as_fresh(matrix, expected):
     assert pallet_product_type(matrix) == expected
@@ -433,7 +436,7 @@ def test_dock_inventory_keeps_only_nearest_visible_entity_per_lateral_row():
     entities = [
         {
             "entity_id": 1,
-            "matrix": ["star", "heart", "clover", "diamond"],
+            "matrix": ["star", "star", "star", "star"],
             "image_pallet_box": [520, 200, 620, 400],
             "pnp": {"forward_distance_cm": 25.0},
             "visibility_score": 8000,
@@ -1087,11 +1090,11 @@ def test_nearest_fresh_accepts_one_star_attached_to_a_pallet_face():
 @pytest.mark.parametrize(
     ("product_type", "classes"),
     [
-        ("NORMAL", ["heart"]),
+        ("NORMAL", ["heart", "clover", "diamond", "spade"]),
         ("FRESH", ["star"]),
-        ("FRESH", ["heart", "star"]),
-        ("FRESH", ["heart", "clover", "star"]),
-        ("FRESH", ["heart", "clover", "diamond", "star"]),
+        ("FRESH", ["star", "star"]),
+        ("FRESH", ["star", "star", "star"]),
+        ("FRESH", ["star", "star", "star", "star"]),
     ],
 )
 def test_nearest_uses_one_to_four_tags_attached_to_pallet(product_type, classes):
@@ -1119,6 +1122,41 @@ def test_nearest_uses_one_to_four_tags_attached_to_pallet(product_type, classes)
     assert candidate["matrix"] == classes
     assert pnp["lateral_source"] == "pallet_box"
     assert AutoDockNode.candidate_matches_best_entity(fake, candidate) == (True, None)
+
+
+@pytest.mark.parametrize(
+    ("product_type", "classes"),
+    [
+        ("NORMAL", ["heart"]),
+        ("NORMAL", ["heart", "clover", "diamond"]),
+        ("NORMAL", ["heart", "clover", "diamond", "star"]),
+        ("FRESH", ["heart", "star"]),
+    ],
+)
+def test_nearest_rejects_physically_invalid_partial_tag_layouts(
+    product_type, classes
+):
+    fake = type("FakeDock", (), {})()
+    fake.product_type = product_type
+    fake.nearest_recognition_mode = "LEGACY"
+    fake.number = lambda _key, default, _minimum, _maximum: default
+    detections = [{
+        "class": name,
+        "confidence": 0.9,
+        "box": [150 + index * 50, 220, 190 + index * 50, 300],
+        "depth": {"forward_distance_cm": 25.0 + index},
+    } for index, name in enumerate(classes)]
+    detections.append({
+        "class": "pallet", "confidence": 0.8,
+        "box": [120, 310, 360, 370],
+    })
+
+    candidate, pnp = AutoDockNode.nearest_product_candidate(
+        fake, {"entities": [], "detections": detections}
+    )
+
+    assert candidate is None
+    assert pnp is None
 
 
 def test_nearest_does_not_lock_partial_tag_pallet_cropped_at_image_edge():
@@ -1397,7 +1435,6 @@ def test_reverse_returns_insertion_distance_then_publishes_ready():
     fake.stop_drive = lambda *_args: None
     fake.drive_ready_pub = CapturePublisher()
     fake.publish_status = lambda *_args, **_kwargs: None
-    fake.right_turn_clearance_available = lambda: (False, 0.30, 0.50)
 
     AutoDockNode.tick_reversing_after_lift(fake)
 
@@ -1405,159 +1442,6 @@ def test_reverse_returns_insertion_distance_then_publishes_ready():
     assert fake.post_lift_reverse_target_m is None
     assert len(fake.drive_ready_pub.messages) == 1
     assert isinstance(fake.drive_ready_pub.messages[0], Empty)
-
-
-def test_reverse_starts_right_turn_when_swept_circle_is_clear():
-    fake = type("FakeDock", (), {})()
-    fake.post_lift_reverse_start = (0.0, 0.0)
-    fake.post_lift_reverse_start_yaw = 0.0
-    fake.post_lift_reverse_target_m = 0.27
-    fake.odom_position = (-0.28, 0.0)
-    fake.odom_yaw = 0.0
-    fake.number = lambda key, default, *_args: default
-    fake.stop_drive = lambda *_args: None
-    fake.drive_ready_pub = CapturePublisher()
-    fake.publish_status = lambda *_args, **_kwargs: None
-    fake.right_turn_clearance_available = lambda: (True, 0.70, 0.50)
-
-    AutoDockNode.tick_reversing_after_lift(fake)
-
-    assert fake.state == "turning_right_for_ready"
-    assert fake.right_turn_target_yaw == pytest.approx(-math.pi / 2.0)
-    assert fake.drive_ready_pub.messages == []
-
-
-def test_reverse_enters_enabled_right_dock_end_search(monkeypatch):
-    fake = type("FakeDock", (), {})()
-    fake.config = {"post_lift_rear_opening_test_enabled": True}
-    fake.location = "DOCK_1"
-    fake.post_lift_reverse_start = (0.0, 0.0)
-    fake.post_lift_reverse_start_yaw = 0.0
-    fake.post_lift_reverse_target_m = 0.27
-    fake.odom_position = (-0.28, 0.0)
-    fake.odom_yaw = 0.0
-    fake.right_turn_clearance_available = lambda: (False, 0.25, 0.50)
-    fake.number = lambda key, default, *_args: default
-    fake.stop_drive = lambda *_args: None
-    statuses = []
-    fake.publish_status = lambda state, reason, **extra: statuses.append(
-        (state, reason, extra)
-    )
-    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
-
-    AutoDockNode.tick_reversing_after_lift(fake)
-
-    assert fake.state == "post_lift_opening_search"
-    assert fake.post_lift_reverse_target_m is None
-    assert statuses[-1][1] == "post_lift_left_clearance_search_started"
-
-
-def test_post_lift_opening_search_strafes_left_until_turn_is_clear(monkeypatch):
-    fake = type("FakeDock", (), {})()
-    fake.post_lift_opening_started_at = 10.0
-    fake.post_lift_opening_confirmation_count = 0
-    fake.post_lift_right_end_marker = None
-    fake.post_lift_right_end_seen_at = 0.0
-    fake.post_lift_opening_heading_yaw = 0.0
-    fake.odom_yaw = 0.0
-    fake.nearest_by_direction = {"left": (0.80, None, 0.20)}
-    fake.right_turn_clearance_available = lambda: (False, 0.25, 0.50)
-    fake.number = lambda key, default, *_args: default
-    fake.stop_drive = lambda *_args: None
-    statuses = []
-    fake.publish_status = lambda state, reason, **extra: statuses.append(
-        (state, reason, extra)
-    )
-    fake.cancel = lambda reason: pytest.fail(reason)
-    commands = []
-    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
-    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
-
-    AutoDockNode.tick_post_lift_opening_search(fake)
-
-    assert commands == [(0.0, 0.12, 0.0)]
-    assert statuses[-1][1] == "post_lift_left_search_for_turn_clearance"
-
-
-def test_post_lift_opening_search_starts_right_turn_after_clear_confirmation(monkeypatch):
-    fake = type("FakeDock", (), {})()
-    fake.post_lift_opening_started_at = 10.0
-    fake.post_lift_opening_confirmation_count = 2
-    fake.post_lift_right_end_marker = {"x_px": 590.0, "confidence": 0.9}
-    fake.post_lift_right_end_seen_at = 10.0
-    fake.odom_yaw = 0.5
-    fake.right_turn_clearance_available = lambda: (True, math.inf, 0.50)
-    fake.number = lambda key, default, *_args: default
-    commands = []
-    fake.publish_drive = lambda x, y, yaw: commands.append((x, y, yaw))
-    fake.stop_drive = lambda *_args: commands.append((0.0, 0.0, 0.0))
-    fake.drive_ready_pub = CapturePublisher()
-    statuses = []
-    fake.publish_status = lambda state, reason, **extra: statuses.append(
-        (state, reason, extra)
-    )
-    fake.cancel = lambda reason: pytest.fail(reason)
-    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
-
-    AutoDockNode.tick_post_lift_opening_search(fake)
-
-    assert commands == [(0.0, 0.0, 0.0)]
-    assert fake.state == "turning_right_for_ready"
-    assert fake.right_turn_target_yaw == pytest.approx(0.5 - math.pi / 2.0)
-    assert len(fake.drive_ready_pub.messages) == 0
-    assert statuses[-1][1] == "post_lift_turn_clear_right_turn_started"
-
-
-def test_reverse_waits_for_fresh_scan_before_skipping_turn(monkeypatch):
-    fake = type("FakeDock", (), {})()
-    fake.state = "reversing_after_lift"
-    fake.post_lift_reverse_start = (0.0, 0.0)
-    fake.post_lift_reverse_start_yaw = 0.0
-    fake.post_lift_reverse_target_m = 0.27
-    fake.odom_position = (-0.28, 0.0)
-    fake.odom_yaw = 0.0
-    fake.right_turn_clearance_wait_started_at = None
-    fake.number = lambda key, default, *_args: default
-    fake.stop_drive = lambda *_args: None
-    fake.drive_ready_pub = CapturePublisher()
-    fake.publish_status = lambda *_args, **_kwargs: None
-    fake.right_turn_clearance_available = lambda: (False, None, None)
-    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
-
-    AutoDockNode.tick_reversing_after_lift(fake)
-
-    assert fake.state == "reversing_after_lift"
-    assert fake.post_lift_reverse_target_m == pytest.approx(0.27)
-    assert fake.right_turn_clearance_wait_started_at == 10.0
-    assert fake.drive_ready_pub.messages == []
-
-
-def test_right_turn_ignores_close_point_outside_actual_swept_footprint(monkeypatch):
-    fake = type("FakeDock", (), {})()
-    fake.scan_updated_at = 10.0
-    fake.load_state = "LOADED"
-    fake.scan_points = [(0.102, math.radians(-154.0))]
-    fake.number = lambda key, default, *_args: default
-    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
-
-    clear, blocking, _extent = AutoDockNode.right_turn_clearance_available(fake)
-
-    assert clear is True
-    assert math.isinf(blocking)
-
-
-def test_right_turn_rejects_point_inside_actual_swept_footprint(monkeypatch):
-    fake = type("FakeDock", (), {})()
-    fake.scan_updated_at = 10.0
-    fake.load_state = "LOADED"
-    fake.scan_points = [(math.hypot(0.20, 0.20), math.radians(-45.0))]
-    fake.number = lambda key, default, *_args: default
-    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.1)
-
-    clear, blocking, _extent = AutoDockNode.right_turn_clearance_available(fake)
-
-    assert clear is False
-    assert blocking == pytest.approx(math.hypot(0.20, 0.20))
 
 
 def test_search_locks_virtual_target_before_stopping():
@@ -1952,7 +1836,6 @@ def dock_reverse_search_fake(rear_distance_m, travelled_m=0.0):
     fake.dock_reverse_search_clearance_recovery_active = False
     fake.number = lambda key, default, *_args: {
         "dock_reverse_target_search_min_rear_distance_cm": 25.0,
-        "dock_reverse_target_search_max_distance_cm": 15.0,
         "dock_reverse_target_search_speed_m_s": 0.10,
     }.get(key, default)
     fake.commands = []
