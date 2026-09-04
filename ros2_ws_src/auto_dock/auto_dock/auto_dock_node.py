@@ -4706,6 +4706,10 @@ class AutoDockNode(Node):
             )
             return
         previous_entity_id = self.target_entity_id
+        previous_target_top = (
+            getattr(self, "target_left", None),
+            getattr(self, "target_right", None),
+        )
         self.target_entity_id = None
         optimal_candidate, optimal_pnp, optimal_reason = self.valid_measurement()
         self.target_entity_id = previous_entity_id
@@ -4719,6 +4723,10 @@ class AutoDockNode(Node):
             return
         self.target_entity_id = optimal_candidate.get("entity_id")
         matrix = optimal_candidate.get("matrix") or []
+        optimal_target_top = tuple(matrix[:2]) if len(matrix) >= 2 else (None, None)
+        target_changed = self.target_entity_id != previous_entity_id
+        if self.target_entity_id is None and previous_entity_id is None:
+            target_changed = optimal_target_top != previous_target_top
         if len(matrix) >= 2:
             self.target_left, self.target_right = matrix[:2]
             self.send_yolo_target()
@@ -4735,15 +4743,12 @@ class AutoDockNode(Node):
             )
         except (TypeError, ValueError):
             optimal_center_error = 999.0
-        if (
-            not math.isfinite(optimal_center_error)
-            or abs(optimal_center_error) > center_tolerance
-        ):
+        if target_changed:
             self.nearest_center_reconfirm_due_at = None
             self.nearest_center_reconfirm_source_stamp_ns = None
             self.reset_coarse_alignment()
             self.publish_status(
-                "running", "nearest_optimal_target_recenter",
+                "running", "nearest_optimal_target_changed_recenter",
                 previous_entity_id=previous_entity_id,
                 entity_id=self.target_entity_id,
                 center_error=round(optimal_center_error, 4),

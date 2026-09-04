@@ -1828,7 +1828,6 @@ class TeleopWindow(QMainWindow):
         self.cancel_movement_key_releases()
         self.pressed.clear()
         self.node.stop(repeats=3)
-        self.node.publish_fork("STOP")
         super().focusOutEvent(event)
 
     def write_auto_dock_log(self, event_type, **payload):
