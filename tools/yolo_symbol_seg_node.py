@@ -1379,6 +1379,7 @@ class YoloSymbolSeg(Node):
 
 
 def main(args=None):
+    os.environ.pop("ROS_DOMAIN_ID", None)
     rclpy.init(args=args)
     node = YoloSymbolSeg()
     try:
