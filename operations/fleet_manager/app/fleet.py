@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import threading
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
@@ -57,6 +58,19 @@ class VehicleStateLog(VehicleStateReport):
     id: int
     robot_id: str
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class DirectPallet3Mission:
+    operation_id: str
+    robot_id: str
+    pick_mode: str
+    phase: str
+    pick_idempotency_key: str | None
+    place_idempotency_key: str | None
+    return_idempotency_key: str | None
+    created_at: str
+    updated_at: str
 
 
 class FleetOutboxEvent(BaseModel):
@@ -119,6 +133,24 @@ class VehicleStateStore:
                 );
                 CREATE INDEX IF NOT EXISTS fleet_event_outbox_pending
                     ON fleet_event_outbox (delivered_at, next_attempt_at);
+                CREATE TABLE IF NOT EXISTS direct_pallet3_missions (
+                    operation_id TEXT PRIMARY KEY,
+                    robot_id TEXT NOT NULL,
+                    pick_mode TEXT NOT NULL CHECK (pick_mode IN ('auto_dock', 'manual')),
+                    phase TEXT NOT NULL CHECK (phase IN ('STARTING', 'STARTED', 'PICKED', 'PLACED', 'RETURNED')),
+                    pick_idempotency_key TEXT,
+                    place_idempotency_key TEXT,
+                    return_idempotency_key TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS direct_pallet3_replies (
+                    operation_id TEXT NOT NULL,
+                    detail TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL,
+                    PRIMARY KEY (operation_id, detail),
+                    FOREIGN KEY (operation_id) REFERENCES direct_pallet3_missions(operation_id)
+                );
                 """
             )
 
@@ -187,6 +219,77 @@ class VehicleStateStore:
             rows = self._connection.execute(query, values).fetchall()
         return [_log_from_row(row) for row in rows]
 
+    def create_direct_pallet3_mission(
+        self, operation_id: str, robot_id: str, pick_mode: str
+    ) -> DirectPallet3Mission:
+        timestamp = _format_time(_now())
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO direct_pallet3_missions (
+                    operation_id, robot_id, pick_mode, phase, created_at, updated_at
+                ) VALUES (?, ?, ?, 'STARTING', ?, ?)
+                """,
+                (operation_id, robot_id, pick_mode, timestamp, timestamp),
+            )
+            return self._fetch_direct_pallet3_mission(operation_id)
+
+    def get_direct_pallet3_mission(
+        self, operation_id: str
+    ) -> DirectPallet3Mission | None:
+        with self._lock:
+            return self._fetch_direct_pallet3_mission(operation_id)
+
+    def mark_direct_pallet3_started(self, operation_id: str) -> DirectPallet3Mission:
+        return self._transition_direct_pallet3_mission(
+            operation_id, "STARTING", "STARTED", None, None
+        )
+
+    def record_direct_pallet3_reply(
+        self, robot_id: str, operation_id: str, detail: str
+    ) -> None:
+        with self._lock, self._connection:
+            mission = self._fetch_direct_pallet3_mission(operation_id)
+            if mission is None or mission.robot_id != robot_id:
+                return
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO direct_pallet3_replies (
+                    operation_id, detail, recorded_at
+                ) VALUES (?, ?, ?)
+                """,
+                (operation_id, detail, _format_time(_now())),
+            )
+
+    def has_direct_pallet3_reply(self, operation_id: str, detail: str) -> bool:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT 1 FROM direct_pallet3_replies
+                WHERE operation_id = ? AND detail = ?
+                """,
+                (operation_id, detail),
+            ).fetchone()
+        return row is not None
+
+    def complete_direct_pallet3_event(
+        self,
+        operation_id: str,
+        expected_phase: str,
+        next_phase: str,
+        event_column: str,
+        idempotency_key: str,
+    ) -> DirectPallet3Mission:
+        if event_column not in {
+            "pick_idempotency_key",
+            "place_idempotency_key",
+            "return_idempotency_key",
+        }:
+            raise ValueError(f"unsupported direct pallet3 event column: {event_column}")
+        return self._transition_direct_pallet3_mission(
+            operation_id, expected_phase, next_phase, event_column, idempotency_key
+        )
+
     def list_pending_outbox_events(
         self, *, include_scheduled: bool = False
     ) -> list[FleetOutboxEvent]:
@@ -199,6 +302,52 @@ class VehicleStateStore:
         with self._lock:
             rows = self._connection.execute(query, values).fetchall()
         return [_outbox_event_from_row(row) for row in rows]
+
+    def _fetch_direct_pallet3_mission(
+        self, operation_id: str
+    ) -> DirectPallet3Mission | None:
+        row = self._connection.execute(
+            "SELECT * FROM direct_pallet3_missions WHERE operation_id = ?",
+            (operation_id,),
+        ).fetchone()
+        return _direct_pallet3_mission_from_row(row) if row is not None else None
+
+    def _transition_direct_pallet3_mission(
+        self,
+        operation_id: str,
+        expected_phase: str,
+        next_phase: str,
+        event_column: str | None,
+        idempotency_key: str | None,
+    ) -> DirectPallet3Mission:
+        with self._lock, self._connection:
+            mission = self._fetch_direct_pallet3_mission(operation_id)
+            if mission is None:
+                raise KeyError(f"unknown pallet3 mission: {operation_id}")
+            current_key = (
+                getattr(mission, event_column) if event_column is not None else None
+            )
+            if mission.phase == next_phase:
+                if event_column is not None and current_key == idempotency_key:
+                    return mission
+                raise ValueError(
+                    f"pallet3 mission {operation_id} already reached {next_phase}"
+                )
+            if mission.phase != expected_phase:
+                raise ValueError(
+                    f"pallet3 mission {operation_id} is {mission.phase}, expected {expected_phase}"
+                )
+            assignments = ["phase = ?", "updated_at = ?"]
+            values: list[object] = [next_phase, _format_time(_now())]
+            if event_column is not None:
+                assignments.append(f"{event_column} = ?")
+                values.append(idempotency_key)
+            values.append(operation_id)
+            self._connection.execute(
+                f"UPDATE direct_pallet3_missions SET {', '.join(assignments)} WHERE operation_id = ?",
+                values,
+            )
+            return self._fetch_direct_pallet3_mission(operation_id)
 
     def mark_outbox_delivered(self, event_id: str) -> None:
         with self._lock, self._connection:
@@ -290,6 +439,20 @@ def _log_from_row(row: sqlite3.Row) -> VehicleStateLog:
         detail=row["detail"],
         observed_at=row["observed_at"],
         created_at=row["created_at"],
+    )
+
+
+def _direct_pallet3_mission_from_row(row: sqlite3.Row) -> DirectPallet3Mission:
+    return DirectPallet3Mission(
+        operation_id=row["operation_id"],
+        robot_id=row["robot_id"],
+        pick_mode=row["pick_mode"],
+        phase=row["phase"],
+        pick_idempotency_key=row["pick_idempotency_key"],
+        place_idempotency_key=row["place_idempotency_key"],
+        return_idempotency_key=row["return_idempotency_key"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
     )
 
 
