@@ -48,7 +48,7 @@ Fleet Manager는 다음을 순서대로 수행한다.
 POST /v1/missions/pallet3
 ```
 
-요청은 Inventory가 생성한 `operation_id`, `pick_mode`, Fleet Manager event base URL을
+요청은 Inventory가 생성한 `operation_id`, `robot_id`, `pick_mode`, Fleet Manager event base URL을
 가진다. 차량 endpoint는 새 process group으로 shell을 시작한 뒤 `202`를 반환한다. Fleet
 Manager는 그 응답을 성공으로 받은 경우에만 시작 요청을 `202`로 반환한다.
 
@@ -87,7 +87,7 @@ Fleet Manager는 PICK/PLACE event를 처리할 때 Inventory API의 성공 응�
 
 ## 차량 Shell 순서
 
-`pallet3_mission.sh`는 operation ID와 Fleet Manager mission event URL을 인자로
+`pallet3_mission.sh`는 operation ID, robot ID와 Fleet Manager mission event URL을 인자로
 받는다. 기존 `vehicle_command_api`가 실행 중인 `127.0.0.1:8082`만 호출한다.
 ROS 2 CLI를 직접 여러 개 실행하거나 Nav2를 별도 launch하지 않는다.
 
