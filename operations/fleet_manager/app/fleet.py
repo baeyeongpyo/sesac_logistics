@@ -240,6 +240,21 @@ class VehicleStateStore:
         with self._lock:
             return self._fetch_direct_pallet3_mission(operation_id)
 
+    def get_active_direct_pallet3_mission(
+        self, robot_id: str
+    ) -> DirectPallet3Mission | None:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT * FROM direct_pallet3_missions
+                WHERE robot_id = ? AND phase != 'RETURNED'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (robot_id,),
+            ).fetchone()
+        return _direct_pallet3_mission_from_row(row) if row is not None else None
+
     def mark_direct_pallet3_started(self, operation_id: str) -> DirectPallet3Mission:
         return self._transition_direct_pallet3_mission(
             operation_id, "STARTING", "STARTED", None, None

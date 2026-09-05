@@ -118,6 +118,11 @@ class Pallet3MissionService:
         snapshot = self._store.get_vehicle(robot_id)
         if snapshot is None or snapshot.state != VehicleState.WAIT:
             raise ValueError(f"vehicle {robot_id} must be in WAIT state")
+        active_mission = self._store.get_active_direct_pallet3_mission(robot_id)
+        if active_mission is not None:
+            raise ValueError(
+                f"pallet3 mission {active_mission.operation_id} is already active"
+            )
         vehicle = self._registry.require(robot_id, "pallet3_mission")
         operation_id = self._inventory.create_operation(
             "NORMAL", "docker", "p3", robot_id

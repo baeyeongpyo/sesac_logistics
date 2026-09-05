@@ -124,6 +124,14 @@ class Pallet3MissionServiceTests(unittest.TestCase):
 
         self.assertEqual(self.inventory.pick_calls, [])
 
+    def test_second_pallet3_start_is_rejected_before_creating_another_inventory_operation(self) -> None:
+        self.service.start("robot_1", "manual")
+
+        with self.assertRaisesRegex(ValueError, "already active"):
+            self.service.start("robot_1", "auto_dock")
+
+        self.assertEqual(self.inventory.created, [("NORMAL", "docker", "p3", "robot_1")])
+
 
 class Pallet3MissionApiTests(unittest.TestCase):
     def setUp(self) -> None:
