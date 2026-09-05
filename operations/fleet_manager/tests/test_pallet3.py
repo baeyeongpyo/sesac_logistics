@@ -2,9 +2,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 from fleet_manager.app.commands import ModelBridge, RegisteredVehicle, RelayResponse, VehicleRegistry
 from fleet_manager.app.fleet import StateSource, VehicleState, VehicleStateReport, VehicleStateStore
 from fleet_manager.app.pallet3 import Pallet3MissionService
+from fleet_manager.app.main import create_app
 
 
 class RecordingInventory:
@@ -120,6 +123,91 @@ class Pallet3MissionServiceTests(unittest.TestCase):
             )
 
         self.assertEqual(self.inventory.pick_calls, [])
+
+
+class Pallet3MissionApiTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        root = Path(self.tempdir.name)
+        registry_path = root / "vehicles.yaml"
+        registry_path.write_text(
+            """models:
+  - id: mentorpi
+    bridge_url: http://bridge.example
+    capabilities: [navigate, auto_dock, stop, report_status, fork, manual_drive, pallet3_mission]
+vehicles:
+  - id: robot_1
+    model: mentorpi
+"""
+        )
+        self.inventory = RecordingInventory()
+        self.bridge = RecordingBridge()
+        self.client = TestClient(
+            create_app(
+                str(root / "fleet_manager.db"),
+                vehicle_registry_path=registry_path,
+                bridge_client=self.bridge,
+                inventory_client=self.inventory,
+                fleet_manager_url="http://fleet.example:8090",
+            )
+        )
+        self.client.__enter__()
+        self.client.post(
+            "/api/v1/vehicles/robot_1/state",
+            json={
+                "state": "WAIT",
+                "previous_state": "INIT",
+                "operation_id": None,
+                "attempt_id": None,
+                "source": "API",
+                "detail": "OPERATOR_READY",
+                "observed_at": "2026-09-05T00:00:00Z",
+            },
+        )
+
+    def tearDown(self) -> None:
+        self.client.__exit__(None, None, None)
+        self.tempdir.cleanup()
+
+    def test_start_requires_pick_mode_and_events_complete_inventory_after_vehicle_reply(self) -> None:
+        self.assertEqual(
+            self.client.post("/api/v1/vehicles/robot_1/missions/pallet3", json={}).status_code,
+            422,
+        )
+        started = self.client.post(
+            "/api/v1/vehicles/robot_1/missions/pallet3",
+            json={"pick_mode": "manual"},
+        )
+        self.assertEqual(started.status_code, 202)
+        operation_id = started.json()["operation_id"]
+        event_url = f"/api/v1/vehicles/robot_1/missions/pallet3/{operation_id}/events"
+
+        self.assertEqual(
+            self.client.post(
+                event_url,
+                json={"event_type": "PICK_COMPLETED", "idempotency_key": operation_id + ":pick"},
+            ).status_code,
+            409,
+        )
+        self.client.post(
+            "/api/v1/vehicles/robot_1/state",
+            json={
+                "state": "WAIT",
+                "previous_state": "PICK",
+                "operation_id": operation_id,
+                "attempt_id": None,
+                "source": "FORK",
+                "detail": "FORK_UP_COMPLETE",
+                "observed_at": "2026-09-05T00:00:01Z",
+            },
+        )
+        picked = self.client.post(
+            event_url,
+            json={"event_type": "PICK_COMPLETED", "idempotency_key": operation_id + ":pick"},
+        )
+
+        self.assertEqual(picked.status_code, 200)
+        self.assertEqual(self.inventory.pick_calls, [(operation_id, "robot_1", operation_id + ":pick")])
 
 
 if __name__ == "__main__":
