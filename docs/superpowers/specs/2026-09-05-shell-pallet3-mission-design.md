@@ -6,7 +6,8 @@ Pallet 3 `NORMAL` 물류 이동을 차량에서 실행하는 `bash` mission scri
 순차 처리한다. 차량은 기존 `vehicle_command_api`가 실제 ROS 2 Nav2, Auto Dock,
 포크 callback을 처리한 결과를 받아 다음 단계를 실행한다. Fleet Manager는 미션을
 시작하고 차량 reply를 대시보드에 기록하며, PICK/PLACE 물류 전이만 Inventory에
-즉시 반영한다. Logistics Orchestrator는 이 미션의 명령을 소유하지 않는다.
+즉시 반영한다. PICK은 `auto_dock` 또는 `manual` 중 하나를 실행마다 명시해
+선택한다. Logistics Orchestrator는 이 미션의 명령을 소유하지 않는다.
 
 ## 책임 경계
 
@@ -32,20 +33,23 @@ Fleet Manager에 다음 요청을 추가한다.
 POST /api/v1/vehicles/{robot_id}/missions/pallet3
 ```
 
+request body의 `pick_mode`는 필수이며 `auto_dock` 또는 `manual`만 허용한다.
+기본값은 두지 않는다. 실제 PICK 방법을 모른 채 차량을 움직이지 않기 위해서다.
+
 Fleet Manager는 다음을 순서대로 수행한다.
 
 1. Fleet snapshot이 `WAIT`인지 확인한다.
 2. Inventory `POST /api/v1/operations`으로 `NORMAL`, `docker -> p3`, `robot_id` 작업을 만든다.
 3. 자신의 `direct_pallet3_missions` 저장소에 `operation_id`, `robot_id`,
-   `phase=STARTING`을 기록한다.
+   `pick_mode`, `phase=STARTING`을 기록한다.
 4. Fleet Bridge를 통해 차량의 다음 endpoint를 호출한다.
 
 ```text
 POST /v1/missions/pallet3
 ```
 
-요청은 Inventory가 생성한 `operation_id`와 Fleet Manager event base URL을 가진다.
-차량 endpoint는 새 process group으로 shell을 시작한 뒤 `202`를 반환한다. Fleet
+요청은 Inventory가 생성한 `operation_id`, `pick_mode`, Fleet Manager event base URL을
+가진다. 차량 endpoint는 새 process group으로 shell을 시작한 뒤 `202`를 반환한다. Fleet
 Manager는 그 응답을 성공으로 받은 경우에만 시작 요청을 `202`로 반환한다.
 
 Inventory 생성 뒤 차량이 shell을 수락하지 못하면 Fleet Manager는 작업을 자동
@@ -65,13 +69,16 @@ event body는 `event_type`과 `idempotency_key`만 허용한다.
 
 | event_type | shell이 보내는 시점 | Fleet Manager의 동작 | 성공 응답 뒤 shell 다음 단계 |
 | --- | --- | --- | --- |
-| `PICK_COMPLETED` | Auto Dock `drive_ready`가 PICK 완료를 보고한 뒤 | Inventory `pick-completions`, key=`{operation_id}:pick` | P3 outbound FollowWaypoints |
+| `PICK_COMPLETED` | `auto_dock`은 `drive_ready`, `manual`은 `FORK_UP_COMPLETE`가 확인된 뒤 | Inventory `pick-completions`, key=`{operation_id}:pick` | P3 outbound FollowWaypoints |
 | `PLACE_READY` | `FORK_DOWN_COMPLETE`가 확인된 뒤 | Inventory `place-completions`, key=`{operation_id}:place` | operation ID 없는 1초 후진 |
 | `RETURN_COMPLETED` | Docker 복귀 Nav2 성공과 정지가 확인된 뒤 | 미션 복귀 완료를 기록한다. Inventory는 호출하지 않는다. | shell 정상 종료 |
 
 Fleet Manager는 미션별 event type을 한 번만 수락한다. 동일한 idempotency key의
-재전송은 원래 성공 응답을 반환한다. 순서에 맞지 않는 event, 다른 robot ID,
-Inventory 상태 불일치는 `409`로 거절하고 shell은 즉시 stop한다.
+재전송은 원래 성공 응답을 반환한다. `PICK_COMPLETED`는 mission의 `pick_mode`와
+일치하는 차량 reply가 먼저 기록된 경우에만 수락한다. 즉 `auto_dock`은
+`AUTO_DOCK_PICK_COMPLETED`, `manual`은 `FORK_UP_COMPLETE`가 필요하다. 순서에
+맞지 않는 event, 다른 robot ID, Inventory 상태 불일치는 `409`로 거절하고 shell은
+즉시 stop한다.
 
 Fleet Manager는 PICK/PLACE event를 처리할 때 Inventory API의 성공 응답을 받은
 뒤에만 shell에 `2xx`를 반환한다. 그러므로 shell은 PICK 원장이 `TO_PLACE`가 되기
@@ -84,10 +91,16 @@ Fleet Manager는 PICK/PLACE event를 처리할 때 Inventory API의 성공 응�
 받는다. 기존 `vehicle_command_api`가 실행 중인 `127.0.0.1:8082`만 호출한다.
 ROS 2 CLI를 직접 여러 개 실행하거나 Nav2를 별도 launch하지 않는다.
 
-1. 로컬 `/v1/auto-dock`에 `PICK`, `DOCK_1`, `NORMAL`, operation ID를 요청한다.
-2. `/v1/operation-status`가 같은 operation ID의
-   `PICK_COMPLETE/AUTO_DOCK_PICK_COMPLETED`가 될 때까지 대기한다.
-3. `PICK_COMPLETED` event를 Fleet Manager에 전송하고 성공 응답을 기다린다.
+1. `pick_mode=auto_dock`이면 로컬 `/v1/auto-dock`에 `PICK`, `DOCK_1`,
+   `NORMAL`, operation ID를 요청하고 같은 operation ID의
+   `PICK_COMPLETE/AUTO_DOCK_PICK_COMPLETED`를 기다린다.
+2. `pick_mode=manual`이면 로컬 `/v1/fork/up`에 operation ID를 요청하고 같은
+   operation ID의 `FORK_UP_COMPLETE`를 기다린다. 명령 HTTP `202`만으로는 PICK을
+   완료하지 않는다.
+3. 두 mode 모두 `PICK_COMPLETED` event를 Fleet Manager에 전송하고 Inventory PICK
+   완료의 성공 응답을 기다린다. 수동 PICK이면 로컬
+   `POST /v1/missions/pallet3/{operation_id}/picked`로 Vehicle Command API 상태를
+   `PICK_COMPLETE`로 전이한 뒤 다음 단계로 진행한다.
 4. 로컬 `/v1/navigation/waypoints`로 `dock_1 -> p3` 경로를 요청하고
    `NAVIGATION_SUCCEEDED`를 기다린다.
 5. 로컬 `/v1/fork/down`을 요청하고 `FORK_DOWN_COMPLETE`를 기다린다.
@@ -107,6 +120,33 @@ ROS 2 CLI를 직접 여러 개 실행하거나 Nav2를 별도 launch하지 않�
 `WAIT/PLACE_COMPLETED`를 Fleet Manager에 보고한 뒤 차량의 현재 operation ID를
 비운다. 따라서 place 완료 뒤 후진과 Docker 복귀는 완료된 Inventory operation에
 연결되지 않는다.
+
+`/v1/missions/pallet3/{operation_id}/picked`는 `manual` PICK에서만
+`FORK_UP_COMPLETE`가 확인된 operation ID를 `PICK_COMPLETE`로 전이한다. auto dock
+PICK에서는 이미 `drive_ready` callback이 같은 상태 전이를 처리하므로 이 endpoint를
+호출하지 않는다.
+
+## Shell 함수 구성
+
+`pallet3_mission.sh`의 각 단계는 한 함수가 한 상태 전이만 담당하도록 나눈다.
+
+| 함수 | 책임 |
+| --- | --- |
+| `request_json` | 로컬 Vehicle Command API에 하나의 HTTP 명령을 전송한다. |
+| `wait_vehicle_reply` | operation ID·source·detail이 일치하는 로컬 완료 상태를 기다린다. |
+| `report_mission_event` | Fleet Manager event를 0.5초 간격, 최대 5초 동안 재시도하고 성공 응답을 반환한다. |
+| `run_auto_dock_pick` | Auto Dock PICK 요청과 `AUTO_DOCK_PICK_COMPLETED` 대기를 처리한다. |
+| `run_manual_pick` | Fork UP 요청, `FORK_UP_COMPLETE` 대기, `/picked` 상태 전이를 처리한다. |
+| `complete_pick` | `PICK_COMPLETED` event가 Inventory PICK을 성공 처리했는지 확인한다. |
+| `drive_to_p3` | P3 outbound FollowWaypoints 요청·성공 대기를 처리한다. |
+| `lower_fork` | Fork DOWN 요청과 `FORK_DOWN_COMPLETE` 대기를 처리한다. |
+| `complete_place` | `PLACE_READY` event가 Inventory PLACE를 성공 처리했는지 확인하고 `/placed`로 operation context를 해제한다. |
+| `reverse_after_place` | operation ID 없이 `-0.18 m/s`, `1000 ms` 후진과 만료를 확인한다. |
+| `return_to_docker` | operation ID 없이 Docker 경로 완료·정지와 `RETURN_COMPLETED` 기록을 처리한다. |
+| `abort_mission` | 재진입 안전한 stop 요청과 shell 종료를 처리한다. |
+
+main 함수는 `run_auto_dock_pick` 또는 `run_manual_pick` 중 하나만 호출한 뒤,
+나머지 공통 함수를 순서대로 호출한다.
 
 Outbound 경로는 다음 waypoint를 사용한다.
 
@@ -170,11 +210,15 @@ Fleet Manager와 Inventory는 중앙 서버에서 각각 `127.0.0.1:8090`,
 
 1. Fleet Manager가 `WAIT`가 아닌 차량에는 Inventory 작업을 만들지 않는다.
 2. 시작 요청은 Inventory operation ID를 shell에 전달하며, 중복 미션 시작을 거절한다.
-3. `PICK_COMPLETED`와 `PLACE_READY`가 각각 한 번만 올바른 Inventory completion을 호출한다.
-4. 순서 위반·다른 robot ID·Inventory 409는 event endpoint가 거절한다.
-5. Fleet Manager stop은 Vehicle Command API stop relay와 shell process group `SIGTERM`을
+3. `auto_dock`은 `AUTO_DOCK_PICK_COMPLETED`, `manual`은 `FORK_UP_COMPLETE` 전에는
+   `PICK_COMPLETED` event를 보내지 않는다.
+4. `PICK_COMPLETED`와 `PLACE_READY`가 각각 한 번만 올바른 Inventory completion을 호출한다.
+5. 순서 위반·다른 robot ID·Inventory 409는 event endpoint가 거절한다.
+6. 수동 PICK의 `/picked`는 `FORK_UP_COMPLETE` 없는 operation ID를 거절하며, auto dock
+   PICK에는 필요하지 않다.
+7. Fleet Manager stop은 Vehicle Command API stop relay와 shell process group `SIGTERM`을
    모두 수행하며, stop 뒤 다음 shell 명령이 실행되지 않는다.
-6. shell은 단계별 local API 성공/완료 상태와 5초 Fleet Manager event 응답 유예를 확인한다.
-7. PLACE 성공 뒤 후진·return command에는 operation ID가 없고, 후진 또는 return 실패가
+8. shell은 단계별 local API 성공/완료 상태와 5초 Fleet Manager event 응답 유예를 확인한다.
+9. PLACE 성공 뒤 후진·return command에는 operation ID가 없고, 후진 또는 return 실패가
    Inventory 완료를 되돌리지 않는다.
-8. `RETURN_COMPLETED`는 Docker 도착과 Nav2 정지 뒤에만 기록된다.
+10. `RETURN_COMPLETED`는 Docker 도착과 Nav2 정지 뒤에만 기록된다.
