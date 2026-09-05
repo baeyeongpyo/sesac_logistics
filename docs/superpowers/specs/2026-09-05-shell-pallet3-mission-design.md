@@ -200,9 +200,11 @@ Inventory operation은 이미 완료이며, 차량 복귀만 별도 복구한다
 - direct 실행 중에는 Logistics Orchestrator를 중지하고 Fleet Manager의
   `ORCHESTRATOR_EVENT_URL`을 비운다. Fleet Manager 상태 저장·대시보드 표시는 계속된다.
 
-Fleet Manager와 Inventory는 중앙 서버에서 각각 `127.0.0.1:8090`,
-`127.0.0.1:8081`을 기본으로 사용한다. 차량 shell의 local Vehicle Command API 기본
-주소는 `http://127.0.0.1:8082`이다.
+Fleet Manager가 중앙 서버의 Inventory에 연결할 때는 `127.0.0.1:8081`을 기본으로
+사용한다. 차량 shell에 전달하는 Fleet Manager 공개 event URL은
+`http://192.168.100.27:8090`을 기본으로 사용하며, 차량에서 `127.0.0.1`을 중앙 서버로
+해석하지 않는다. 차량 shell의 local Vehicle Command API 기본 주소는
+`http://127.0.0.1:8082`이다.
 
 ## 검증
 

@@ -148,7 +148,6 @@ vehicles:
                 vehicle_registry_path=registry_path,
                 bridge_client=self.bridge,
                 inventory_client=self.inventory,
-                fleet_manager_url="http://fleet.example:8090",
             )
         )
         self.client.__enter__()
@@ -180,6 +179,10 @@ vehicles:
         )
         self.assertEqual(started.status_code, 202)
         operation_id = started.json()["operation_id"]
+        self.assertEqual(
+            self.bridge.calls[0][2]['fleet_manager_url'],
+            'http://192.168.100.27:8090',
+        )
         event_url = f"/api/v1/vehicles/robot_1/missions/pallet3/{operation_id}/events"
 
         self.assertEqual(

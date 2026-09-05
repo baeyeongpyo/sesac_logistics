@@ -70,7 +70,7 @@ def create_app(
     bridge_client: BridgeCommandGateway | None = None,
     inventory_client: InventoryGateway | None = None,
     inventory_url: str = "http://127.0.0.1:8081",
-    fleet_manager_url: str = "http://127.0.0.1:8090",
+    fleet_manager_url: str = "http://192.168.100.27:8090",
 ) -> FastAPI:
     registry_path = vehicle_registry_path or (
         Path(__file__).resolve().parents[1] / "config" / "vehicles.yaml"
@@ -345,6 +345,6 @@ app = create_app(
     vehicle_registry_path=os.getenv("VEHICLE_REGISTRY_PATH") or None,
     inventory_url=os.getenv("INVENTORY_URL", "http://127.0.0.1:8081"),
     fleet_manager_url=os.getenv(
-        "FLEET_MANAGER_PUBLIC_URL", "http://127.0.0.1:8090"
+        "FLEET_MANAGER_PUBLIC_URL", "http://192.168.100.27:8090"
     ),
 )
