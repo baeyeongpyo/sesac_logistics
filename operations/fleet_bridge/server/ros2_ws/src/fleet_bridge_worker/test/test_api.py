@@ -303,6 +303,28 @@ class CommandApiTest(unittest.TestCase):
             for method, _suffix, payload, vehicle_path in requests
         ])
 
+    def test_pallet3_mission_relay_preserves_operation_robot_and_pick_mode(self):
+        client, vehicle_api = self.client(
+            response=VehicleCommandResponse(status_code=202, body={'state': 'STARTING'}),
+        )
+        payload = {
+            'operation_id': 'operation-1',
+            'robot_id': 'robot_1',
+            'pick_mode': 'manual',
+            'fleet_manager_url': 'http://fleet.example:8090',
+        }
+
+        response = client.post(
+            '/api/v1/vehicle-command/robot_1/missions/pallet3', json=payload
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json(), {'state': 'STARTING'})
+        self.assertEqual(
+            vehicle_api.calls,
+            [('robot_1', 'POST', '/v1/missions/pallet3', payload)],
+        )
+
     def test_vehicle_command_relay_preserves_vehicle_error_response(self):
         client, _vehicle_api = self.client(
             error=VehicleCommandApiError(

@@ -741,6 +741,49 @@ def create_app(
         )
 
     @app.post(
+        '/api/v1/vehicle-command/{robot_id}/missions/pallet3',
+        tags=['vehicle-command relay'],
+        summary='Pallet 3 direct mission 시작 전달',
+        description=(
+            'Fleet Manager가 생성한 Inventory operation과 PICK 방식을 차량의 shell mission '
+            'supervisor로 그대로 전달합니다. 이후의 Nav2·포크·Inventory 완료 순서는 차량 shell과 '
+            'Fleet Manager mission event API가 처리합니다.'
+        ),
+        responses={
+            202: {
+                'description': '차량이 Pallet 3 shell process group을 시작했습니다.',
+            },
+            409: {'description': '차량이 활성 미션 또는 유효하지 않은 시작 상태로 거부했습니다.'},
+            422: {'description': '차량이 operation ID 또는 PICK 방식 형식을 거부했습니다.'},
+            **_relay_error_responses(),
+        },
+    )
+    async def vehicle_pallet3_mission(
+        robot_id: RobotId,
+        payload: Any = Body(
+            ...,
+            description='Fleet Manager가 만든 차량-native Pallet 3 mission 시작 요청입니다.',
+            openapi_examples={
+                'manual-pick': {
+                    'summary': '수동 포크 PICK 방식',
+                    'value': {
+                        'operation_id': '73d5b9af-5a12-4f34-a96c-5de116df1e8e',
+                        'robot_id': 'robot_1',
+                        'pick_mode': 'manual',
+                        'fleet_manager_url': 'http://fleet-manager:8090',
+                    },
+                },
+            },
+        ),
+    ) -> JSONResponse:
+        return await relay_vehicle_command(
+            robot_id,
+            'POST',
+            '/v1/missions/pallet3',
+            payload,
+        )
+
+    @app.post(
         '/api/v1/vehicle-command/{robot_id}/stop',
         tags=['vehicle-command relay'],
         summary='즉시 정지 요청 전달',
