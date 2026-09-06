@@ -74,20 +74,25 @@ import numpy as np
 import rclpy
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Twist
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid, Odometry
 from python_qt_binding.QtCore import QEvent, QPointF, QRect, Qt, QTimer
 from python_qt_binding.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from python_qt_binding.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QGridLayout, QGroupBox, QHBoxLayout,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QGridLayout, QGroupBox, QHBoxLayout,
     QDoubleSpinBox, QLabel, QListWidget, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSlider,
     QVBoxLayout, QWidget,
 )
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from ros_robot_controller_msgs.msg import MotorsState
-from sensor_msgs.msg import Image, LaserScan
+from sensor_msgs.msg import CameraInfo, Image, LaserScan, Imu
 from std_msgs.msg import Empty, String, UInt16
-from auto_dock.auto_dock_node import detect_y_slot_x
+from auto_dock.auto_dock_node import (
+    detect_y_slot_x, YSlotTracker, YTopLineTracker,
+)
+from motion_samples import save_samples, top_border_measurement
+from floor_calibration import floor_point
+from floor_calibration_gui import FloorCalibrationDialog
 
 
 VEHICLE_HOSTS = {1: "192.168.100.38", 2: "192.168.100.35"}
@@ -311,13 +316,11 @@ def detect_warning_tape_debug(
     return debug
 
 
-def detect_y_slot_x_debug(frame, minimum_yellow_pixels=600, filter_config=None):
+def detect_y_slot_x_debug(frame, minimum_yellow_pixels=600, filter_config=None, tracker=None):
     """Run the exact AutoDock Y-slot X detector and retain overlay evidence."""
     height, width = frame.shape[:2]
     values = filter_config if isinstance(filter_config, dict) else {}
-    roi_top = int(round(max(0.0, min(
-        0.95, float(values.get("roi_top_ratio", 0.70))
-    )) * height))
+    roi_top = 0
     hsv = cv2.cvtColor(frame[roi_top:, :], cv2.COLOR_BGR2HSV)
     x_s_min = int(values.get("y_slot_x_s_min", 40))
     raw_mask = cv2.inRange(
@@ -331,7 +334,8 @@ def detect_y_slot_x_debug(frame, minimum_yellow_pixels=600, filter_config=None):
             int(values.get("v_max", 255)),
         ), dtype=np.uint8),
     )
-    result = detect_y_slot_x(
+    detector = detect_y_slot_x if tracker is None else tracker.update
+    result = detector(
         frame, minimum_yellow_pixels=minimum_yellow_pixels,
         filter_config=filter_config,
     )
@@ -362,7 +366,9 @@ def detect_y_slot_x_debug(frame, minimum_yellow_pixels=600, filter_config=None):
         debug.update({
             "center_y_ratio": float(result["center_y_ratio"]),
             "angle_deg": 0.0,
-            "x_lines": result.get("x_lines"),
+            "x_lines": None if result.get("x_lines") is None else np.asarray(result["x_lines"]).tolist(),
+            "square_corners_px": result.get("square_corners_px"),
+            "tracking_sequence": result.get("tracking_sequence"),
             "border_angle_deg": result.get("border_angle_deg"),
             "border_line_count": int(result.get("border_line_count", 0)),
             "border_lines": result.get("border_lines"),
@@ -377,11 +383,18 @@ class DevControlClientNode(Node):
         super().__init__(getattr(args, "node_name", "dev_control_client"))
         self.viewer_only = args.viewer_only
         self.bridge = CvBridge()
+        self.video_enabled = True
         self.frame = None
         self.frame_sequence = 0
         self.last_frame_monotonic = 0.0
         self.tape_frame = None
         self.tape_frame_monotonic = 0.0
+        self.tape_frame_source_stamp_ns = 0
+        self.tape_frame_id = ""
+        self.calibration_frame_lock = threading.Lock()
+        self.pending_registered_depth = None
+        self.latest_registered_rgb_depth_pair = None
+        self.registered_depth_camera_info = None
         self.secondary_frame = None
         self.secondary_frame_sequence = 0
         self.secondary_last_frame_monotonic = 0.0
@@ -419,6 +432,13 @@ class DevControlClientNode(Node):
         self.tape_image_sub = self.create_subscription(
             Image, args.tape_image_topic, self.on_tape_image, qos
         )
+        self.registered_depth_sub = self.create_subscription(
+            Image, args.registered_depth_topic, self.on_registered_depth, qos
+        )
+        self.registered_depth_info_sub = self.create_subscription(
+            CameraInfo, args.registered_depth_camera_info_topic,
+            self.on_registered_depth_camera_info, qos,
+        )
         self.secondary_image_sub = None
         if args.secondary_image_topic:
             self.secondary_image_sub = self.create_subscription(
@@ -440,9 +460,43 @@ class DevControlClientNode(Node):
         self.detection_sub = self.create_subscription(
             String, args.detection_topic, self.on_detection, 10
         )
+        self.control_event_sink = None
+        self.latest_cmd_vel = None
+        self.motion_sensor_sink = None
+        self.motion_sensor_last = {}
+        self.motion_sensor_subs = []
+        for topic, message_type in (("/odom_raw", Odometry), ("/odom", Odometry),
+                                    ("/imu", Imu), ("/ros_robot_controller/imu_raw", Imu)):
+            self.motion_sensor_subs.append(self.create_subscription(
+                message_type, topic,
+                lambda msg, topic=topic: self.on_motion_sensor(topic, msg),
+                QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT),
+            ))
+        self.cmd_observer = self.create_subscription(
+            Twist, args.cmd_vel_topic, self.on_recorded_cmd_vel,
+            QoSProfile(depth=100, reliability=ReliabilityPolicy.BEST_EFFORT),
+        )
+        self.fork_observer = self.create_subscription(
+            String, args.fork_command_topic, self.on_recorded_fork, 100
+        )
         self.cmd_pub = self.create_publisher(Twist, args.cmd_vel_topic, 10)
         self.fork_pub = self.create_publisher(String, args.fork_command_topic, 10)
         self.arrival_pub = self.create_publisher(String, args.arrival_topic, 10)
+        self.y_slot_insertion_pub = self.create_publisher(
+            String, args.y_slot_insertion_topic, 10
+        )
+        self.y_slot_insertion_default_pub = self.create_publisher(
+            String, args.y_slot_insertion_default_topic, 10
+        )
+        self.y_slot_response_config_pub = self.create_publisher(
+            String, args.y_slot_response_config_topic, 10
+        )
+        self.y_slot_pose_source_pub = self.create_publisher(
+            String, args.y_slot_pose_source_topic, 10
+        )
+        self.test_load_state_pub = self.create_publisher(
+            String, "/auto_dock/test/load_state", 10
+        )
         self.auto_dock_stop_pub = self.create_publisher(
             Empty, args.auto_dock_stop_topic, 10
         )
@@ -493,19 +547,13 @@ class DevControlClientNode(Node):
 
     def publish_arrival(
         self, location="DOCK_1", operation="PICK",
-        product_type="NORMAL", insertion_distance_cm=None,
-        legacy_recognition=False,
+        product_type="NORMAL", insertion_distance_cm=None, stage_only=False,
     ):
         location = str(location).strip().upper()
         operation = str(operation).strip().upper()
         product_type = str(product_type).strip().upper()
         target = (
-            {
-                "type": "NEAREST",
-                "recognition_mode": (
-                    "LEGACY" if legacy_recognition else "CURRENT"
-                ),
-            }
+            {"type": "NEAREST"}
             if location == "DOCK_1" and operation == "PICK"
             else {"type": "NONE"}
         )
@@ -518,23 +566,20 @@ class DevControlClientNode(Node):
         }
         if insertion_distance_cm is not None:
             payload["insertion_distance_cm"] = float(insertion_distance_cm)
+        if stage_only:
+            payload["stage_only"] = True
         self.arrival_pub.publish(String(data=json.dumps(
             payload, ensure_ascii=False, separators=(",", ":")
         )))
         return payload
 
-    def publish_nearest_arrival(self, product_type, legacy_recognition=False):
+    def publish_nearest_arrival(self, product_type):
         payload = {
             "status": "SUCCEEDED",
             "location": "DOCK_1",
             "operation": "PICK",
             "product_type": str(product_type).strip().upper(),
-            "target": {
-                "type": "NEAREST",
-                "recognition_mode": (
-                    "LEGACY" if legacy_recognition else "CURRENT"
-                ),
-            },
+            "target": {"type": "NEAREST"},
         }
         self.arrival_pub.publish(String(data=json.dumps(
             payload, ensure_ascii=False, separators=(",", ":")
@@ -543,6 +588,32 @@ class DevControlClientNode(Node):
 
     def publish_auto_dock_stop(self):
         self.auto_dock_stop_pub.publish(Empty())
+
+    def publish_y_slot_insertion(self, distance_cm):
+        payload = {"distance_cm": float(distance_cm)}
+        self.y_slot_insertion_pub.publish(String(data=json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":")
+        )))
+        return payload
+
+    def publish_y_slot_insertion_default(self, distance_cm):
+        payload = {"distance_cm": float(distance_cm)}
+        self.y_slot_insertion_default_pub.publish(String(data=json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":")
+        )))
+        return payload
+
+    def publish_y_slot_response_config(self, values):
+        payload = {str(key): float(value) for key, value in values.items()}
+        self.y_slot_response_config_pub.publish(String(data=json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":")
+        )))
+        return payload
+
+    def publish_y_slot_pose_source(self, source):
+        value = str(source).strip().lower()
+        self.y_slot_pose_source_pub.publish(String(data=value))
+        return value
 
     def publish_dock_inventory_reset(self):
         self.dock_inventory_reset_pub.publish(Empty())
@@ -623,15 +694,121 @@ class DevControlClientNode(Node):
             self.get_logger().warning("invalid detection JSON received")
 
     def on_image(self, msg):
+        if not self.video_enabled:
+            return
         self.frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         self.frame_sequence += 1
         self.last_frame_monotonic = time.monotonic()
 
     def on_tape_image(self, msg):
-        self.tape_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-        self.tape_frame_monotonic = time.monotonic()
+        if not self.video_enabled:
+            return
+        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        rgb = {
+            "frame": frame,
+            "received_monotonic": time.monotonic(),
+            "source_stamp_ns": (
+                int(msg.header.stamp.sec) * 1_000_000_000
+                + int(msg.header.stamp.nanosec)
+            ),
+            "frame_id": str(msg.header.frame_id),
+        }
+        with self.calibration_frame_lock:
+            self.tape_frame = frame
+            self.tape_frame_monotonic = rgb["received_monotonic"]
+            self.tape_frame_source_stamp_ns = rgb["source_stamp_ns"]
+            self.tape_frame_id = rgb["frame_id"]
+            pending = self.pending_registered_depth
+            if pending is not None and pending["stamp_ns"] == rgb["source_stamp_ns"]:
+                self.latest_registered_rgb_depth_pair = {
+                    "rgb": dict(rgb, frame=frame.copy()), "depth": pending,
+                }
+                self.pending_registered_depth = None
+
+    def on_registered_depth(self, msg):
+        stamp_ns = (
+            int(msg.header.stamp.sec) * 1_000_000_000
+            + int(msg.header.stamp.nanosec)
+        )
+        frame = {
+                "stamp_ns": stamp_ns,
+                "frame_id": str(msg.header.frame_id),
+                "width": int(msg.width),
+                "height": int(msg.height),
+                "step": int(msg.step),
+                "encoding": str(msg.encoding),
+                "is_bigendian": bool(msg.is_bigendian),
+                # Retained only in memory until the operator stores sparse line samples.
+                "data": bytes(msg.data),
+                "received_monotonic": time.monotonic(),
+            }
+        with self.calibration_frame_lock:
+            if frame["stamp_ns"] == self.tape_frame_source_stamp_ns:
+                self.latest_registered_rgb_depth_pair = {
+                    "rgb": {
+                        "frame": self.tape_frame.copy(),
+                        "received_monotonic": self.tape_frame_monotonic,
+                        "source_stamp_ns": self.tape_frame_source_stamp_ns,
+                        "frame_id": self.tape_frame_id,
+                    },
+                    "depth": frame,
+                }
+                self.pending_registered_depth = None
+            else:
+                # One callback-order bridge only; newer unmatched depth replaces it.
+                self.pending_registered_depth = frame
+
+    def on_registered_depth_camera_info(self, msg):
+        info = {
+            "source_stamp_ns": (
+                int(msg.header.stamp.sec) * 1_000_000_000
+                + int(msg.header.stamp.nanosec)
+            ),
+            "frame_id": str(msg.header.frame_id),
+            "image_size": [int(msg.width), int(msg.height)],
+            "k": [float(value) for value in msg.k],
+            "d": [float(value) for value in msg.d],
+        }
+        with self.calibration_frame_lock:
+            self.registered_depth_camera_info = info
+
+    def calibration_rgb_snapshot(self):
+        with self.calibration_frame_lock:
+            if self.tape_frame is None:
+                return None
+            return {
+                "frame": self.tape_frame.copy(),
+                "received_monotonic": self.tape_frame_monotonic,
+                "source_stamp_ns": self.tape_frame_source_stamp_ns,
+                "frame_id": self.tape_frame_id,
+            }
+
+    def calibration_registered_pair_snapshot(self):
+        with self.calibration_frame_lock:
+            pair = self.latest_registered_rgb_depth_pair
+            info = (None if self.registered_depth_camera_info is None
+                    else dict(self.registered_depth_camera_info))
+            if pair is None:
+                raise ValueError("source stamp가 같은 RGB/registered depth pair가 없습니다")
+            rgb = dict(pair["rgb"], frame=pair["rgb"]["frame"].copy())
+            depth = dict(pair["depth"])
+        image_size = list(rgb["frame"].shape[1::-1])
+        frame_id = rgb["frame_id"]
+        if depth["stamp_ns"] != rgb["source_stamp_ns"]:
+            raise ValueError("RGB와 registered depth source stamp가 다릅니다")
+        if [depth["width"], depth["height"]] != list(image_size):
+            raise ValueError("RGB와 registered depth 해상도가 다릅니다")
+        if depth["frame_id"] != str(frame_id):
+            raise ValueError("RGB와 registered depth frame_id가 다릅니다")
+        if not isinstance(info, dict):
+            raise ValueError("registered depth CameraInfo가 없습니다")
+        if info["frame_id"] != depth["frame_id"] or info["image_size"] != list(image_size):
+            raise ValueError("registered depth와 CameraInfo 좌표계가 다릅니다")
+        return rgb, depth, info
 
     def on_secondary_image(self, msg):
+        if not self.video_enabled:
+            return
         self.secondary_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         self.secondary_frame_sequence += 1
         self.secondary_last_frame_monotonic = time.monotonic()
@@ -646,10 +823,15 @@ class DevControlClientNode(Node):
         sequence_attr = "frame_sequence" if stream_name == "primary" else f"{stream_name}_frame_sequence"
         age_attr = "last_frame_monotonic" if stream_name == "primary" else f"{stream_name}_last_frame_monotonic"
         while not self.secondary_stream_stop.is_set():
+            if not self.video_enabled:
+                self.secondary_stream_stop.wait(.1)
+                continue
             try:
                 with urllib.request.urlopen(url, timeout=5) as response:
                     buffer = bytearray()
                     while not self.secondary_stream_stop.is_set():
+                        if not self.video_enabled:
+                            break
                         chunk = response.read(16384)
                         if not chunk:
                             break
@@ -669,6 +851,9 @@ class DevControlClientNode(Node):
             except Exception as exc:
                 self.get_logger().warning(f"external webcam {stream_name} unavailable: {exc}")
                 self.secondary_stream_stop.wait(1.0)
+
+    def set_video_enabled(self, enabled):
+        self.video_enabled = bool(enabled)
 
     def on_scan(self, msg):
         self.last_scan_monotonic = time.monotonic()
@@ -699,6 +884,52 @@ class DevControlClientNode(Node):
         cutoff = now - 600.0
         while self.battery_samples and self.battery_samples[0][0] < cutoff:
             del self.battery_samples[0]
+
+    def on_recorded_cmd_vel(self, msg):
+        self.latest_cmd_vel = {
+            "linear_x": float(msg.linear.x), "linear_y": float(msg.linear.y),
+            "angular_z": float(msg.angular.z), "received_monotonic": time.monotonic(),
+        }
+        if self.control_event_sink is not None:
+            self.control_event_sink("cmd_vel", **self.latest_cmd_vel)
+
+    def on_motion_sensor(self, topic, msg):
+        received = time.monotonic()
+        self.motion_sensor_last[topic] = received
+        if self.motion_sensor_sink is None:
+            return
+        is_odom = isinstance(msg, Odometry)
+        q = msg.pose.pose.orientation if is_odom else msg.orientation
+        norm = q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w
+        valid = norm > 1e-12 and (is_odom or msg.orientation_covariance[0] != -1)
+        yaw = math.degrees(math.atan2(2*(q.w*q.z + q.x*q.y),
+                                     norm - 2*(q.y*q.y + q.z*q.z))) if valid else None
+        data = {
+            "topic": topic, "received_monotonic": received,
+            "header_stamp_sec": msg.header.stamp.sec,
+            "header_stamp_nanosec": msg.header.stamp.nanosec,
+            "frame_id": msg.header.frame_id,
+            "orientation_xyzw": [q.x, q.y, q.z, q.w], "yaw_deg": yaw,
+        }
+        if is_odom:
+            p, v = msg.pose.pose.position, msg.twist.twist
+            data.update(child_frame_id=msg.child_frame_id,
+                        position_m=[p.x, p.y, p.z],
+                        linear_velocity_m_s=[v.linear.x, v.linear.y, v.linear.z],
+                        angular_velocity_rad_s=[v.angular.x, v.angular.y, v.angular.z],
+                        pose_covariance=list(msg.pose.covariance),
+                        twist_covariance=list(msg.twist.covariance))
+        else:
+            w, a = msg.angular_velocity, msg.linear_acceleration
+            data.update(angular_velocity_rad_s=[w.x, w.y, w.z],
+                        linear_acceleration_m_s2=[a.x, a.y, a.z],
+                        orientation_covariance=list(msg.orientation_covariance),
+                        angular_velocity_covariance=list(msg.angular_velocity_covariance))
+        self.motion_sensor_sink("sensor", **data)
+
+    def on_recorded_fork(self, msg):
+        if self.control_event_sink is not None:
+            self.control_event_sink("fork_command", command=msg.data)
 
     def publish(self, linear_x, linear_y, angular_z):
         if self.viewer_only:
@@ -748,6 +979,7 @@ class HttpViewerSource:
     """Three MJPEG inputs with the same frame interface as DevControlClientNode."""
 
     def __init__(self, args):
+        self.video_enabled = True
         self.frame = None
         self.frame_sequence = 0
         self.last_frame_monotonic = 0.0
@@ -797,6 +1029,9 @@ class HttpViewerSource:
 
     def read_mjpeg_command(self, command):
         while not self.secondary_stream_stop.is_set():
+            if not self.video_enabled:
+                self.secondary_stream_stop.wait(.1)
+                continue
             process = subprocess.Popen(
                 shlex.split(command), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
             )
@@ -804,6 +1039,8 @@ class HttpViewerSource:
             buffer = bytearray()
             try:
                 while not self.secondary_stream_stop.is_set():
+                    if not self.video_enabled:
+                        break
                     chunk = process.stdout.read(16384)
                     if not chunk:
                         break
@@ -841,10 +1078,15 @@ class HttpViewerSource:
         sequence_attr = "frame_sequence" if stream_name == "primary" else f"{stream_name}_frame_sequence"
         age_attr = "last_frame_monotonic" if stream_name == "primary" else f"{stream_name}_last_frame_monotonic"
         while not self.secondary_stream_stop.is_set():
+            if not self.video_enabled:
+                self.secondary_stream_stop.wait(.1)
+                continue
             try:
                 with urllib.request.urlopen(url, timeout=5) as response:
                     buffer = bytearray()
                     while not self.secondary_stream_stop.is_set():
+                        if not self.video_enabled:
+                            break
                         chunk = response.read(16384)
                         if not chunk:
                             break
@@ -863,6 +1105,9 @@ class HttpViewerSource:
                             del buffer[:-2]
             except Exception:
                 self.secondary_stream_stop.wait(1.0)
+
+    def set_video_enabled(self, enabled):
+        self.video_enabled = bool(enabled)
 
     def send_control(self, payload):
         if not self.control_url and not self.control_command:
@@ -1078,7 +1323,26 @@ class TeleopWindow(QMainWindow):
     def __init__(self, node, args):
         super().__init__()
         self.node = node
+        self.control_log_file = None
+        self.motion_sensor_file = None
+        self.motion_sensor_counts = {}
+        self.node.motion_sensor_sink = self.write_motion_sensor_record
+        self.slot_observation_file = None
+        self.sample_tracker = None
+        self.sample_top_tracker = None
+        self.y_top_line_tracker = YTopLineTracker()
+        self.sample_last_frame_at = None
+        self.recording_keys = set()
+        self.recording_started_monotonic = None
+        self.node.control_event_sink = self.write_control_record
         self.args = args
+        self.floor_calibration_window = None
+        self.floor_calibration_profile = None
+        try:
+            self.floor_calibration_profile = json.loads(Path(args.pose_config).read_text()).get(
+                "floor_calibration_presets", {}).get("loaded")
+        except (OSError, ValueError, TypeError):
+            pass
         self.pressed = set()
         self.movement_release_timers = {}
         self.last_displayed_sequence = (-1, -1, -1)
@@ -1089,6 +1353,7 @@ class TeleopWindow(QMainWindow):
         self.frame_log_path = None
         self.telemetry_session = None
         self.recorded_frames = 0
+        self.video_display_enabled = True
         self.auto_dock_log_file = None
         self.auto_dock_log_path = None
         self.last_logged_auto_dock_status = None
@@ -1135,6 +1400,9 @@ class TeleopWindow(QMainWindow):
         self.battery_label.setObjectName("status")
         self.y_slot_center_label = QLabel("Y 슬롯 X 중심: arrival 대기")
         self.y_slot_center_label.setObjectName("status")
+        self.y_slot_center_label.setToolTip(
+            "Y 정렬: 회전 → 최대 0.5초 직진 → 정지·새 영상 확인 → 최종 정렬"
+        )
 
         self.linear, self.linear_value = self.speed_slider(
             args.linear_speed, 0.01, 0.30, 0.01, " m/s"
@@ -1157,14 +1425,25 @@ class TeleopWindow(QMainWindow):
         self.record.setCheckable(True)
         self.record.toggled.connect(self.toggle_recording)
         self.record_label = QLabel("Not recording")
+        self.video_toggle = QPushButton("화면 끄기")
+        self.video_toggle.setCheckable(True)
+        self.video_toggle.toggled.connect(self.toggle_video_display)
         record_row = QHBoxLayout()
         record_row.addWidget(self.record)
+        record_row.addWidget(self.video_toggle)
         record_row.addWidget(self.record_label, 1)
 
 
-        self.arrival_location = QComboBox()
-        for location in ("DOCK_1", "Y1", "Y2", "Y3", "Y4"):
-            self.arrival_location.addItem(location, location)
+        self.arrival_location = QButtonGroup(self)
+        zone_buttons = QHBoxLayout()
+        for index, (label, location) in enumerate((("DOCK", "DOCK_1"), ("Y", "Y"))):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setProperty("location", location)
+            button.setMaximumWidth(75)
+            self.arrival_location.addButton(button, index)
+            zone_buttons.addWidget(button)
+            button.setChecked(index == 0)
         self.arrival_operation = QComboBox()
         self.arrival_operation.addItem("PICK", "PICK")
         self.arrival_operation.addItem("PLACE", "PLACE")
@@ -1174,10 +1453,18 @@ class TeleopWindow(QMainWindow):
         self.y_slot_insertion_distance = QDoubleSpinBox()
         self.y_slot_insertion_distance.setRange(1.0, 100.0)
         self.y_slot_insertion_distance.setDecimals(1)
-        self.y_slot_insertion_distance.setValue(25.0)
+        self.y_slot_insertion_distance.setValue(35.0)
         self.y_slot_insertion_distance.setSuffix(" cm")
         self.y_slot_insertion_distance.setEnabled(False)
-        self.arrival_location.currentIndexChanged.connect(
+        self.y_slot_insertion_button = QPushButton("Insertion 실행")
+        self.y_slot_insertion_button.setEnabled(False)
+        self.y_slot_insertion_button.clicked.connect(
+            self.publish_y_slot_insertion_trigger
+        )
+        self.y_slot_insertion_distance.valueChanged.connect(
+            self.publish_y_slot_insertion_default_trigger
+        )
+        self.arrival_location.buttonClicked.connect(
             self.on_arrival_location_changed
         )
         self.arrival_button = QPushButton("선택 Arrival 발행")
@@ -1189,28 +1476,37 @@ class TeleopWindow(QMainWindow):
         self.nearest_arrival_button.clicked.connect(
             self.publish_nearest_arrival_trigger
         )
-        self.legacy_entity_recognition = QCheckBox("이전 버전 엔티티 인식")
-        self.legacy_entity_recognition.setChecked(True)
+        self.loaded_button = QPushButton("LOADED 강제")
+        self.loaded_button.clicked.connect(
+            lambda: self.publish_test_load_state("LOADED")
+        )
+        self.unloaded_button = QPushButton("UNLOADED 강제")
+        self.unloaded_button.clicked.connect(
+            lambda: self.publish_test_load_state("UNLOADED")
+        )
         self.auto_dock_stop_button = QPushButton("AUTO-DOCK STOP 발행")
         self.auto_dock_stop_button.clicked.connect(self.publish_auto_dock_stop)
         self.auto_dock_status_label = QLabel("AUTO-DOCK 상태: 수신 대기")
         self.fork_flow_status_label = QLabel("Fork/Ready 상태: 수신 대기")
         self.operation_label = QLabel("Arrival 명령 대기")
         arrival_layout = QGridLayout()
-        arrival_layout.addWidget(self.arrival_location, 0, 0)
+        arrival_layout.addLayout(zone_buttons, 0, 0)
         arrival_layout.addWidget(self.arrival_operation, 0, 1)
         arrival_layout.addWidget(self.arrival_product, 0, 2)
         arrival_layout.addWidget(self.arrival_button, 0, 3, 1, 2)
-        arrival_layout.addWidget(QLabel("Y 삽입 직진거리"), 1, 0)
+        arrival_layout.addWidget(QLabel("Y 40cm 정렬 후 별도 직진"), 1, 0)
         arrival_layout.addWidget(self.y_slot_insertion_distance, 1, 1)
+        arrival_layout.addWidget(self.y_slot_insertion_button, 1, 2)
         arrival_layout.addWidget(self.auto_dock_stop_button, 1, 3, 1, 2)
         arrival_layout.addWidget(QLabel("태그 미지정"), 2, 0)
         arrival_layout.addWidget(self.nearest_product, 2, 1)
         arrival_layout.addWidget(self.nearest_arrival_button, 2, 2)
-        arrival_layout.addWidget(self.legacy_entity_recognition, 2, 3, 1, 2)
-        arrival_layout.addWidget(self.auto_dock_status_label, 3, 0, 1, 5)
-        arrival_layout.addWidget(self.fork_flow_status_label, 4, 0, 1, 5)
-        arrival_layout.addWidget(self.operation_label, 5, 0, 1, 5)
+        arrival_layout.addWidget(QLabel("테스트 적재상태"), 2, 3)
+        arrival_layout.addWidget(self.loaded_button, 2, 4)
+        arrival_layout.addWidget(self.unloaded_button, 3, 4)
+        arrival_layout.addWidget(self.auto_dock_status_label, 4, 0, 1, 5)
+        arrival_layout.addWidget(self.fork_flow_status_label, 5, 0, 1, 5)
+        arrival_layout.addWidget(self.operation_label, 6, 0, 1, 5)
 
         self.memo = QPlainTextEdit()
         self.memo.setPlaceholderText("캡처 메모 (이미지와 별도 JSON으로 저장)")
@@ -1280,6 +1576,47 @@ class TeleopWindow(QMainWindow):
         arrival_panel = QGroupBox("Auto Dock")
         arrival_panel.setLayout(arrival_layout)
         control_details_layout.addWidget(arrival_panel)
+        response_layout = QGridLayout()
+        self.y_slot_response_controls = {}
+        self.y_slot_pose_source = QComboBox()
+        self.y_slot_pose_source.addItem("호모그래피 · 50/80cm", "homography")
+        self.y_slot_pose_source.addItem("Depth · 렌즈 보정", "depth")
+        source_index = self.y_slot_pose_source.findData(self.args.y_slot_pose_source)
+        self.y_slot_pose_source.setCurrentIndex(max(0, source_index))
+        self.y_slot_pose_source.currentIndexChanged.connect(
+            self.publish_y_slot_pose_source_trigger
+        )
+        response_layout.addWidget(QLabel("거리/자세 프리셋"), 0, 0)
+        response_layout.addWidget(self.y_slot_pose_source, 0, 1, 1, 2)
+        response_specs = (
+            ("회전 속도", "y_slot_response_angular_speed_rad_s", .10, 1.00, .01, " rad/s"),
+            ("직진 속도", "y_slot_response_linear_speed_m_s", .10, .20, .005, " m/s"),
+            ("좌 즉시 gain", "left_immediate_gain", 0., 3., .001, ""),
+            ("좌 총 gain", "left_total_gain", 0., 3., .001, ""),
+            ("우 즉시 gain", "right_immediate_gain", 0., 3., .001, ""),
+            ("우 총 gain", "right_total_gain", 0., 3., .001, ""),
+            ("방출 거리", "release_command_cm", .1, 30., .1, " cm"),
+            ("차체 응답시간", "settling_sec", .001, 3., .001, " s"),
+            ("전진 scale", "forward_scale", .10, 2., .001, ""),
+            ("구간 정지시간", "y_slot_response_settle_sec", .10, 3., .01, " s"),
+            ("Y Depth 렌즈→포크", "y_slot_depth_camera_to_fork_tip_offset_cm", 0., 60., .1, " cm"),
+            ("Y Depth 카메라 pitch", "y_slot_depth_camera_pitch_deg", -30., 30., .1, "°"),
+        )
+        configured = self.args.y_slot_response_values
+        for row, (label, key, minimum, maximum, step, suffix) in enumerate(response_specs, 1):
+            slider, number = self.response_parameter_control(
+                configured[key], minimum, maximum, step, suffix
+            )
+            self.y_slot_response_controls[key] = (slider, number)
+            response_layout.addWidget(QLabel(label), row, 0)
+            response_layout.addWidget(slider, row, 1)
+            response_layout.addWidget(number, row, 2)
+        for slider, number in self.y_slot_response_controls.values():
+            slider.valueChanged.connect(self.publish_y_slot_response_config_trigger)
+            number.valueChanged.connect(self.publish_y_slot_response_config_trigger)
+        response_panel = QGroupBox("Y 주행식 파라미터 · 트랙바/숫자 동기화")
+        response_panel.setLayout(response_layout)
+        control_details_layout.addWidget(response_panel)
         self.log_filter = QComboBox()
         for label, value in (
             ("전체", "all"), ("Auto Dock", "autodock"),
@@ -1332,6 +1669,12 @@ class TeleopWindow(QMainWindow):
         control_layout.addLayout(record_row)
         control_layout.addWidget(self.memo)
         control_layout.addLayout(capture_row)
+        self.open_floor_calibration = QPushButton("적재 바닥 2점 캘리브레이션")
+        self.open_floor_calibration.clicked.connect(self.show_floor_calibration)
+        control_layout.addWidget(self.open_floor_calibration)
+        self.use_floor_calibration = QCheckBox("현재 적재 상태 · 바닥 보정값을 녹화에 사용")
+        self.use_floor_calibration.setEnabled(bool(self.floor_calibration_profile))
+        control_layout.addWidget(self.use_floor_calibration)
         control_layout.addWidget(self.control_details)
         control_panel.setLayout(control_layout)
         main_row.addWidget(control_panel, 1, Qt.AlignTop)
@@ -1347,6 +1690,24 @@ class TeleopWindow(QMainWindow):
         # at 10 FPS while substantially reducing remote paint traffic.
         self.timer.start(100)
 
+    def show_floor_calibration(self):
+        self.cancel_movement_key_releases()
+        self.pressed.clear()
+        self.recording_keys.clear()
+        self.node.stop()
+        if self.floor_calibration_window is None:
+            self.floor_calibration_window = FloorCalibrationDialog(self, self.floor_calibration_saved)
+        self.floor_calibration_window.show()
+        self.floor_calibration_window.raise_()
+        self.floor_calibration_window.activateWindow()
+
+    def floor_calibration_saved(self, profile):
+        self.floor_calibration_profile = profile
+        self.use_floor_calibration.setEnabled(True)
+        self.use_floor_calibration.setChecked(True)
+        self.operation_label.setText("적재 바닥 보정 저장됨 · 녹화에서 좌표 확인 가능")
+        self.write_control_record("floor_calibration_saved", profile=profile)
+
     def toggle_control_details(self):
         collapsed = not self.control_details.isHidden()
         self.control_details.setHidden(collapsed)
@@ -1354,10 +1715,27 @@ class TeleopWindow(QMainWindow):
             "▼ 상세 설정 펼치기" if collapsed else "▲ 상세 설정 접기"
         )
 
+    def toggle_video_display(self, disabled):
+        self.video_display_enabled = not disabled
+        if disabled and self.record.isChecked():
+            self.record.setChecked(False)
+        self.record.setEnabled(not disabled)
+        self.capture.setEnabled(not disabled)
+        setter = getattr(self.node, 'set_video_enabled', None)
+        if callable(setter):
+            setter(not disabled)
+        self.video_toggle.setText("화면 켜기" if disabled else "화면 끄기")
+        if disabled:
+            self.video.clear()
+            self.video.setText("화면 OFF · 영상 디코딩/변환/오버레이 중지")
+        self.last_displayed_sequence = (-1, -1, -1)
+
     def on_arrival_location_changed(self, _index=None):
-        location = str(self.arrival_location.currentData() or "")
-        if location in {"Y1", "Y2", "Y3", "Y4"}:
+        location = str(self.arrival_location.checkedButton().property("location") or "")
+        if location == "Y":
+            self.y_slot_insertion_distance.setValue(35.0)
             self.y_slot_insertion_distance.setEnabled(True)
+            self.y_slot_insertion_button.setEnabled(True)
             self.arrival_operation.setCurrentIndex(
                 self.arrival_operation.findData("PLACE")
             )
@@ -1366,6 +1744,7 @@ class TeleopWindow(QMainWindow):
             )
         elif location == "DOCK_1":
             self.y_slot_insertion_distance.setEnabled(False)
+            self.y_slot_insertion_button.setEnabled(False)
             self.arrival_operation.setCurrentIndex(
                 self.arrival_operation.findData("PICK")
             )
@@ -1397,7 +1776,14 @@ class TeleopWindow(QMainWindow):
 
         recording_stems = set()
         for path in root.glob("teleop_*.*"):
-            if path.name.endswith(".frames.jsonl"):
+            sample_suffix = next((suffix for suffix in (
+                ".slot_observations.jsonl", ".motion_samples.jsonl", ".motion_schema.json", ".motion_sensors.jsonl"
+            ) if path.name.endswith(suffix)), None)
+            if sample_suffix:
+                recording_stems.add(path.name[:-len(sample_suffix)])
+            elif path.name.endswith(".controls.jsonl"):
+                recording_stems.add(path.name[:-len(".controls.jsonl")])
+            elif path.name.endswith(".frames.jsonl"):
                 recording_stems.add(path.name[:-len(".frames.jsonl")])
             elif path.suffix.lower() in {".mp4", ".jsonl"}:
                 recording_stems.add(path.stem)
@@ -1406,6 +1792,11 @@ class TeleopWindow(QMainWindow):
                 root / f"{stem}.mp4",
                 root / f"{stem}.jsonl",
                 root / f"{stem}.frames.jsonl",
+                root / f"{stem}.controls.jsonl",
+                root / f"{stem}.motion_sensors.jsonl",
+                root / f"{stem}.slot_observations.jsonl",
+                root / f"{stem}.motion_samples.jsonl",
+                root / f"{stem}.motion_schema.json",
             ]
             telemetry = root / f"{stem}.jsonl"
             frame_log = root / f"{stem}.frames.jsonl"
@@ -1722,13 +2113,103 @@ class TeleopWindow(QMainWindow):
         slider.speed_scale = scale
         return slider, label
 
+    @staticmethod
+    def response_parameter_control(value, minimum, maximum, step, suffix):
+        scale = round(1.0 / step)
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(round(minimum * scale), round(maximum * scale))
+        slider.setValue(round(value * scale))
+        slider.setMinimumWidth(190)
+        number = QDoubleSpinBox()
+        number.setRange(minimum, maximum)
+        number.setSingleStep(step)
+        number.setDecimals(max(0, int(round(math.log10(scale)))))
+        number.setValue(value)
+        number.setSuffix(suffix)
+        number.setMinimumWidth(105)
+
+        def slider_changed(raw):
+            number.blockSignals(True)
+            number.setValue(raw / scale)
+            number.blockSignals(False)
+
+        def number_changed(current):
+            slider.blockSignals(True)
+            slider.setValue(round(current * scale))
+            slider.blockSignals(False)
+
+        slider.valueChanged.connect(slider_changed)
+        number.valueChanged.connect(number_changed)
+        slider.parameter_scale = scale
+        return slider, number
+
+    def publish_y_slot_response_config_trigger(self, _value=None):
+        if self.args.http_viewer_only:
+            return
+        values = {
+            key: number.value()
+            for key, (_slider, number) in self.y_slot_response_controls.items()
+        }
+        self.node.publish_y_slot_response_config(values)
+        self.operation_label.setText("Y 주행식 config 업데이트")
+        self.write_control_record("y_slot_response_config", values=values)
+
+    def publish_y_slot_pose_source_trigger(self, _index=None):
+        if self.args.http_viewer_only:
+            return
+        source = self.y_slot_pose_source.currentData()
+        self.node.publish_y_slot_pose_source(source)
+        self.operation_label.setText(f"Y 자세 프리셋 업데이트: {source}")
+        self.write_control_record("y_slot_pose_source", source=source)
+
+    def write_motion_sensor_record(self, event_type, **payload):
+        if self.motion_sensor_file is None:
+            return
+        now = time.monotonic()
+        record = {"type": event_type, "time": time.time(), "monotonic": now,
+                  "elapsed_sec": now - self.recording_started_monotonic, **payload}
+        try:
+            self.motion_sensor_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+            if event_type == "sensor":
+                topic = payload["topic"]
+                self.motion_sensor_counts[topic] = self.motion_sensor_counts.get(topic, 0) + 1
+        except (OSError, ValueError) as exc:
+            self.motion_sensor_file.close()
+            self.motion_sensor_file = None
+            self.record_label.setText(f"Sensor log stopped: {exc}")
+
+    def write_control_record(self, event_type, **payload):
+        if self.control_log_file is None:
+            return
+        now = time.monotonic()
+        record = {"type": event_type, "time": time.time(), "monotonic": now,
+                  "elapsed_sec": now - self.recording_started_monotonic, **payload}
+        try:
+            self.control_log_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except (OSError, ValueError) as exc:
+            self.control_log_file.close()
+            self.control_log_file = None
+            self.record_label.setText(f"Control log stopped: {exc}")
+
+    def record_key(self, key, down):
+        names = {Qt.Key_Up: "UP", Qt.Key_Down: "DOWN", Qt.Key_Space: "SPACE"}
+        name = names.get(key, chr(key) if 32 <= key < 127 else str(key))
+        if down and name not in self.recording_keys:
+            self.recording_keys.add(name)
+            self.write_control_record("key_down", key=name)
+        elif not down and name in self.recording_keys:
+            self.recording_keys.discard(name)
+            self.write_control_record("key_up", key=name)
+
     def publish_latched_fork_key(self, key):
+        self.record_key(key, True)
         if key == Qt.Key_Up:
             self.node.publish_fork("UP")
         elif key == Qt.Key_Down:
             self.node.publish_fork("DOWN")
 
     def press_movement_key(self, key):
+        self.record_key(key, True)
         timer = self.movement_release_timers.pop(key, None)
         if timer is not None:
             timer.stop()
@@ -1736,6 +2217,7 @@ class TeleopWindow(QMainWindow):
         self.pressed.add(key)
 
     def release_movement_key(self, key):
+        self.record_key(key, False)
         previous = self.movement_release_timers.pop(key, None)
         if previous is not None:
             previous.stop()
@@ -1788,12 +2270,23 @@ class TeleopWindow(QMainWindow):
             event.accept()
             return
         if event.key() in self.FORK_KEYS:
+            self.record_key(event.key(), False)
             event.accept()
             return
         super().keyReleaseEvent(event)
 
     def eventFilter(self, watched, event):
         """Capture drive keys even when a checkbox, button, or spinbox has focus."""
+        # Calibration spinboxes must not turn their arrow keys into fork commands.
+        if (self.floor_calibration_window is not None
+                and self.floor_calibration_window.isVisible()
+                and isinstance(watched, QWidget)
+                and (watched is self.floor_calibration_window
+                     or self.floor_calibration_window.isAncestorOf(watched))):
+            if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Space:
+                self.emergency_stop()
+                return True
+            return False
         # Fork arrows use the same latched command contract as the test panel:
         # press publishes UP/DOWN once, release does not publish STOP.  Handle
         # them before the editable-widget exception so focus cannot consume them.
@@ -1802,6 +2295,8 @@ class TeleopWindow(QMainWindow):
                 self.publish_latched_fork_key(event.key())
             return True
         if event.type() == QEvent.KeyRelease and event.key() in self.FORK_KEYS:
+            if not event.isAutoRepeat():
+                self.record_key(event.key(), False)
             return True
 
         # The memo editor must still receive ordinary letters and spaces
@@ -1825,6 +2320,8 @@ class TeleopWindow(QMainWindow):
         return super().eventFilter(watched, event)
 
     def focusOutEvent(self, event):
+        self.write_control_record("controls_cleared", keys=sorted(self.recording_keys))
+        self.recording_keys.clear()
         self.cancel_movement_key_releases()
         self.pressed.clear()
         self.node.stop(repeats=3)
@@ -1876,11 +2373,12 @@ class TeleopWindow(QMainWindow):
         self.write_auto_dock_log("status", status=status)
 
     def publish_arrival_trigger(self):
+        self.y_top_line_tracker = YTopLineTracker()
         """Publish the structured arrival selected in the Control GUI."""
         if self.args.http_viewer_only:
             self.operation_label.setText("HTTP 화면 전용 모드에서는 arrival 발행 불가")
             return
-        location = self.arrival_location.currentData()
+        location = self.arrival_location.checkedButton().property("location")
         operation = self.arrival_operation.currentData()
         product_type = self.arrival_product.currentData()
         arrival = self.node.publish_arrival(
@@ -1888,20 +2386,41 @@ class TeleopWindow(QMainWindow):
             product_type=product_type,
             insertion_distance_cm=(
                 self.y_slot_insertion_distance.value()
-                if location in {"Y1", "Y2", "Y3", "Y4"} else None
+                if location == "Y" else None
             ),
-            legacy_recognition=self.legacy_entity_recognition.isChecked(),
+            stage_only=(location == "Y"),
         )
         self.start_auto_dock_log(arrival)
         target_text = (
-            " | NEAREST LEGACY"
-            if location == "DOCK_1" and operation == "PICK"
-            and self.legacy_entity_recognition.isChecked()
-            else " | NEAREST"
+            " | NEAREST"
             if location == "DOCK_1" and operation == "PICK" else ""
         )
         self.operation_label.setText(
             f"Arrival 발행: {location} {operation} {product_type}{target_text}"
+        )
+
+    def publish_y_slot_insertion_trigger(self):
+        if self.args.http_viewer_only:
+            self.operation_label.setText("HTTP 화면 전용 모드에서는 insertion 발행 불가")
+            return
+        distance_cm = self.y_slot_insertion_distance.value()
+        self.node.publish_y_slot_insertion(distance_cm)
+        self.operation_label.setText(
+            f"Y Insertion 발행: {distance_cm:.1f} cm · 포크 동작 없음"
+        )
+        self.write_control_record(
+            "y_slot_manual_insertion", distance_cm=float(distance_cm)
+        )
+
+    def publish_y_slot_insertion_default_trigger(self, distance_cm):
+        if self.args.http_viewer_only:
+            return
+        self.node.publish_y_slot_insertion_default(distance_cm)
+        self.operation_label.setText(
+            f"Y 기본 진입거리 업데이트: {distance_cm:.1f} cm"
+        )
+        self.write_control_record(
+            "y_slot_insertion_default", distance_cm=float(distance_cm)
         )
 
     def publish_nearest_arrival_trigger(self):
@@ -1909,14 +2428,10 @@ class TeleopWindow(QMainWindow):
             self.operation_label.setText("HTTP 화면 전용 모드에서는 arrival 발행 불가")
             return
         product_type = self.nearest_product.currentData()
-        legacy = self.legacy_entity_recognition.isChecked()
-        arrival = self.node.publish_nearest_arrival(
-            product_type, legacy_recognition=legacy
-        )
+        arrival = self.node.publish_nearest_arrival(product_type)
         self.start_auto_dock_log(arrival)
         self.operation_label.setText(
             f"DOCK 최근접 {product_type} PICK Arrival 발행"
-            + (" | 이전 인식" if legacy else " | 현재 인식")
         )
 
     def publish_auto_dock_stop(self):
@@ -1926,8 +2441,18 @@ class TeleopWindow(QMainWindow):
         self.node.publish_auto_dock_stop()
         self.auto_dock_status_label.setText("AUTO-DOCK stop 요청 전송")
 
+    def publish_test_load_state(self, state):
+        if self.args.http_viewer_only:
+            self.operation_label.setText("HTTP 화면 전용 모드에서는 상태 지정 불가")
+            return
+        self.node.test_load_state_pub.publish(String(data=str(state).upper()))
+        self.operation_label.setText(f"테스트 적재상태 지정: {str(state).upper()}")
+
 
     def emergency_stop(self):
+        self.write_control_record("emergency_stop")
+        self.write_control_record("controls_cleared", keys=sorted(self.recording_keys))
+        self.recording_keys.clear()
         self.cancel_movement_key_releases()
         self.pressed.clear()
         self.node.stop(repeats=5)
@@ -1962,7 +2487,9 @@ class TeleopWindow(QMainWindow):
             self.node.publish(linear_x, linear_y, angular_z)
         elif manual_drive_active:
             self.node.stop()
-        state = "READY" if camera_ok else "TELEOP READY | CAMERA STALE"
+        state = ("READY" if camera_ok else "TELEOP READY | CAMERA STALE")
+        if not self.video_display_enabled:
+            state = "TELEOP READY | 화면 OFF"
         if not camera_ok:
             state += " (video only)"
         if blocked:
@@ -1988,7 +2515,8 @@ class TeleopWindow(QMainWindow):
         self.update_battery_status()
         self.update_entity_map()
         self.update_dock_slot_grid()
-        self.update_frame()
+        if self.video_display_enabled:
+            self.update_frame()
 
     def update_entity_map(self):
         sequences = (
@@ -2063,6 +2591,7 @@ class TeleopWindow(QMainWindow):
         self.dock_grid_status.setText("슬롯 초기화 요청 전송")
 
     def update_frame(self):
+        self.write_slot_observation()
         sequences = (
             self.node.frame_sequence,
             self.node.secondary_frame_sequence,
@@ -2075,6 +2604,14 @@ class TeleopWindow(QMainWindow):
         tertiary = None if self.node.tertiary_frame is None else self.node.tertiary_frame.copy()
         self.last_displayed_sequence = sequences
         display_frame = self.render_recording_overlay(frame)
+        if display_frame is not None:
+            elapsed = (0.0 if self.recording_started_monotonic is None else
+                       time.monotonic() - self.recording_started_monotonic)
+            text = f"{elapsed:.2f}s KEYS: {'+'.join(sorted(self.recording_keys)) or '-'}"
+            cv2.rectangle(display_frame, (0, display_frame.shape[0]-28),
+                          (display_frame.shape[1], display_frame.shape[0]), (0, 0, 0), -1)
+            cv2.putText(display_frame, text, (8, display_frame.shape[0]-8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
         if display_frame is not None and self.writer is not None:
             recording_frame = self.compose_recording_frame(
                 display_frame, secondary, tertiary
@@ -2222,10 +2759,12 @@ class TeleopWindow(QMainWindow):
         location = str(
             (self.node.auto_dock_status or {}).get("location", "")
         ).strip().upper()
-        is_y_slot = location in {"Y1", "Y2", "Y3", "Y4"}
+        is_y_slot = location == "Y"
         auto_state = str(
             (self.node.auto_dock_status or {}).get("state", "")
         ).strip().upper()
+        if not is_y_slot or auto_state != "ALIGNING":
+            self.y_slot_visual_tracker = YSlotTracker()
         if is_y_slot and auto_state in {"IDLE", "READY", "ERROR"}:
             self.warning_tape_track = None
             self.warning_tape_track_at = 0.0
@@ -2242,14 +2781,17 @@ class TeleopWindow(QMainWindow):
             self.warning_tape_track = None
         filter_config = self.warning_tape_filter_values()
         if is_y_slot and auto_state == "ALIGNING":
+            if not hasattr(self, "y_slot_visual_tracker"):
+                self.y_slot_visual_tracker = YSlotTracker()
+            filter_config = dict(filter_config or {})
+            filter_config["y_slot_target_center_x_ratio"] = self.args.y_slot_target_center_x_ratio
             debug = detect_y_slot_x_debug(
                 tape_frame, filter_config=filter_config,
+                tracker=self.y_slot_visual_tracker,
             )
         elif is_y_slot:
             values = filter_config if isinstance(filter_config, dict) else {}
-            roi_top = int(round(max(0.0, min(
-                0.95, float(values.get("roi_top_ratio", 0.70))
-            )) * tape_frame.shape[0]))
+            roi_top = 0
             accepted_mask = np.zeros(
                 (tape_frame.shape[0] - roi_top, tape_frame.shape[1]),
                 dtype=np.uint8,
@@ -2289,7 +2831,7 @@ class TeleopWindow(QMainWindow):
             )
         accepted = debug.pop("accepted_mask")
         line = debug.pop("line", None)
-        x_lines = debug.pop("x_lines", None)
+        x_lines = debug.get("x_lines")
         border_lines = debug.pop("border_lines", None)
         if (
             is_y_slot
@@ -2329,6 +2871,34 @@ class TeleopWindow(QMainWindow):
         debug["source_topic"] = self.args.tape_image_topic
         debug["hsv_config_path"] = str(self.warning_tape_hsv_path)
         debug["hsv_config_loaded"] = filter_config is not None
+        slot_anchor = debug if debug.get('detected') and debug.get('x_lines') is not None else None
+        if not is_y_slot:
+            self.y_top_line_tracker = YTopLineTracker()
+        if slot_anchor is None and not is_y_slot:
+            slot_anchor = detect_y_slot_x(tape_frame, filter_config=filter_config)
+        top = self.y_top_line_tracker.update(
+            tape_frame, slot_anchor, filter_config
+        ) if slot_anchor is not None else None
+        square_line = None
+        if is_y_slot and top is not None:
+            square_line = top['top_line_px']
+            debug['top_line_px'] = square_line
+            debug['square_top_line_px'] = square_line
+            debug['line_definition'] = 'detected_square_tl_to_tr'
+            if getattr(self.y_slot_visual_tracker, 'observation', None) is not None:
+                self.y_slot_visual_tracker.observation['square_top_line_px'] = square_line
+        debug['top_line_observation'] = top
+        debug['square_top_line_observation'] = (
+            None if square_line is None else {
+                'top_line_px': square_line,
+                'line_definition': 'detected_square_tl_to_tr',
+            }
+        )
+        if top is not None:
+            x1,y1,x2,y2 = map(lambda v:int(round(v)), top['top_line_px'])
+            cv2.line(frame,(x1,y1),(x2,y2),(255,255,0),3)
+            cv2.putText(frame,'TOP LINE',(x1,max(16,y1-8)),
+                        cv2.FONT_HERSHEY_SIMPLEX,.5,(255,255,0),2)
         self.warning_tape_debug = dict(debug)
         roi_top = int(debug["roi_top"])
         cv2.line(frame, (0, roi_top), (frame.shape[1] - 1, roi_top),
@@ -2357,7 +2927,7 @@ class TeleopWindow(QMainWindow):
                         frame, (int(x1), int(y1 + roi_top)),
                         (int(x2), int(y2 + roi_top)), (0, 255, 255), 3,
                     )
-            if border_lines is not None:
+            if border_lines is not None and not is_y_slot:
                 for x1, y1, x2, y2 in border_lines:
                     cv2.line(
                         frame, (int(x1), int(y1 + roi_top)),
@@ -2371,7 +2941,7 @@ class TeleopWindow(QMainWindow):
             )
             cv2.circle(frame, center, 7, (0, 255, 255), -1)
         self.render_auto_dock_status_banner(frame)
-        if location in {"Y1", "Y2", "Y3", "Y4"}:
+        if location == "Y":
             target_center_ratio = float(getattr(
                 self.args, "y_slot_target_center_x_ratio", 0.5
             ))
@@ -2459,11 +3029,80 @@ class TeleopWindow(QMainWindow):
             )
         return frame
 
+    def write_slot_observation(self):
+        if self.slot_observation_file is None:
+            return
+        frame_at = self.node.tape_frame_monotonic
+        if frame_at == self.sample_last_frame_at or self.node.tape_frame is None:
+            return
+        self.sample_last_frame_at = frame_at
+        now = time.monotonic()
+        frame = self.node.tape_frame
+        observation = None
+        age = now - frame_at
+        if age <= 0.35 and not self.sample_tracker.lost:
+            config = dict(self.warning_tape_filter_values() or {})
+            config["y_slot_target_center_x_ratio"] = self.args.y_slot_target_center_x_ratio
+            observation = self.sample_tracker.update(frame, filter_config=config)
+        top = None
+        if age <= .35 and self.sample_top_tracker is not None:
+            top = self.sample_top_tracker.update(frame, observation or self.sample_tracker.observation,
+                                                self.warning_tape_filter_values())
+        square_top = top
+        if square_top is not None and self.sample_tracker.observation is not None:
+            self.sample_tracker.observation['square_top_line_px'] = square_top['top_line_px']
+        row = {"type": "slot_observation", "time": time.time(),
+               "monotonic": now, "source_monotonic": frame_at,
+               "source_age_sec": age, "frame_index": self.recorded_frames,
+               "track_id": self.record_path.stem + ":slot1", "valid": False,
+               "yaw_deg": None, "depth_cm": None,
+               "metric_pose_reason": "slot_pose_not_calibrated",
+               "load_state_reported": (self.node.auto_dock_status or {}).get("load_state"),
+               "load_state_verified": False}
+        if observation is not None:
+            points = np.asarray(observation["x_lines"], dtype=float).reshape(-1, 2)
+            visible = bool(np.isfinite(points).all()
+                           and (points[:, 0] > 3).all()
+                           and (points[:, 0] < frame.shape[1]-3).all()
+                           and (points[:, 1] > 3).all()
+                           and (points[:, 1] < frame.shape[0]-3).all())
+            row.update({key: observation[key] for key in
+                        ("center_x_px", "center_y_ratio", "border_angle_deg", "tracking")})
+            top_line = top_border_measurement(observation, frame.shape[0])
+            row.update(top_line)
+            row["valid"] = visible and bool(top_line)
+            row["tracking_inliers"] = observation.get("tracking_inliers")
+            row["x_lines"] = np.asarray(observation["x_lines"]).tolist()
+            row["border_lines"] = np.asarray(observation["border_lines"]).tolist()
+            row["reason"] = "ok" if row["valid"] else "slot_not_fully_visible"
+        else:
+            row["reason"] = ("source_stale" if age > 0.35 else
+                             "track_lost" if self.sample_tracker.lost else "slot_not_detected")
+        row["top_line_observation"] = top
+        row["top_line_valid"] = top is not None
+        row["square_top_line_observation"] = square_top
+        row["square_top_line_valid"] = square_top is not None
+        row["floor_calibration_enabled"] = self.use_floor_calibration.isChecked()
+        if row["floor_calibration_enabled"] and self.floor_calibration_profile and row["valid"]:
+            try:
+                row["floor_x_center"] = floor_point(
+                    self.floor_calibration_profile,
+                    [row["center_x_px"], row["center_y_ratio"]*frame.shape[0]],
+                    list(frame.shape[1::-1]), vehicle=self.args.vehicle,
+                    source_topic=self.args.tape_image_topic)
+                row["floor_calibration_created_at"] = self.floor_calibration_profile["created_at"]
+                row["floor_measurement_reason"] = "ok; X identification depends on vision tracker"
+            except (ValueError, KeyError, TypeError) as exc:
+                row["floor_measurement_reason"] = str(exc)
+        self.slot_observation_file.write(json.dumps(row, ensure_ascii=False) + "\n")
+
     def write_frame_record(self):
         if self.frame_log_file is None:
             return
         now = time.monotonic()
         record = {
+            "keys": sorted(self.recording_keys),
+            "cmd_vel": getattr(self.node, "latest_cmd_vel", None),
             "type": "video_frame",
             "frame_index": self.recorded_frames,
             "time": time.time(),
@@ -2627,12 +3266,71 @@ class TeleopWindow(QMainWindow):
             self.record.setChecked(False)
             self.record_label.setText(f"Failed to open frame log: {exc}")
             return
+        self.recording_started_monotonic = time.monotonic()
+        try:
+            self.control_log_file = self.record_path.with_suffix(".controls.jsonl").open(
+                "w", encoding="utf-8", buffering=1
+            )
+        except OSError as exc:
+            self.finish_recording()
+            self.record.setChecked(False)
+            self.record_label.setText(f"Cannot record controls: {exc}")
+            return
+        try:
+            self.motion_sensor_file = self.record_path.with_suffix(".motion_sensors.jsonl").open(
+                "w", encoding="utf-8", buffering=1)
+        except OSError as exc:
+            self.finish_recording()
+            self.record.setChecked(False)
+            self.record_label.setText(f"Cannot record motion sensors: {exc}")
+            return
+        self.motion_sensor_counts = {}
+        self.write_motion_sensor_record("recording_start", schema_version=1,
+            topics=["/odom_raw", "/odom", "/imu", "/ros_robot_controller/imu_raw"],
+            cmd_vel_topic=self.args.cmd_vel_topic,
+            note="Receive clocks match controls/frames; header stamps retain sensor time. Raw odom is command integrated; load state is unverified.")
+        self.write_control_record("recording_start", keys=sorted(self.recording_keys),
+                                  cmd_vel_topic=self.args.cmd_vel_topic,
+                                  fork_topic=self.args.fork_command_topic,
+                                  floor_calibration_enabled=self.use_floor_calibration.isChecked(),
+                                  floor_calibration=self.floor_calibration_profile)
+        try:
+            self.slot_observation_file = self.record_path.with_suffix(".slot_observations.jsonl").open(
+                "w", encoding="utf-8", buffering=1
+            )
+        except OSError as exc:
+            self.finish_recording()
+            self.record.setChecked(False)
+            self.record_label.setText(f"Cannot record slot observations: {exc}")
+            return
+        self.sample_tracker = YSlotTracker()
+        self.sample_top_tracker = YTopLineTracker()
+        self.sample_last_frame_at = None
         self.recorded_frames = 0
         self.telemetry_session = self.record_path.stem
         self.node.start_telemetry(self.telemetry_session)
         self.record.setText("Stop recording (R)")
 
     def finish_recording(self):
+        if self.motion_sensor_file is not None:
+            self.write_motion_sensor_record("recording_stop", counts=self.motion_sensor_counts)
+            if self.motion_sensor_file is not None:
+                self.motion_sensor_file.close()
+                self.motion_sensor_file = None
+        if self.control_log_file is not None:
+            self.write_control_record("recording_stop", keys=sorted(self.recording_keys))
+            if self.control_log_file is not None:
+                self.control_log_file.close()
+                self.control_log_file = None
+        if self.slot_observation_file is not None:
+            self.slot_observation_file.close()
+            self.slot_observation_file = None
+            try:
+                total, valid = save_samples(self.record_path)
+                self.operation_label.setText(f"동작 샘플 저장: {valid}/{total}개 영상 조건 통과")
+            except (OSError, ValueError, KeyError) as exc:
+                self.operation_label.setText(f"동작 샘플 추출 실패: {exc}")
+        self.recording_started_monotonic = None
         telemetry_session = self.telemetry_session
         telemetry_path = None if self.record_path is None else self.record_path.with_suffix(".jsonl")
         if self.writer is not None:
@@ -2659,6 +3357,8 @@ class TeleopWindow(QMainWindow):
             self.record_label.setText(f"Saved: {self.record_path}{suffix}")
 
     def closeEvent(self, event):
+        self.write_control_record("controls_cleared", keys=sorted(self.recording_keys))
+        self.recording_keys.clear()
         self.cancel_movement_key_releases()
         self.pressed.clear()
         self.node.stop(repeats=5)
@@ -2684,6 +3384,14 @@ def main():
         "--tape-image-topic",
         default="/ascamera/camera_publisher/rgb0/image",
     )
+    parser.add_argument(
+        "--registered-depth-topic",
+        default="/ascamera/camera_publisher/depth0/image_raw",
+    )
+    parser.add_argument(
+        "--registered-depth-camera-info-topic",
+        default="/ascamera/camera_publisher/rgb0/camera_info",
+    )
     parser.add_argument("--secondary-image-topic", default="")
     parser.add_argument("--secondary-video-url", default="")
     parser.add_argument("--primary-video-url", default="")
@@ -2702,6 +3410,10 @@ def main():
     parser.add_argument("--cmd-vel-topic", default="")
     parser.add_argument("--fork-command-topic", default="")
     parser.add_argument("--arrival-topic", default="")
+    parser.add_argument("--y-slot-insertion-topic", default="")
+    parser.add_argument("--y-slot-insertion-default-topic", default="")
+    parser.add_argument("--y-slot-response-config-topic", default="")
+    parser.add_argument("--y-slot-pose-source-topic", default="")
     parser.add_argument("--auto-dock-stop-topic", default="")
     parser.add_argument("--auto-dock-status-topic", default="")
     parser.add_argument("--dock-inventory-topic", default="")
@@ -2750,6 +3462,14 @@ def main():
         args.fork_command_topic = "/fork/command"
     if not args.arrival_topic:
         args.arrival_topic = "/nav2/arrival"
+    if not args.y_slot_insertion_topic:
+        args.y_slot_insertion_topic = "/auto_dock/y_slot/insertion"
+    if not args.y_slot_insertion_default_topic:
+        args.y_slot_insertion_default_topic = "/auto_dock/y_slot/insertion_default"
+    if not args.y_slot_response_config_topic:
+        args.y_slot_response_config_topic = "/auto_dock/y_slot/response_config"
+    if not args.y_slot_pose_source_topic:
+        args.y_slot_pose_source_topic = "/auto_dock/y_slot/pose_source"
     if not args.auto_dock_stop_topic:
         args.auto_dock_stop_topic = "/auto_dock/stop"
     if not args.auto_dock_status_topic:
@@ -2796,6 +3516,30 @@ def main():
             args.y_slot_target_center_x_ratio = float(
                 pose_config.get("y_slot_target_center_x_ratio", 0.5)
             )
+            response_model = pose_config.get("y_slot_response_model", {})
+            args.y_slot_pose_source = str(
+                pose_config.get("y_slot_pose_source", "homography")
+            ).lower()
+            args.y_slot_response_values = {
+                "y_slot_response_angular_speed_rad_s": float(pose_config.get("y_slot_response_angular_speed_rad_s", .35)),
+                "y_slot_response_linear_speed_m_s": float(pose_config.get("y_slot_response_linear_speed_m_s", .10)),
+                "left_immediate_gain": float(response_model.get("left_immediate_gain", .1587)),
+                "left_total_gain": float(response_model.get("left_total_gain", 1.401222)),
+                "right_immediate_gain": float(response_model.get("right_immediate_gain", .2126)),
+                "right_total_gain": float(response_model.get("right_total_gain", 1.617065)),
+                "release_command_cm": float(response_model.get("release_command_cm", 3.8)),
+                "settling_sec": float(response_model.get("settling_sec", .001)),
+                "forward_scale": float(response_model.get("forward_scale", .98)),
+                "y_slot_response_settle_sec": float(pose_config.get("y_slot_response_settle_sec", .5)),
+                "y_slot_depth_camera_to_fork_tip_offset_cm": float(pose_config.get(
+                    "y_slot_depth_camera_to_fork_tip_offset_cm",
+                    pose_config.get("depth_camera_to_fork_tip_offset_cm", 30.),
+                )),
+                "y_slot_depth_camera_pitch_deg": float(pose_config.get(
+                    "y_slot_depth_camera_pitch_deg",
+                    pose_config.get("camera_pitch_deg", -7.),
+                )),
+            }
             if args.disable_external_webcams is None:
                 args.disable_external_webcams = bool(
                     pose_config.get("disable_external_webcams", True)
@@ -2804,6 +3548,18 @@ def main():
             parser.error(f"invalid pose config: {pose_config_path}")
     if args.disable_external_webcams is None:
         args.disable_external_webcams = True
+    if not hasattr(args, "y_slot_response_values"):
+        args.y_slot_pose_source = "homography"
+        args.y_slot_response_values = {
+            "y_slot_response_angular_speed_rad_s": .35,
+            "y_slot_response_linear_speed_m_s": .10,
+            "left_immediate_gain": .1587, "left_total_gain": 1.401222,
+            "right_immediate_gain": .2126, "right_total_gain": 1.617065,
+            "release_command_cm": 3.8, "settling_sec": .001,
+            "forward_scale": .98, "y_slot_response_settle_sec": .5,
+            "y_slot_depth_camera_to_fork_tip_offset_cm": 30.,
+            "y_slot_depth_camera_pitch_deg": -7.,
+        }
 
     args.ros_domain_id = (
         214 + args.vehicle if args.ros_domain_id is None else args.ros_domain_id

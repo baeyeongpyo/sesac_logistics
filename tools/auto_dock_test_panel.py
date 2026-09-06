@@ -31,7 +31,7 @@ from std_msgs.msg import Empty, String
 
 
 SYMBOLS = ("spade", "heart", "clover", "diamond", "star")
-LOCATIONS = ("DOCK_1", "NORMAL", "FRESH", "Y1", "Y2", "Y3", "Y4")
+LOCATIONS = ("DOCK_1", "NORMAL", "FRESH", "Y")
 CHECKBOX_FIELDS = (
     ("tag_guided_lateral_search_enabled", "옵션 1 · 정면 YOLO bbox/depth"),
     ("search_rear_lidar_guidance_enabled", "옵션 2 · 후방 LiDAR 30cm"),
@@ -527,7 +527,7 @@ class TestPanel:
         self.add_choice_group(
             nav, "위치", self.location,
             (("D1", "DOCK_1"), ("NORMAL", "NORMAL"), ("FRESH", "FRESH"),
-             ("Y1", "Y1"), ("Y2", "Y2"), ("Y3", "Y3"), ("Y4", "Y4")),
+             ("Y", "Y")),
             1, 0, 10,
         )
         symbol_buttons = tuple(zip(
@@ -593,10 +593,7 @@ class TestPanel:
             ("NORMAL PLACE", "NORMAL", "PLACE", "NORMAL", "AUTO_SLOT", "AUTO"),
             ("FRESH PLACE", "FRESH", "PLACE", "FRESH", "AUTO_SLOT", "AUTO"),
             ("FRESH PICK", "FRESH", "PICK", "FRESH", "AUTO_SLOT", "AUTO"),
-            ("Y1 PLACE", "Y1", "PLACE", "FRESH", "SLOT", "Y1"),
-            ("Y2 PLACE", "Y2", "PLACE", "FRESH", "SLOT", "Y2"),
-            ("Y3 PLACE", "Y3", "PLACE", "FRESH", "SLOT", "Y3"),
-            ("Y4 PLACE", "Y4", "PLACE", "FRESH", "SLOT", "Y4"),
+            ("Y PLACE", "Y", "PLACE", "FRESH", "NONE", "AUTO"),
         )
         for index, scenario in enumerate(scenarios):
             self.add_action_button(

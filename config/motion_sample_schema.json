@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "unit": "one rotation, stop, forward, stop sequence",
+  "states": [
+    "before",
+    "after_rotation",
+    "after_forward"
+  ],
+  "state_fields": {
+    "center_x_px": "tracked slot X horizontal position, pixels",
+    "center_y_ratio": "tracked slot X vertical position / image height",
+    "border_angle_deg": "image-plane border angle; NOT metric vehicle yaw",
+    "yaw_image_deg": "atan2(top_right.y-top_left.y, top_right.x-top_left.x), degrees",
+    "depth_top_y_px": "top border midpoint y in pixels; not distance cm",
+    "depth_top_y_ratio": "top border midpoint y / image height",
+    "yaw_deg": "null until metric slot pose calibration is available",
+    "depth_cm": "null until slot pose calibration is available"
+  },
+  "actions": "actual received cmd_vel segments, with timestamps and velocities",
+  "valid_visual_sample": "same track, stationary fresh stable views at all three states",
+  "metric_pose_available": false
+}
