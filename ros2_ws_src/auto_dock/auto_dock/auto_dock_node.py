@@ -9,9 +9,13 @@ state machine directly; GUI/UI programs are optional ROS clients.
 import json
 import math
 import re
+import signal
 import socket
+import tempfile
 import time
 import traceback
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -21,10 +25,20 @@ from cv_bridge import CvBridge
 from geometry_msgs.msg import Twist, Vector3Stamped
 from nav_msgs.msg import Odometry
 from rclpy.executors import ExternalShutdownException
+from rclpy.signals import SignalHandlerOptions
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image, LaserScan
 from std_msgs.msg import Empty, String
+from auto_dock.top_line_depth import (
+    measure_sampled_top_line_depth,
+    sample_top_line_depth_image,
+)
+from auto_dock.loaded_response_planner import (
+    ResponseCoefficients, ResponseState, plan_approach, insertion_check,
+)
+from auto_dock.loaded_response_history import estimate_from_history
+from auto_dock.y_slot_direct_place import post_staging_action
 
 
 SYMBOLS = {"star", "diamond", "spade", "clover", "heart"}
@@ -32,9 +46,51 @@ OPERATIONS = {"PICK", "PLACE"}
 PRODUCT_TYPES = {"NORMAL", "FRESH"}
 TARGET_TYPES = {"SYMBOLS", "NEAREST", "SLOT", "AUTO_SLOT", "NONE"}
 
+Y_SLOT_RESPONSE_MODEL_KEYS = {
+    "left_immediate_gain", "left_total_gain",
+    "right_immediate_gain", "right_total_gain",
+    "release_command_cm", "settling_sec", "forward_scale",
+}
+Y_SLOT_RESPONSE_TOP_LEVEL_KEYS = {
+    "y_slot_response_angular_speed_rad_s",
+    "y_slot_response_linear_speed_m_s",
+    "y_slot_response_settle_sec",
+    "y_slot_depth_camera_to_fork_tip_offset_cm",
+    "y_slot_depth_camera_pitch_deg",
+}
+
 
 def clamp(value, minimum, maximum):
     return max(minimum, min(maximum, value))
+
+
+def parse_y_slot_response_update(raw):
+    """Validate a GUI-authored response-model config patch."""
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("y_slot_response_update_invalid_json") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("y_slot_response_update_not_object")
+    unknown = set(payload) - Y_SLOT_RESPONSE_MODEL_KEYS - Y_SLOT_RESPONSE_TOP_LEVEL_KEYS
+    if unknown:
+        raise ValueError("y_slot_response_update_unknown_key:" + sorted(unknown)[0])
+    if not payload:
+        raise ValueError("y_slot_response_update_empty")
+    try:
+        update = {key: float(value) for key, value in payload.items()}
+    except (TypeError, ValueError) as exc:
+        raise ValueError("y_slot_response_update_non_numeric") from exc
+    if not all(math.isfinite(value) for value in update.values()):
+        raise ValueError("y_slot_response_update_non_finite")
+    return update
+
+
+def parse_y_slot_pose_source(raw):
+    value = str(raw).strip().lower()
+    if value not in {"homography", "depth"}:
+        raise ValueError("y_slot_pose_source_invalid")
+    return value
 
 
 def public_fsm_state(internal_state, operation, event_state="", was_docking=False):
@@ -270,14 +326,12 @@ def detect_warning_tape(
 
 
 def detect_y_slot_x(frame, minimum_yellow_pixels=600, filter_config=None):
-    """Detect the yellow X marker used at Y1-Y4 and return its crossing."""
+    """Detect the yellow X marker used in the Y zone and return its crossing."""
     if frame is None or frame.size == 0:
         return None
     height, width = frame.shape[:2]
     values = filter_config if isinstance(filter_config, dict) else {}
-    roi_top = int(round(clamp(
-        float(values.get("roi_top_ratio", 0.70)), 0.0, 0.95
-    ) * height))
+    roi_top = 0  # Y acquisition always examines the full image.
     hsv = cv2.cvtColor(frame[roi_top:, :], cv2.COLOR_BGR2HSV)
     x_s_min = int(values.get("y_slot_x_s_min", 40))
     yellow = cv2.inRange(
@@ -358,7 +412,9 @@ def detect_y_slot_x(frame, minimum_yellow_pixels=600, filter_config=None):
                     > component_height * 0.32
                 ):
                     continue
-                score = min(rising[0], falling[0]) + area * 0.01
+                target_x = float(values.get("y_slot_target_center_x_ratio", 0.5)) * width
+                score = (-abs(x + component_width * 0.5 - target_x),
+                         min(rising[0], falling[0]) + area * 0.01)
                 if best is None or score > best[0]:
                     best = (
                         score, label, crossing_x, crossing_y,
@@ -418,6 +474,14 @@ def detect_y_slot_x(frame, minimum_yellow_pixels=600, filter_config=None):
         border_angle_deg = float(np.median([
             candidate[1] for candidate in strongest_border
         ]))
+    diagonal_points = np.asarray(
+        (rising_line, falling_line), dtype=float
+    ).reshape(-1, 2)
+    top_pair = diagonal_points[np.argsort(diagonal_points[:, 1])[:2]]
+    bottom_pair = diagonal_points[np.argsort(diagonal_points[:, 1])[2:]]
+    top_pair = top_pair[np.argsort(top_pair[:, 0])]
+    bottom_pair = bottom_pair[np.argsort(bottom_pair[:, 0])]
+    square_corners = np.vstack((top_pair, bottom_pair[::-1]))
     return {
         "center_y_ratio": float((center_y + roi_top) / height),
         "angle_deg": 0.0,
@@ -432,12 +496,634 @@ def detect_y_slot_x(frame, minimum_yellow_pixels=600, filter_config=None):
         "black_adjacent_components": 0,
         "band_width_px": 0.0,
         "x_lines": (rising_line, falling_line),
+        # The two diagonal endpoints are the four detected square corners.
+        # Keep their identity so every consumer uses the same TL->TR edge.
+        "square_corners_px": square_corners.tolist(),
         "border_angle_deg": border_angle_deg,
         "border_line_count": len(strongest_border),
         "border_lines": tuple(
             candidate[2] for candidate in strongest_border
         ),
     }
+
+
+def detect_y_top_line(frame, anchor, filter_config=None):
+    """Full-frame top-line detection, associated spatially with one selected slot."""
+    if frame is None or anchor is None:
+        return None
+    height, width = frame.shape[:2]
+    values = filter_config or {}
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    yellow = cv2.inRange(hsv, np.array([int(values.get('h_min',15)),40,70],np.uint8),
+                        np.array([int(values.get('h_max',42)),255,255],np.uint8))
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    lines = cv2.HoughLinesP(cv2.Canny(gray,40,120),1,np.pi/360,25,
+                            minLineLength=35,maxLineGap=30)
+    if lines is None:
+        return None
+    if 'top_line_px' in anchor:
+        ax1, ay1, ax2, ay2 = anchor['top_line_px']
+        expected_y = (ay1+ay2)/2
+    else:
+        ax1, ax2 = anchor['x_min_px'], anchor['x_max_px']
+        expected_y = float(np.asarray(anchor['x_lines']).reshape(-1,2)[:,1].min())-10
+    span = max(60.,ax2-ax1)
+    center = (ax1+ax2)/2
+    candidates=[]
+    for x1,y1,x2,y2 in lines.reshape(-1,4):
+        if x2 < x1: x1,y1,x2,y2=x2,y2,x1,y1
+        if x2-x1 < max(40,span*.3): continue
+        angle=math.degrees(math.atan2(y2-y1,x2-x1))
+        if abs(angle)>20: continue
+        overlap=max(0,min(x2,ax2)-max(x1,ax1))
+        if overlap < span*.35: continue
+        slope=(y2-y1)/(x2-x1)
+        at_center=y1+slope*(center-x1)
+        if abs(at_center-expected_y)>height*.3: continue
+        if 'top_line_px' not in anchor and at_center >= anchor['center_y_ratio']*height: continue
+        # The far outer edge has alternating yellow/black tape immediately below it.
+        xs=np.linspace(max(x1,ax1),min(x2,ax2),50)
+        ys=y1+slope*(xs-x1)
+        yellow_support=[];dark_support=[]
+        for offset in (4,8,12):
+            ix=np.clip(xs.astype(int),0,width-1);iy=np.clip((ys+offset).astype(int),0,height-1)
+            yellow_support.append(np.mean(yellow[iy,ix]>0));dark_support.append(np.mean(gray[iy,ix]<100))
+        support=max(yellow_support);dark=max(dark_support)
+        if support<.15 or dark<.1: continue
+        score=abs(at_center-expected_y)/height + .1*(1-min(overlap/span,1)) - .04*support
+        # Limit endpoints to the associated slot, never join a neighbouring slot's centre.
+        left=max(float(x1),ax1-span*.15);right=min(float(x2),ax2+span*.15)
+        candidates.append((score,[left,float(y1+slope*(left-x1)),right,float(y1+slope*(right-x1))],support))
+    if not candidates: return None
+    _,line,support=min(candidates,key=lambda v:v[0])
+    # Recover the complete stripe's horizontal extent, not a single Hough fragment.
+    lx,ly,rx,ry=line
+    slope=(ry-ly)/(rx-lx)
+    xs=np.arange(width)
+    votes=[]
+    for offset in (4,8,12):
+        ys=np.clip((ly+slope*(xs-lx)+offset).astype(int),0,height-1)
+        votes.append((yellow[ys,xs]>0) | (gray[ys,xs]<100))
+    stripe=(np.mean(votes,axis=0)>=2/3).astype(np.uint8)[None,:]*255
+    stripe=cv2.morphologyEx(stripe,cv2.MORPH_CLOSE,np.ones((1,9),np.uint8))
+    # Recover only this X's border. A dark neighbouring pallet must not
+    # extend a stripe across the image or make its run fail the width gate.
+    stripe[:, :max(0, int(math.floor(ax1-span*.2)))] = 0
+    stripe[:, min(width, int(math.ceil(ax2+span*.2))+1):] = 0
+    runs=[];start=None
+    for index,active in enumerate(np.r_[stripe[0]>0,False]):
+        if active and start is None: start=index
+        if not active and start is not None:
+            if start <= center <= index and span*.45 <= index-start <= span*1.8:
+                runs.append((start,index-1))
+            start=None
+    if not runs:
+        return None
+    left,right=max(runs,key=lambda r:r[1]-r[0])
+    line=[float(left),float(ly+slope*(left-lx)),float(right),float(ly+slope*(right-lx))]
+    return {'top_line_px':line,'yellow_support':float(support),
+            'image_width_px':width,'image_height_px':height}
+
+
+class YTopLineTracker:
+    """Use the detected square's TL->TR edge; never search another stripe."""
+    def __init__(self):
+        self.anchor=None
+        self.observation=None
+        self.slot_sequence=None
+
+    def update(self, frame, slot=None, filter_config=None):
+        if frame is None or slot is None:
+            return None
+        sequence = slot.get('tracking_sequence')
+        if self.anchor is not None and (sequence is None or sequence == self.slot_sequence):
+            # Callback fallback may supply the last X after flow loss. Those
+            # old pixels must not become a fresh depth observation.
+            return None
+        try:
+            diagonals=np.asarray(slot['x_lines'], dtype=float).reshape(2,2,2)
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not np.isfinite(diagonals).all():
+            return None
+        corners = slot.get('square_corners_px')
+        try:
+            corners = np.asarray(corners, dtype=float).reshape(4, 2)
+            endpoints = corners[:2]
+        except (TypeError, ValueError):
+            endpoints=np.asarray([line[np.argmin(line[:,1])] for line in diagonals])
+        endpoints=endpoints[np.argsort(endpoints[:,0])]
+        height,width=frame.shape[:2]
+        if (endpoints[1,0]-endpoints[0,0] < 20
+                or np.any(endpoints[:,0]<2) or np.any(endpoints[:,0]>=width-2)
+                or np.any(endpoints[:,1]<2) or np.any(endpoints[:,1]>=height-2)):
+            return None
+        self.anchor=dict(slot)
+        self.slot_sequence=sequence
+        edge = endpoints.ravel().tolist()
+        self.observation=dict(top_line_px=edge, square_top_line_px=edge,
+            image_width_px=width,image_height_px=height,
+            tracking='detected_square_top',tracking_sequence=sequence,
+            line_definition='detected_square_tl_to_tr')
+        return self.observation
+
+    def guidance(self, line):
+        if line is None or self.anchor is None: return None
+        x1,y1,x2,y2=line['top_line_px']
+        width,height=line['image_width_px'],line['image_height_px']
+        angle=math.degrees(math.atan2(y2-y1,x2-x1))
+        return dict(self.anchor, tracking='top_line',
+                    top_line_px=line['top_line_px'],
+                    image_goal_pose=((x1+x2)/(2*width),(y1+y2)/(2*height),angle),
+                    border_angle_deg=angle,border_lines=[line['top_line_px']],
+                    top_line_visible=True)
+
+
+def detect_y_rear_border(frame, previous, filter_config=None):
+    """Find the far warning border associated with the last tracked X."""
+    if previous is None or previous.get("center_y_ratio", 0.0) < 0.80:
+        return None
+    points = np.asarray(previous["x_lines"], np.float32).reshape(-1, 2)
+    height, width = frame.shape[:2]
+    x0 = max(0, int(points[:, 0].min()) - 25)
+    x1 = min(width, int(points[:, 0].max()) + 26)
+    far_y = float(points[:, 1].min())
+    y0 = max(0, int(far_y) - 70)
+    y1 = min(height, int(far_y) + 30)
+    if x1-x0 < 60 or y1-y0 < 10:
+        return None
+    values = dict(filter_config or {})
+    values.pop("roi_top_ratio", None)
+    band = detect_warning_tape(
+        frame[y0:y1, x0:x1], minimum_yellow_pixels=200,
+        minimum_center_y_ratio=0.0, filter_config=values,
+    )
+    if band is None:
+        return None
+    return dict(previous, tracking="rear_border",
+                image_goal_pose=((x0+band["center_x_px"])/width,
+                                 (y0+band["center_y_ratio"]*(y1-y0))/height,
+                                 band["angle_deg"]),
+                border_angle_deg=band["angle_deg"])
+
+
+def y_slot_floor_pose(observation, profile):
+    """Map the visible X into the loaded fork frame; mark extrapolation explicitly."""
+    size = [int(observation['image_width_px']), int(observation['image_height_px'])]
+    if profile.get('kind') != 'loaded_floor_plane' or profile.get('image_size') != size:
+        raise ValueError('floor_calibration_image_mismatch')
+    h = np.asarray(profile['image_to_floor_h'], dtype=float)
+    if h.shape != (3, 3) or not np.isfinite(h).all():
+        raise ValueError('floor_calibration_invalid_matrix')
+    def point(x, y):
+        q = h @ np.asarray([x, y, 1.0])
+        if not np.isfinite(q).all() or abs(q[2]) < 1e-8:
+            raise ValueError('floor_projection_invalid')
+        return q[:2]/q[2]
+    x = float(observation['center_x_px'])
+    y = float(observation['center_y_ratio'])*size[1]
+    if observation.get('tracking') == 'top_line':
+        x1,y1,x2,y2 = observation['top_line_px']
+        x,y = (x1+x2)/2, (y1+y2)/2
+    right, forward = point(x, y)
+    if not np.isfinite([right, forward]).all() or forward <= 0 or forward > 300:
+        raise ValueError('floor_target_not_in_front')
+    hull = np.asarray(profile.get('calibration_pixel_hull', profile.get('validated_pixel_hull')), dtype=np.float32)
+    extrapolated = cv2.pointPolygonTest(hull, (x, y), False) < 0
+    # The projected top-edge tangent supplies final heading. Retain None when absent.
+    heading = None
+    image_pose = y_slot_image_pose(observation)
+    if image_pose is not None:
+        cx, cy, angle = image_pose
+        dx, dy = 20*math.cos(math.radians(angle)), 20*math.sin(math.radians(angle))
+        left = point(cx*size[0]-dx, cy*size[1]-dy)
+        right_edge = point(cx*size[0]+dx, cy*size[1]+dy)
+        vector = right_edge-left
+        heading = math.degrees(math.atan2(vector[1], vector[0]))
+        heading = (heading+90) % 180-90
+    top_center = None
+    if observation.get('top_line_px') is not None:
+        x1,y1,x2,y2 = observation['top_line_px']
+        left, right_edge = point(x1,y1), point(x2,y2)
+        top_center = (left+right_edge)/2
+        vector = right_edge-left
+        heading = (math.degrees(math.atan2(vector[1],vector[0]))+90)%180-90
+    return dict(top_center_cm=None if top_center is None else top_center.tolist(),
+                right_cm=float(right), forward_cm=float(forward),
+                bearing_left_deg=math.degrees(math.atan2(-right, forward)),
+                heading_left_deg=heading, extrapolated=bool(extrapolated),
+                calibration_created_at=profile.get('created_at'))
+
+
+def y_slot_stage_geometry(pose, staging_cm=40.):
+    if pose.get('top_center_cm') is None or pose.get('heading_left_deg') is None:
+        raise ValueError('y_slot_waiting_independent_top_line')
+    c = np.asarray(pose['top_center_cm'], dtype=float)
+    theta = math.radians(pose['heading_left_deg'])
+    normal = np.array([-math.sin(theta), math.cos(theta)])
+    tangent = np.array([math.cos(theta), math.sin(theta)])
+    q = c-staging_cm*normal
+    length = float(np.linalg.norm(q))
+    # Cubic path starts forward and ends parallel to the slot's centre line.
+    t = min(1., max(.25, 8./max(length, .001)))
+    p1 = np.array([0.,length/3])
+    p2 = q-normal*length/3
+    lookahead = 3*(1-t)**2*t*p1 + 3*(1-t)*t*t*p2 + t**3*q
+    return dict(gap_cm=float(c@normal), lateral_cm=float(c@tangent),
+                heading_left_deg=float(pose['heading_left_deg']),
+                stage_right_cm=float(q[0]), stage_forward_cm=float(q[1]),
+                steering_left_deg=math.degrees(math.atan2(-lookahead[0],lookahead[1])))
+
+
+def y_slot_approach_plan(pose, staging_cm, speed, angular, scale, gain, offset):
+    """Freeze turn/travel/final-turn exposures from one stationary observation.
+
+    Invert p = scale*S*[-sin(a), cos(a)] + offset*[-sin(h), cos(h)-1].
+    The fitted coefficients predict motion, not measured displacement; the
+    complete plan must be followed by independent top-line verification.
+    """
+    centre = np.asarray(pose['top_center_cm'], dtype=float)
+    heading = math.radians(float(pose['heading_left_deg']))
+    if centre.shape != (2,) or not np.isfinite(centre).all() or not math.isfinite(heading):
+        raise ValueError('y_slot_invalid_stage_pose')
+    normal = np.array([-math.sin(heading), math.cos(heading)])
+    travel = centre - staging_cm*normal - offset*(normal-np.array([0., 1.]))
+    bearing = math.atan2(-travel[0], travel[1])
+    if travel[1] <= 0 or abs(bearing) > math.radians(45):
+        raise ValueError('y_slot_approach_needs_reverse_clearance')
+    segments = []
+    for action, amount in [('turn', bearing), ('forward', float(np.linalg.norm(travel))),
+                           ('turn', heading-bearing)]:
+        if abs(amount) < 1e-8:
+            continue
+        if action == 'turn':
+            segments.append(dict(action='turn_left' if amount > 0 else 'turn_right',
+                                 duration_sec=abs(amount)/(gain*angular),
+                                 drive=(0., 0., math.copysign(angular, amount))))
+        else:
+            segments.append(dict(action='forward', duration_sec=amount/(scale*speed*100.),
+                                 drive=(speed, 0., 0.)))
+    return segments
+
+
+def y_slot_homography_once_plan(
+    pose, staging_cm, speed, angular, scale, gain, offset,
+    trim_fraction=.20, trim_min_cm=4., trim_max_cm=6.,
+):
+    """Four fixed forward-only exposures used by the vehicle-1 Y trial."""
+    centre = np.asarray(pose['top_center_cm'], dtype=float)
+    heading = math.radians(float(pose['heading_left_deg']))
+    if centre.shape != (2,) or not np.isfinite(centre).all() or not math.isfinite(heading):
+        raise ValueError('y_slot_invalid_stage_pose')
+    normal = np.array([-math.sin(heading), math.cos(heading)])
+    gap = float(centre@normal)
+    closing = gap-staging_cm
+    if closing < 0.:
+        raise ValueError('y_slot_target_already_passed')
+    trim = clamp(closing*trim_fraction, trim_min_cm, trim_max_cm)
+    pre_turn_goal = centre-(staging_cm+trim)*normal
+    travel = pre_turn_goal-offset*(normal-np.array([0., 1.]))
+    bearing = math.atan2(-travel[0], travel[1])
+    final_turn = heading-bearing
+    main_distance = float(np.linalg.norm(travel))
+    def turn_drive(amount):
+        return ((0., 0., 0.) if abs(amount) < 1e-8
+                else (0., 0., math.copysign(angular, amount)))
+    values = [
+        ('initial_turn', turn_drive(bearing),
+         abs(bearing)/(gain*angular)),
+        ('main_forward', (speed, 0., 0.), main_distance/(scale*speed*100.)),
+        ('final_turn', turn_drive(final_turn),
+         abs(final_turn)/(gain*angular)),
+        ('short_forward', (speed, 0., 0.), trim/(scale*speed*100.)),
+    ]
+    segments = [dict(action=name, drive=drive, duration_sec=duration)
+                for name, drive, duration in values]
+    if any(segment['drive'][0] < 0 or segment['drive'][1] != 0
+           or not math.isfinite(segment['duration_sec'])
+           or segment['duration_sec'] < 0
+           for segment in segments):
+        raise ValueError('y_slot_unsafe_frozen_segment')
+    return dict(segments=segments, gap_cm=gap,
+                lateral_cm=float(centre@np.array([math.cos(heading), math.sin(heading)])),
+                trim_cm=float(trim), main_distance_cm=main_distance,
+                bearing_left_deg=math.degrees(bearing),
+                final_turn_left_deg=math.degrees(final_turn))
+
+
+def y_slot_homography_frozen_plan(
+    pose, staging_cm, insertion_cm, speed, angular, coefficients,
+    execute_insertion=True, settle_sec=.50,
+):
+    """Invert the delayed-yaw response once, then freeze every command."""
+    state = ResponseState(history_known=True, pending_bound_deg=0.)
+    result = plan_approach(
+        float(pose['top_center_cm'][0]), float(pose['top_center_cm'][1]),
+        float(pose['heading_left_deg']), state, coefficients,
+        staging_cm=staging_cm, insertion_cm=insertion_cm,
+        speed_m_s=speed, angular_rad_s=angular, settle_sec=settle_sec)
+    if not result['accepted']:
+        raise ValueError('y_slot_response_plan_failed:'+result['reason'])
+    stages = [dict(stage, control='fixed_replay')
+              for stage in result['actions']]
+    if execute_insertion:
+        stages.append(dict(
+            action='fixed_insertion_forward', control='fixed_replay',
+            drive=(speed, 0., 0.), distance_cm=float(insertion_cm),
+            duration_sec=insertion_cm/(coefficients.forward_scale*speed*100.)))
+    if any(
+        not math.isfinite(float(stage['duration_sec']))
+        or stage['duration_sec'] < 0.
+        or stage['drive'][0] < 0.
+        or stage['drive'][1] != 0.
+        for stage in stages
+    ):
+        raise ValueError('y_slot_unsafe_frozen_plan')
+    return dict(stages=stages, insertion_distance_cm=float(insertion_cm),
+                insertion_enabled=bool(execute_insertion),
+                response_plan=result,
+                initial_response_state_assumption='settled_zero_at_arrival')
+
+
+def y_slot_homography_consensus(
+    observations, profile, minimum_count=20, target_center_x_ratio=.5,
+):
+    """Select the stable X nearest the configured image target."""
+    rows = []
+    seen_stamps = set()
+    for observation in list(observations)[-30:]:
+        try:
+            stamp = int(observation['rgb_stamp_ns'])
+            if stamp <= 0 or stamp in seen_stamps:
+                continue
+            square_line = observation.get('square_top_line_px')
+            if square_line is None:
+                continue
+            pose = y_slot_floor_pose(
+                dict(observation, top_line_px=square_line), profile
+            )
+            seen_stamps.add(stamp)
+            rows.append((observation, pose, stamp))
+        except (ValueError, KeyError, TypeError, OverflowError):
+            continue
+    if len(rows) < minimum_count:
+        return None
+    centres = np.asarray([pose['top_center_cm'] for _, pose, _ in rows])
+    image_centres = np.asarray([
+        (float(observation['square_top_line_px'][0])
+         + float(observation['square_top_line_px'][2]))/2.
+        for observation, _, _ in rows
+    ])
+    association_cm = np.asarray([8., 5.])
+    slot_clusters = set()
+    for index in range(len(rows)):
+        # First separate adjacent physical markings without using their noisy
+        # Hough angle. This keeps the selected slot stable across time windows.
+        member = tuple(np.flatnonzero(
+            np.all(np.abs(centres-centres[index]) <= association_cm, axis=1)
+        ).tolist())
+        if len(member) >= minimum_count:
+            slot_clusters.add(member)
+    if not slot_clusters:
+        return None
+
+    # A dense neighbourhood alone can still contain a drifting or bimodal X.
+    # Bound robust dispersion relative to the association window, independent
+    # of where the physically possible slot lies in the calibrated plane.
+    stable = []
+    for member_tuple in slot_clusters:
+        member = np.asarray(member_tuple, dtype=int)
+        values = centres[member]
+        median = np.median(values, axis=0)
+        deviation = np.abs(values-median)
+        mad = np.median(deviation, axis=0)
+        p90 = np.percentile(deviation, 90, axis=0)
+        if np.any(mad > association_cm/4.) or np.any(p90 > association_cm/2.):
+            continue
+        stable.append(dict(
+            member=member, median=median, mad=mad, p90=p90,
+            image_median=float(np.median(image_centres[member])),
+            image_mad=float(np.median(np.abs(
+                image_centres[member]-np.median(image_centres[member])))),
+        ))
+    if not stable:
+        return None
+
+    # Neighbourhoods centred on different samples of the same X overlap. Keep
+    # one representative so only a genuinely separate physical X can become
+    # the runner-up identity.
+    physical_clusters = []
+    for candidate in sorted(stable, key=lambda value: -len(value['member'])):
+        if any(np.all(np.abs(candidate['median']-other['median'])
+                      <= association_cm) for other in physical_clusters):
+            continue
+        physical_clusters.append(candidate)
+    target_x = clamp(float(target_center_x_ratio), .05, .95)*float(profile['image_size'][0])
+    physical_clusters.sort(key=lambda value: (
+        abs(value['image_median']-target_x), -len(value['member'])))
+    chosen = physical_clusters[0]
+    runner = physical_clusters[1] if len(physical_clusters) > 1 else None
+    if runner is not None and len(runner['member']) * 2 >= len(chosen['member']):
+        chosen_distance = abs(chosen['image_median']-target_x)
+        runner_distance = abs(runner['image_median']-target_x)
+        identity_margin = max(4., 3.*(
+            chosen['image_mad']+runner['image_mad']))
+        if runner_distance-chosen_distance <= identity_margin:
+            return None
+    # Endpoint-wise median rejects occasional bad Hough diagonals inside the
+    # chosen physical marking after its identity and dispersion are validated.
+    cluster = chosen['member']
+    selected = [rows[index][0] for index in cluster]
+    line = np.median(np.asarray([
+        row['square_top_line_px'] for row in selected
+    ]), axis=0)
+    width, height = profile['image_size']
+    x1, y1, x2, y2 = map(float, line)
+    merged = dict(selected[-1], tracking='top_line', top_line_px=line.tolist(),
+                  image_width_px=width, image_height_px=height,
+                  center_x_px=(x1+x2)/2, center_y_ratio=(y1+y2)/(2*height),
+                  image_goal_pose=((x1+x2)/(2*width), (y1+y2)/(2*height),
+                                   math.degrees(math.atan2(y2-y1, x2-x1))))
+    pose = y_slot_floor_pose(merged, profile)
+    pose.update(square_top_line_px=line.tolist(), top_line_px=line.tolist(),
+                pose_line_definition='far_edge_of_20cm_square',
+                consensus_count=int(len(cluster)),
+                observation_count=int(len(rows)),
+                unique_observation_count=int(len(rows)),
+                physical_cluster_count=int(len(physical_clusters)),
+                consensus_mad_cm=chosen['mad'].tolist(),
+                consensus_p90_deviation_cm=chosen['p90'].tolist(),
+                runner_up_count=(0 if runner is None else int(len(runner['member']))),
+                rgb_stamp_ns_first=int(min(rows[index][2] for index in cluster)),
+                rgb_stamp_ns_last=int(max(rows[index][2] for index in cluster)))
+    return pose
+
+
+def y_slot_metric_pose_consensus(poses, minimum_count=5):
+    """Median five distinct registered-depth top-line poses."""
+    rows, stamps = [], set()
+    for pose in list(poses)[-30:]:
+        try:
+            stamp = int(pose["rgb_stamp_ns"])
+            center = np.asarray(pose["top_center_cm"], dtype=float)
+            heading = float(pose["heading_left_deg"])
+            if stamp <= 0 or stamp in stamps or center.shape != (2,):
+                continue
+            if not np.isfinite(center).all() or not math.isfinite(heading):
+                continue
+            stamps.add(stamp)
+            rows.append(pose)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+    if len(rows) < minimum_count:
+        return None
+    selected = rows[-minimum_count:]
+    centers = np.asarray([pose["top_center_cm"] for pose in selected], dtype=float)
+    headings = np.asarray([pose["heading_left_deg"] for pose in selected], dtype=float)
+    result = dict(selected[-1])
+    result["top_center_cm"] = np.median(centers, axis=0).tolist()
+    result["right_cm"], result["forward_cm"] = result["top_center_cm"]
+    result["heading_left_deg"] = float(np.median(headings))
+    result["bearing_left_deg"] = math.degrees(math.atan2(
+        -result["right_cm"], result["forward_cm"]
+    ))
+    result["measurement_source"] = "registered_top_line_depth_consensus"
+    result["consensus_count"] = len(selected)
+    return result
+
+
+def y_slot_image_pose(observation):
+    """Position/angle of the selected slot's far edge in image coordinates."""
+    if observation.get("tracking") in {"rear_border", "top_line"}:
+        return observation.get("image_goal_pose")
+    if observation.get('top_line_px') is not None:
+        x1,y1,x2,y2 = observation['top_line_px']
+        return ((x1+x2)/(2*observation['image_width_px']),
+                (y1+y2)/(2*observation['image_height_px']),
+                math.degrees(math.atan2(y2-y1,x2-x1)))
+    height = float(observation["image_height_px"])
+    width = float(observation["image_width_px"])
+    center_y = float(observation["center_y_ratio"]) * height
+    candidates = []
+    for line in observation.get("border_lines", []):
+        x1, y1, x2, y2 = map(float, line)
+        if x2 < x1:
+            x1, y1, x2, y2 = x2, y2, x1, y1
+        if x2-x1 >= 60 and (y1+y2)/2 < center_y:
+            candidates.append((x2-x1, x1, y1, x2, y2))
+    if not candidates:
+        return None
+    _, x1, y1, x2, y2 = max(candidates)
+    return ((x1+x2)/(2*width), (y1+y2)/(2*height),
+            math.degrees(math.atan2(y2-y1, x2-x1)))
+
+
+
+
+class YSlotTracker:
+    """Lock one X per arrival and propagate its floor geometry with LK flow."""
+
+    def __init__(self):
+        self.gray = None
+        self.points = None
+        self.observation = None
+        self.lost = False
+
+    def update(self, frame, minimum_yellow_pixels=600, filter_config=None):
+        if self.lost:
+            return None
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if self.observation is None:
+            observation = detect_y_slot_x(frame, minimum_yellow_pixels, filter_config)
+            if observation is None:
+                return None
+            lines = observation["x_lines"]
+            coords = np.asarray(lines, dtype=np.float32).reshape(-1, 2)
+            mask = np.zeros_like(gray)
+            x0, y0 = np.floor(coords.min(axis=0) - 20).astype(int)
+            x1, y1 = np.ceil(coords.max(axis=0) + 20).astype(int)
+            mask[max(0, y0):min(gray.shape[0], y1 + 1),
+                 max(0, x0):min(gray.shape[1], x1 + 1)] = 255
+            points = cv2.goodFeaturesToTrack(
+                gray, 100, 0.01, 5, mask=mask, blockSize=5
+            )
+            if points is None or len(points) < 8:
+                return None
+            self.gray, self.points = gray, points
+            self.observation = dict(observation, tracking="acquired", tracking_sequence=1)
+            return self.observation
+        if gray.shape != self.gray.shape:
+            self.lost = True
+            return None
+        current, status, _ = cv2.calcOpticalFlowPyrLK(
+            self.gray, gray, self.points, None, winSize=(21, 21), maxLevel=3
+        )
+        if current is None:
+            self.lost = True
+            return None
+        back, back_status, _ = cv2.calcOpticalFlowPyrLK(
+            gray, self.gray, current, None, winSize=(21, 21), maxLevel=3
+        )
+        if back is None:
+            self.lost = True
+            return None
+        valid = ((status.ravel() == 1) & (back_status.ravel() == 1)
+                 & (np.linalg.norm(back - self.points, axis=2).ravel() < 1.0))
+        old = self.points[valid].reshape(-1, 2)
+        new = current[valid].reshape(-1, 2)
+        transform, inliers = (None, None)
+        if len(old) >= 8:
+            transform, inliers = cv2.findHomography(old, new, cv2.RANSAC, 2.0)
+        if (transform is None or not np.isfinite(transform).all()
+                or int(inliers.sum()) < 8 or float(inliers.mean()) < 0.65):
+            self.lost = True
+            return None
+
+        def warp(points):
+            return cv2.perspectiveTransform(
+                np.asarray(points, np.float32).reshape(1, -1, 2), transform
+            ).reshape(-1, 2)
+
+        observation = dict(self.observation)
+        center = warp([(observation["center_x_px"],
+                        observation["center_y_ratio"] * gray.shape[0])])[0]
+        if not (0 <= center[0] < gray.shape[1] and 0 <= center[1] < gray.shape[0]):
+            self.lost = True
+            return None
+        x_lines = warp(observation["x_lines"]).reshape(-1, 4)
+        border_lines = (warp(observation["border_lines"]).reshape(-1, 4)
+                        if observation["border_lines"] else np.empty((0, 4)))
+        square_top = (warp([observation["square_top_line_px"]]).reshape(-1).tolist()
+                      if observation.get("square_top_line_px") is not None else None)
+        square_corners = (warp(observation["square_corners_px"]).tolist()
+                          if observation.get("square_corners_px") is not None else None)
+        angles = [math.degrees(math.atan2(y2-y1, x2-x1))
+                  for x1, y1, x2, y2 in border_lines]
+        angles = [(angle + 90) % 180 - 90 for angle in angles]
+        if not angles:
+            diagonals=x_lines.reshape(2,2,2)
+            upper=np.asarray([line[np.argmin(line[:,1])] for line in diagonals])
+            upper=upper[np.argsort(upper[:,0])]
+            delta=upper[1]-upper[0]
+            angles=[math.degrees(math.atan2(delta[1],delta[0]))]
+        observation.update(
+            center_x_px=float(center[0]), center_x_ratio=float(center[0]/gray.shape[1]),
+            center_y_ratio=float(center[1]/gray.shape[0]),
+            x_lines=x_lines.tolist(), border_lines=border_lines.tolist(),
+            border_angle_deg=float(np.median(angles)),
+            x_min_px=float(x_lines[:, [0, 2]].min()),
+            x_max_px=float(x_lines[:, [0, 2]].max()), tracking="optical_flow",
+            tracking_inliers=int(inliers.sum()),
+            tracking_sequence=int(self.observation.get("tracking_sequence", 1)) + 1,
+            tracking_transform=transform.tolist(),
+            square_corners_px=square_corners,
+            square_top_line_px=square_top,
+        )
+        self.gray = gray
+        self.points = new[inliers.ravel().astype(bool)].reshape(-1, 1, 2)
+        self.observation = observation
+        return observation
+
 
 
 def detect_dock_end_markers(
@@ -923,6 +1609,9 @@ def parse_arrival(raw):
     if status != "SUCCEEDED":
         raise ValueError("arrival_not_succeeded")
     location = str(payload.get("location", "")).strip().upper()
+    # Older arrival publishers may still include a numbered Y position.
+    if location in {"Y1", "Y2", "Y3", "Y4"}:
+        location = "Y"
     operation = str(payload.get("operation", "")).strip().upper()
     product_type = str(payload.get("product_type", "")).strip().upper()
     insertion_distance_cm = payload.get("insertion_distance_cm")
@@ -933,6 +1622,9 @@ def parse_arrival(raw):
             raise ValueError("arrival_insertion_distance") from exc
         if not math.isfinite(insertion_distance_cm) or not 1.0 <= insertion_distance_cm <= 100.0:
             raise ValueError("arrival_insertion_distance")
+    stage_only = payload.get("stage_only", False)
+    if not isinstance(stage_only, bool):
+        raise ValueError("arrival_stage_only")
     if not location:
         raise ValueError("arrival_location")
     if operation not in OPERATIONS:
@@ -955,12 +1647,7 @@ def parse_arrival(raw):
             raise ValueError("invalid_target_symbols")
         normalized_target.update(left=left, right=right)
     elif target_type == "NEAREST":
-        recognition_mode = str(
-            target.get("recognition_mode", "CURRENT")
-        ).strip().upper()
-        if recognition_mode not in {"CURRENT", "LEGACY"}:
-            raise ValueError("arrival_recognition_mode")
-        normalized_target["recognition_mode"] = recognition_mode
+        pass
     elif target_type == "SLOT":
         slot_id = str(target.get("slot_id", "")).strip().upper()
         if not slot_id:
@@ -970,7 +1657,24 @@ def parse_arrival(raw):
         "status": status, "location": location, "operation": operation,
         "product_type": product_type, "target": normalized_target,
         "insertion_distance_cm": insertion_distance_cm,
+        "stage_only": stage_only,
     }
+
+
+def parse_y_slot_manual_insertion(raw):
+    """Parse the GUI's standalone insertion distance request in centimetres."""
+    try:
+        payload = json.loads(str(raw).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError("manual_insertion_json") from exc
+    value = payload.get("distance_cm") if isinstance(payload, dict) else payload
+    try:
+        distance_cm = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("manual_insertion_distance") from exc
+    if not math.isfinite(distance_cm) or not 1.0 <= distance_cm <= 100.0:
+        raise ValueError("manual_insertion_distance")
+    return distance_cm
 
 
 def normalize_slot_id(zone, slot_id):
@@ -1273,6 +1977,13 @@ class SlotGridVision:
         return observations, None
 
 
+def resolve_vehicle_id(requested_vehicle, domain_id):
+    """Resolve the vehicle ID for Y-only floor-calibration metadata."""
+    if requested_vehicle in (1, 2):
+        return requested_vehicle
+    return {215: 1, 216: 2}.get(domain_id, 0)
+
+
 class AutoDockNode(Node):
     """ROS-only docking controller; no Qt widget or UI state is used."""
 
@@ -1295,6 +2006,10 @@ class AutoDockNode(Node):
         self.declare_parameter("fork_state_topic", "")
         self.declare_parameter("drive_ready_topic", "")
         self.declare_parameter("test_load_state_topic", "")
+        self.declare_parameter("y_slot_manual_insertion_topic", "")
+        self.declare_parameter("y_slot_insertion_default_topic", "")
+        self.declare_parameter("y_slot_response_config_topic", "")
+        self.declare_parameter("y_slot_pose_source_topic", "")
         self.declare_parameter("detection_topic", "")
         self.declare_parameter("dock_inventory_topic", "")
         self.declare_parameter("dock_inventory_reset_topic", "")
@@ -1346,6 +2061,19 @@ class AutoDockNode(Node):
         self.test_load_state_topic = self.topic_or_default(
             "test_load_state_topic", "/auto_dock/test/load_state"
         )
+        self.y_slot_manual_insertion_topic = self.topic_or_default(
+            "y_slot_manual_insertion_topic", "/auto_dock/y_slot/insertion"
+        )
+        self.y_slot_insertion_default_topic = self.topic_or_default(
+            "y_slot_insertion_default_topic",
+            "/auto_dock/y_slot/insertion_default",
+        )
+        self.y_slot_response_config_topic = self.topic_or_default(
+            "y_slot_response_config_topic", "/auto_dock/y_slot/response_config"
+        )
+        self.y_slot_pose_source_topic = self.topic_or_default(
+            "y_slot_pose_source_topic", "/auto_dock/y_slot/pose_source"
+        )
         self.detection_topic = self.topic_or_default(
             "detection_topic", "/symbol_seg/detections"
         )
@@ -1365,6 +2093,7 @@ class AutoDockNode(Node):
         self.target_right = "spade"
         self.operation = "PICK"
         self.location = "DOCK_1"
+        self.mission_kind = "NONE"
         self.product_type = "NORMAL"
         self.load_state = "UNLOADED"
         self.selected_slot_id = None
@@ -1417,6 +2146,12 @@ class AutoDockNode(Node):
         )
         self.last_dock_inventory_scan_at = 0.0
         self.cv_bridge = CvBridge()
+        self.declare_parameter("slot_depth_image_topic", "/ascamera/camera_publisher/depth0/image_raw")
+        self.slot_depth_frames = deque(maxlen=8)
+        self.slot_pending_depth_frame = None
+        self.slot_rgb_observations = deque(maxlen=8)
+        self.slot_camera_frame = None
+        self.slot_camera_size = None
         self.slot_camera_matrix = None
         self.slot_distortion = None
         self.last_slot_snapshot = None
@@ -1425,24 +2160,40 @@ class AutoDockNode(Node):
         self.latest_detection_at = 0.0
         self.latest_tape_guidance = None
         self.latest_tape_guidance_at = 0.0
+        self.y_slot_guidance = None
+        self.y_slot_guidance_at = 0.0
         self.tape_initial_detection_complete = False
         self.tape_reference = None
         self.tape_recovery_start_position = None
         self.tape_recovery_direction = None
         self.tape_recovery_done = False
+        self.y_slot_cycle_phase = 'measure'
+        self.y_slot_response_history = deque(maxlen=2400)
+        self.y_slot_command_history = deque(maxlen=2400)
+        self.y_slot_plan_executor = ThreadPoolExecutor(max_workers=1)
+        self.y_slot_plan_future = None
+        self.y_slot_plan_generation = 0
+        self.y_slot_camera_received_at = 0.
+        self.y_slot_camera_source_age_sec = float('inf')
+        self.y_slot_cycle_segments = []
+        self.y_slot_segment_until = None
+        self.y_slot_measure_after = 0.
+        self.y_slot_retry_count = 0
         self.y_slot_centering_started_at = None
         self.y_slot_center_confirmation_count = 0
         self.y_slot_last_counted_tape_at = None
         self.y_slot_centered_since = None
         self.y_slot_requested_insertion_distance_cm = None
-        self.y_slot_lateral_pulse_speed = 0.0
-        self.y_slot_lateral_pulse_until = 0.0
-        self.y_slot_lateral_settle_until = 0.0
-        self.y_slot_last_motion_tape_at = None
-        self.y_slot_yaw_pulse_speed = 0.0
-        self.y_slot_yaw_pulse_until = 0.0
-        self.y_slot_yaw_settle_until = 0.0
-        self.y_slot_last_yaw_tape_at = None
+        self.y_slot_insertion_distance_override_cm = None
+        self.y_slot_floor_insert_initial_gap = None
+        self.y_slot_rear_border_fallback = False
+        self.y_slot_tracker = YSlotTracker()
+        self.y_slot_top_tracker = YTopLineTracker()
+        self.y_slot_start_observations = deque(maxlen=30)
+        self.y_slot_visual_missing_since = None
+        self.y_slot_final_alignment = False
+        self.y_slot_forward_until = 0.0
+        self.y_slot_forward_settle_until = 0.0
         self.y_slot_insert_start_position = None
         self.y_slot_insert_start_yaw = None
         self.y_slot_insert_started_at = None
@@ -1466,6 +2217,8 @@ class AutoDockNode(Node):
         self.coarse_last_counted_stamp = None
         self.odom_position = None
         self.odom_yaw = None
+        self.odom_received_at = 0.0
+        self.y_slot_odom_source_received_at = 0.0
         self.imu_yaw = None
         self.search_heading_yaw = None
         self.search_heading_source = None
@@ -1512,6 +2265,10 @@ class AutoDockNode(Node):
         self.cmd_pub = self.create_publisher(
             Twist, str(self.get_parameter("cmd_vel_topic").value), 10
         )
+        self.create_subscription(
+            Twist, str(self.get_parameter("cmd_vel_topic").value),
+            self.on_response_command, 50,
+        )
         self.fork_pub = self.create_publisher(
             String, str(self.get_parameter("fork_command_topic").value), 10
         )
@@ -1530,6 +2287,22 @@ class AutoDockNode(Node):
         self.create_subscription(
             String, self.test_load_state_topic, self.on_test_load_state, 10
         )
+        self.create_subscription(
+            String, self.y_slot_manual_insertion_topic,
+            self.on_y_slot_manual_insertion, 10,
+        )
+        self.create_subscription(
+            String, self.y_slot_insertion_default_topic,
+            self.on_y_slot_insertion_default, 10,
+        )
+        self.create_subscription(
+            String, self.y_slot_response_config_topic,
+            self.on_y_slot_response_config, 10,
+        )
+        self.create_subscription(
+            String, self.y_slot_pose_source_topic,
+            self.on_y_slot_pose_source, 10,
+        )
         self.create_subscription(String, self.fork_state_topic, self.on_fork_state, 10)
         self.create_subscription(String, self.detection_topic, self.on_detection, 10)
         self.create_subscription(
@@ -1544,6 +2317,10 @@ class AutoDockNode(Node):
         self.create_subscription(
             Image, str(self.get_parameter("slot_image_topic").value),
             self.on_slot_image, image_qos,
+        )
+        self.create_subscription(
+            Image, str(self.get_parameter("slot_depth_image_topic").value),
+            self.on_slot_depth, image_qos,
         )
         self.create_subscription(
             CameraInfo,
@@ -1594,6 +2371,22 @@ class AutoDockNode(Node):
             self.get_logger().warning(f"pose config read failed: {exc}")
         data.update(self.config_overrides)
         self.config = data
+
+    def persist_config(self):
+        """Atomically persist the current vehicle config."""
+        self.pose_config_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(
+            prefix=self.pose_config_path.name + ".", suffix=".tmp",
+            dir=str(self.pose_config_path.parent),
+        )
+        try:
+            with open(fd, "w", encoding="utf-8", closefd=True) as stream:
+                json.dump(self.config, stream, ensure_ascii=False, indent=2)
+                stream.write("\n")
+            Path(temporary).replace(self.pose_config_path)
+        except Exception:
+            Path(temporary).unlink(missing_ok=True)
+            raise
 
     def warning_tape_filter_values(self):
         """Reload the GUI-authored HSV mask config when it changes."""
@@ -1739,17 +2532,38 @@ class AutoDockNode(Node):
             self.publish_status("rejected", "arrival_while_busy")
             return
         operation = arrival["operation"]
+        location = arrival["location"]
+        zone = location.split("_", 1)[0]
+        mission_kind = (
+            "Y_PLACE" if operation == "PLACE" and location == "Y"
+            else "DOCK_PICK" if operation == "PICK" and zone == "DOCK"
+            else "OTHER"
+        )
+        if location == "Y" and operation != "PLACE":
+            self.publish_status(
+                "rejected", "y_zone_requires_place",
+                requested_operation=operation, requested_location=location,
+            )
+            return
+        if zone == "DOCK" and operation != "PICK":
+            self.publish_status(
+                "rejected", "dock_zone_requires_pick",
+                requested_operation=operation, requested_location=location,
+            )
+            return
         self.operation = operation
-        self.location = arrival["location"]
+        self.location = location
         self.product_type = arrival["product_type"]
         self.y_slot_requested_insertion_distance_cm = arrival.get(
             "insertion_distance_cm"
         )
+        self.y_slot_stage_only = arrival.get("stage_only", False)
         target = arrival["target"]
+        # Fleet arrival publishers commonly use NEAREST as their default even
+        # when a Y PLACE has no object-selection phase. Treat it as NONE here.
+        if self.location == "Y" and operation == "PLACE" and target["type"] == "NEAREST":
+            target = {"type": "NONE"}
         self.target_type = target["type"]
-        self.nearest_recognition_mode = target.get(
-            "recognition_mode", "CURRENT"
-        )
         if self.target_type == "NEAREST" and operation != "PICK":
             self.publish_status("rejected", "nearest_target_requires_pick")
             return
@@ -1768,13 +2582,21 @@ class AutoDockNode(Node):
                 except ValueError as exc:
                     self.publish_status("rejected", str(exc))
                     return
+                self.mission_kind = mission_kind
                 self.state = "slot_target_ready"
                 self.publish_status("waiting", "slot_execution_not_implemented")
             else:
+                self.mission_kind = mission_kind
                 self.state = "slot_scanning"
                 self.publish_status("waiting", "slot_grid_scanning")
             return
+        self.mission_kind = mission_kind
         self.load_config()
+        self.slot_pending_depth_frame = None
+        for buffer_name in ("slot_depth_frames", "slot_rgb_observations"):
+            buffer = getattr(self, buffer_name, None)
+            if buffer is not None:
+                buffer.clear()
         self.target_world = None
         self.target_entity_id = None
         self.nearest_lock_signature = None
@@ -1810,37 +2632,38 @@ class AutoDockNode(Node):
         self.nearest_center_reconfirm_source_stamp_ns = None
         self.latest_tape_guidance = None
         self.latest_tape_guidance_at = 0.0
+        self.y_slot_guidance = None
+        self.y_slot_guidance_at = 0.0
         self.tape_initial_detection_complete = False
         self.tape_reference = None
         self.tape_recovery_start_position = None
         self.tape_recovery_direction = None
         self.tape_recovery_done = False
+        self.y_slot_cycle_phase = 'measure'
+        self.y_slot_cycle_segments = []
+        self.y_slot_segment_until = None
+        self.y_slot_measure_after = 0.
+        self.y_slot_retry_count = 0
         self.y_slot_centering_started_at = None
         self.y_slot_center_confirmation_count = 0
         self.y_slot_last_counted_tape_at = None
         self.y_slot_centered_since = None
-        self.y_slot_lateral_pulse_speed = 0.0
-        self.y_slot_lateral_pulse_until = 0.0
-        self.y_slot_lateral_settle_until = 0.0
-        self.y_slot_last_motion_tape_at = None
-        self.y_slot_yaw_pulse_speed = 0.0
-        self.y_slot_yaw_pulse_until = 0.0
-        self.y_slot_yaw_settle_until = 0.0
-        self.y_slot_last_yaw_tape_at = None
+        self.y_slot_floor_insert_initial_gap = None
+        self.y_slot_rear_border_fallback = False
+        self.y_slot_tracker = YSlotTracker()
+        self.y_slot_top_tracker = YTopLineTracker()
+        self.y_slot_start_observations = deque(maxlen=30)
+        self.y_slot_start_depth_poses = deque(maxlen=30)
+        self.y_slot_visual_missing_since = None
+        self.y_slot_final_alignment = False
+        self.y_slot_forward_until = 0.0
+        self.y_slot_forward_settle_until = 0.0
         self.y_slot_insert_start_position = None
         self.y_slot_insert_start_yaw = None
         self.y_slot_insert_started_at = None
-        configured_y_locations = self.config.get(
-            "y_slot_centering_locations", ["Y1", "Y2", "Y3", "Y4"]
-        )
-        if not isinstance(configured_y_locations, (list, tuple, set)):
-            configured_y_locations = ["Y1", "Y2", "Y3", "Y4"]
-        configured_y_locations = {
-            str(value).strip().upper() for value in configured_y_locations
-        }
         if (
             operation == "PLACE"
-            and self.location in configured_y_locations
+            and self.location == "Y"
             and self.boolean("y_slot_centering_enabled", True)
         ):
             self.reset_coarse_alignment()
@@ -1902,8 +2725,100 @@ class AutoDockNode(Node):
         if self.state not in {"idle", "ready"}:
             self.publish_status("rejected", "test_load_state_while_busy")
             return
+        if self.load_state != requested:
+            self.y_slot_history_reset_at = time.monotonic()
         self.load_state = requested
         self.publish_status("idle", "test_load_state_override")
+
+    def on_y_slot_manual_insertion(self, msg):
+        """Immediately replace the current drive plan with one straight move."""
+        if getattr(self, "mission_kind", None) != "Y_PLACE":
+            self.publish_status("rejected", "y_slot_command_requires_y_place")
+            return
+        try:
+            distance_cm = parse_y_slot_manual_insertion(msg.data)
+        except ValueError as exc:
+            self.publish_status("rejected", str(exc))
+            return
+        speed = self.number("y_slot_response_linear_speed_m_s", .10, .10, .20)
+        scale = self.loaded_response_coefficients().forward_scale
+        duration_sec = distance_cm / (scale * speed * 100.)
+        self.stop_drive(10)
+        self.y_slot_cycle_segments = [dict(
+            action="manual_insertion_forward", control="fixed_replay",
+            drive=(speed, 0., 0.), duration_sec=duration_sec,
+            distance_cm=distance_cm,
+        )]
+        self.y_slot_segment_started_at = None
+        self.completed_insertion_distance_m = None
+        self.y_slot_cycle_phase = "manual_insertion_execute"
+        self.state = "y_slot_centering"
+        self.publish_status(
+            "running", "y_slot_manual_insertion_locked",
+            insertion_distance_cm=distance_cm,
+            insertion_speed_m_s=speed, duration_sec=duration_sec,
+        )
+
+    def on_y_slot_insertion_default(self, msg):
+        """Update the runtime default distance without starting any motion."""
+        if getattr(self, "mission_kind", None) != "Y_PLACE":
+            self.publish_status("rejected", "y_slot_command_requires_y_place")
+            return
+        try:
+            distance_cm = parse_y_slot_manual_insertion(msg.data)
+        except ValueError as exc:
+            self.publish_status("rejected", str(exc))
+            return
+        self.y_slot_insertion_distance_override_cm = distance_cm
+        self.publish_status(
+            self.state, "y_slot_insertion_default_updated",
+            insertion_distance_cm=distance_cm,
+        )
+
+    def on_y_slot_response_config(self, msg):
+        """Apply and persist model knobs without starting vehicle motion."""
+        if getattr(self, "mission_kind", None) != "Y_PLACE":
+            self.publish_status("rejected", "y_slot_config_requires_y_place")
+            return
+        try:
+            update = parse_y_slot_response_update(msg.data)
+            model = dict(self.config.get("y_slot_response_model", {}))
+            for key, value in update.items():
+                if key in Y_SLOT_RESPONSE_MODEL_KEYS:
+                    model[key] = value
+            candidate = dict(self.config)
+            candidate["y_slot_response_model"] = model
+            for key, value in update.items():
+                if key in Y_SLOT_RESPONSE_TOP_LEVEL_KEYS:
+                    candidate[key] = value
+            values = dict(self.loaded_response_coefficients().__dict__)
+            values.update(model)
+            ResponseCoefficients(**values)
+            self.config = candidate
+            self.persist_config()
+        except (OSError, TypeError, ValueError) as exc:
+            self.publish_status("rejected", str(exc))
+            return
+        self.publish_status(
+            self.state, "y_slot_response_config_updated",
+            y_slot_response_config=update,
+        )
+
+    def on_y_slot_pose_source(self, msg):
+        """Select the metric source used by the next frozen Y plan."""
+        if getattr(self, "mission_kind", None) != "Y_PLACE":
+            self.publish_status("rejected", "y_slot_config_requires_y_place")
+            return
+        try:
+            source = parse_y_slot_pose_source(msg.data)
+            self.config["y_slot_pose_source"] = source
+            self.persist_config()
+        except (OSError, ValueError) as exc:
+            self.publish_status("rejected", str(exc))
+            return
+        self.publish_status(
+            self.state, "y_slot_pose_source_updated", y_slot_pose_source=source
+        )
 
     def on_fork_state(self, msg):
         if self.state != "waiting_fork":
@@ -1926,33 +2841,8 @@ class AutoDockNode(Node):
         self.finish_fork_operation(fork_state)
 
     def finish_fork_operation(self, fork_state):
-        if (
-            fork_state == "DOWN_COMPLETE"
-            and self.operation == "PLACE"
-            and self.location in {"Y1", "Y2", "Y3", "Y4"}
-        ):
-            placed_distance = getattr(
-                self, "completed_insertion_distance_m", None
-            )
-            self.load_state = "UNLOADED"
-            self.stop_drive(10)
-            self.post_lift_reverse_start = None
-            self.post_lift_reverse_start_yaw = None
-            self.post_lift_reverse_target_m = None
-            self.y_slot_insert_start_position = None
-            self.y_slot_insert_start_yaw = None
-            self.y_slot_insert_started_at = None
-            self.completed_insertion_distance_m = None
-            self.state = "ready"
-            self.publish_status(
-                "completed", "y_slot_placement_complete",
-                fork_state=fork_state,
-                insertion_distance_cm=(
-                    None if placed_distance is None
-                    else round(placed_distance * 100.0, 1)
-                ),
-            )
-            return
+        if getattr(self, "mission_kind", None) == "Y_PLACE":
+            self.y_slot_history_reset_at = time.monotonic()
         if self.odom_yaw is None or self.odom_position is None:
             self.cancel("odom_missing_after_fork")
             return
@@ -1983,6 +2873,10 @@ class AutoDockNode(Node):
         )
 
     def cancel(self, reason):
+        future = getattr(self, 'y_slot_plan_future', None)
+        if future is not None:
+            future.cancel()
+        self.y_slot_plan_future = None
         self.state = "idle"
         self.reason = reason
         self.backoff_until = None
@@ -2008,18 +2902,27 @@ class AutoDockNode(Node):
         self.tape_recovery_start_position = None
         self.tape_recovery_direction = None
         self.tape_recovery_done = False
+        self.y_slot_cycle_phase = 'measure'
+        self.y_slot_cycle_segments = []
+        self.y_slot_segment_until = None
+        self.y_slot_measure_after = 0.
+        self.y_slot_retry_count = 0
+        self.y_slot_guidance = None
+        self.y_slot_guidance_at = 0.0
         self.y_slot_centering_started_at = None
         self.y_slot_center_confirmation_count = 0
         self.y_slot_last_counted_tape_at = None
         self.y_slot_centered_since = None
-        self.y_slot_lateral_pulse_speed = 0.0
-        self.y_slot_lateral_pulse_until = 0.0
-        self.y_slot_lateral_settle_until = 0.0
-        self.y_slot_last_motion_tape_at = None
-        self.y_slot_yaw_pulse_speed = 0.0
-        self.y_slot_yaw_pulse_until = 0.0
-        self.y_slot_yaw_settle_until = 0.0
-        self.y_slot_last_yaw_tape_at = None
+        self.y_slot_floor_insert_initial_gap = None
+        self.y_slot_rear_border_fallback = False
+        self.y_slot_tracker = YSlotTracker()
+        self.y_slot_top_tracker = YTopLineTracker()
+        self.y_slot_start_observations = deque(maxlen=30)
+        self.y_slot_start_depth_poses = deque(maxlen=30)
+        self.y_slot_visual_missing_since = None
+        self.y_slot_final_alignment = False
+        self.y_slot_forward_until = 0.0
+        self.y_slot_forward_settle_until = 0.0
         self.y_slot_insert_start_position = None
         self.y_slot_insert_start_yaw = None
         self.y_slot_insert_started_at = None
@@ -2049,6 +2952,72 @@ class AutoDockNode(Node):
             return
         self.slot_camera_matrix = np.asarray(msg.k, dtype=np.float64).reshape(3, 3)
         self.slot_distortion = np.asarray(msg.d, dtype=np.float64)
+        self.slot_camera_frame = msg.header.frame_id
+        self.slot_camera_size = (int(msg.width), int(msg.height))
+
+    def on_slot_depth(self, msg):
+        if getattr(self, "mission_kind", None) != "Y_PLACE":
+            return
+        if msg.encoding not in ('16UC1', '32FC1'):
+            return
+        stamp_ns = int(msg.header.stamp.sec)*1_000_000_000+int(msg.header.stamp.nanosec)
+        age = (self.get_clock().now().nanoseconds-stamp_ns)/1e9
+        if stamp_ns <= 0 or not -.1 <= age <= .35:
+            return
+        try:
+            frame = dict(stamp_ns=stamp_ns, frame_id=msg.header.frame_id,
+                         source_at=time.monotonic()-max(0., age),
+                         width=int(msg.width), height=int(msg.height), step=int(msg.step),
+                         encoding=msg.encoding, is_bigendian=bool(msg.is_bigendian),
+                         data=bytes(msg.data))
+        except (TypeError, ValueError):
+            return
+        # Depth normally precedes its registered RGB image by a few milliseconds.
+        # Retain only that one callback-order handoff frame, never a frame deque.
+        self.slot_pending_depth_frame = frame
+        observations = list(getattr(self, 'slot_rgb_observations', ()))
+        for observation in reversed(observations):
+            if self.consume_pending_slot_depth(observation):
+                break
+
+    def consume_pending_slot_depth(self, observation):
+        """Turn one matching raw depth callback into 297 retained scalar samples."""
+        if getattr(self, "mission_kind", None) != "Y_PLACE":
+            self.slot_pending_depth_frame = None
+            return False
+        frame = getattr(self, 'slot_pending_depth_frame', None)
+        if not isinstance(frame, dict) or not isinstance(observation, dict):
+            return False
+        now = time.monotonic()
+        rgb_stamp = int(observation.get('rgb_stamp_ns', 0))
+        delta_ns = frame['stamp_ns']-rgb_stamp
+        if now-frame['source_at'] > .35 or (rgb_stamp > 0 and delta_ns < 0):
+            self.slot_pending_depth_frame = None
+            return False
+        if (rgb_stamp <= 0 or delta_ns != 0
+                or observation.get('square_top_line_px') is None):
+            return False
+        size = (int(observation.get('image_width_px', 0)),
+                int(observation.get('image_height_px', 0)))
+        if (frame['frame_id'] != observation.get('rgb_frame_id')
+                or frame['frame_id'] != getattr(self, 'slot_camera_frame', None)
+                or size != getattr(self, 'slot_camera_size', None)
+                or size != (frame['width'], frame['height'])):
+            self.slot_pending_depth_frame = None
+            return False
+        # Clear before decoding so even malformed image data cannot retain a full frame.
+        self.slot_pending_depth_frame = None
+        try:
+            sampled = sample_top_line_depth_image(
+                observation['square_top_line_px'], frame['data'], frame['width'],
+                frame['height'], frame['step'], frame['encoding'], frame['is_bigendian'])
+        except (TypeError, ValueError):
+            return False
+        self.slot_depth_frames.append(dict(
+            stamp_ns=frame['stamp_ns'], rgb_stamp_ns=rgb_stamp,
+            frame_id=frame['frame_id'], source_at=frame['source_at'],
+            depth_samples=sampled))
+        return True
 
     def warning_tape_initial_approach_complete(self, tape):
         if not isinstance(tape, dict):
@@ -2065,11 +3034,14 @@ class AutoDockNode(Node):
         """Accept only gradual tape-pose changes while the track is fresh."""
         if observation is None:
             return False
-        if self.state == "y_slot_centering":
+        if (
+            getattr(self, "mission_kind", None) == "Y_PLACE"
+            and self.state in {"y_slot_centering", "y_slot_inserting"}
+        ):
             # A valid X is session-latched: later hits update its position,
             # while missed frames leave the last confirmed position intact.
-            self.latest_tape_guidance = observation
-            self.latest_tape_guidance_at = now
+            self.y_slot_guidance = observation
+            self.y_slot_guidance_at = now
             return True
         previous = getattr(self, "latest_tape_guidance", None)
         previous_age = now - getattr(self, "latest_tape_guidance_at", 0.0)
@@ -2142,6 +3114,16 @@ class AutoDockNode(Node):
         return clamp(max(bottoms) / float(image_height) + margin, 0.0, 0.98)
 
     def on_slot_image(self, msg):
+        received = time.monotonic()
+        stamp = msg.header.stamp
+        source_ns = int(stamp.sec)*1_000_000_000+int(stamp.nanosec)
+        source_age = (self.get_clock().now().nanoseconds-source_ns)/1e9
+        self.y_slot_camera_source_age_sec = source_age
+        if source_ns > 0 and -.1 <= source_age <= .35:
+            self.y_slot_camera_received_at = received
+        elif self.state in {'y_slot_centering', 'y_slot_inserting'}:
+            # Receiving an old queued frame does not make vision fresh.
+            return
         zone = self.location.split("_", 1)[0]
         dock_lateral_tape_due = (
             self.state == "search"
@@ -2154,7 +3136,10 @@ class AutoDockNode(Node):
             )
         )
         tape_due = (
-            self.state == "y_slot_centering"
+            (
+                getattr(self, "mission_kind", None) == "Y_PLACE"
+                and self.state in {"y_slot_centering", "y_slot_inserting"}
+            )
             or dock_lateral_tape_due
             or self.state in {"search", "confirm", "coarse_align", "docking"}
             and (
@@ -2189,10 +3174,18 @@ class AutoDockNode(Node):
         warning_tape_filter = self.warning_tape_filter_values()
         current_tape_observation = None
         if tape_due or tape_inventory_due:
-            previous_tape = getattr(self, "latest_tape_guidance", None)
+            previous_tape = (
+                getattr(self, "y_slot_guidance", None)
+                if getattr(self, "mission_kind", None) == "Y_PLACE"
+                else getattr(self, "latest_tape_guidance", None)
+            )
             previous_tape_age = (
                 time.monotonic()
-                - getattr(self, "latest_tape_guidance_at", 0.0)
+                - (
+                    getattr(self, "y_slot_guidance_at", 0.0)
+                    if getattr(self, "mission_kind", None) == "Y_PLACE"
+                    else getattr(self, "latest_tape_guidance_at", 0.0)
+                )
             )
             tracked_roi_minimum = None
             if (
@@ -2225,12 +3218,76 @@ class AutoDockNode(Node):
             minimum_yellow_pixels = int(self.number(
                 "tape_min_yellow_pixels", 600, 100, 20000
             ))
-            if self.state == "y_slot_centering":
-                observation = detect_y_slot_x(
+            if self.state == "y_slot_centering" or self.state == "y_slot_inserting":
+                y_filter = dict(warning_tape_filter or {})
+                y_filter["y_slot_target_center_x_ratio"] = self.number(
+                    "y_slot_target_center_x_ratio", 0.5, 0.05, 0.95
+                )
+                one_shot_measure = (
+                    self.state == 'y_slot_centering'
+                    and getattr(self, 'y_slot_cycle_phase', 'measure') == 'measure'
+                    and self.boolean('y_slot_homography_once_enabled', False)
+                )
+                slot_tracker = YSlotTracker() if one_shot_measure else self.y_slot_tracker
+                top_tracker = YTopLineTracker() if one_shot_measure else self.y_slot_top_tracker
+                observation = slot_tracker.update(
                     frame,
                     minimum_yellow_pixels=minimum_yellow_pixels,
-                    filter_config=warning_tape_filter,
+                    filter_config=y_filter,
                 )
+                # The X identifies one square.  Its detected TL->TR edge is the
+                # sole RGB identity used for registered-depth distance/yaw.
+                anchor = observation or slot_tracker.observation
+                x_top = top_tracker.update(frame, anchor, y_filter)
+                top = x_top
+                if observation is not None and x_top is not None:
+                    observation = dict(observation, top_line_px=x_top['top_line_px'],
+                                       top_line_visible=True,
+                                       line_definition=x_top['line_definition'])
+                    square_line = x_top['top_line_px']
+                    observation['square_top_line_px'] = square_line
+                    observation['square_line_definition'] = 'detected_square_tl_to_tr'
+                    observation['square_border_angle_deg'] = math.degrees(math.atan2(
+                        square_line[3]-square_line[1], square_line[2]-square_line[0]))
+                    slot_tracker.observation['square_top_line_px'] = square_line
+                if observation is None:
+                    observation = top_tracker.guidance(top)
+                    if observation is None:
+                        if (self.boolean('y_slot_homography_once_enabled', False)
+                                and getattr(self, 'y_slot_cycle_phase', 'measure') != 'measure'):
+                            # Once frozen, vision is never a correction or
+                            # completion condition. Fresh image receipt is only
+                            # the stop watchdog checked by the timed executor.
+                            return
+                        if getattr(self, 'y_slot_cycle_phase', '') in {
+                            'approach', 'reverse', 'feedback_execute'
+                        }:
+                            # The target was fixed before this command sequence.
+                            # Fresh camera/odom and LiDAR remain safety inputs;
+                            # a transient detector miss must not reset the plan.
+                            return
+                        self.stop_drive()
+                        now = time.monotonic()
+                        if self.y_slot_visual_missing_since is None:
+                            self.y_slot_visual_missing_since = now
+                        if now-self.y_slot_visual_missing_since >= 2.0:
+                            self.cancel('y_slot_x_and_top_line_lost')
+                        else:
+                            self.publish_status('waiting','y_slot_waiting_x_or_top_line')
+                        return
+                    # A visible far top line remains an approach target. Only the near
+                    # top line transitions into the previously requested 8cm final step.
+                    near_top = observation['image_goal_pose'][1] >= self.number(
+                        'y_slot_top_line_final_y_ratio', .75, .5, .95)
+                    if near_top and not self.y_slot_rear_border_fallback and not self.config.get("y_slot_floor_control_enabled",False):
+                        self.stop_drive(10)
+                        self.y_slot_forward_until = 0.0
+                        self.y_slot_forward_settle_until = time.monotonic()+.3
+                        self.y_slot_center_confirmation_count = 0
+                        self.y_slot_centered_since = None
+                    self.y_slot_rear_border_fallback = near_top
+                    self.y_slot_final_alignment = near_top
+                self.y_slot_visual_missing_since = None
             else:
                 observation = detect_warning_tape(
                     frame,
@@ -2238,17 +3295,31 @@ class AutoDockNode(Node):
                     minimum_center_y_ratio=tracked_roi_minimum,
                     filter_config=warning_tape_filter,
                 )
+            if observation is not None:
+                observation = dict(observation, rgb_stamp_ns=source_ns,
+                                   rgb_source_at=received-max(0., source_age),
+                                   rgb_frame_id=msg.header.frame_id)
+                # Registered depth usually arrives first. Consume its one-frame
+                # handoff now and retain only this line's sparse neighborhoods.
+                self.consume_pending_slot_depth(observation)
             current_tape_observation = observation
             accepted = AutoDockNode.update_warning_tape_guidance(
                 self, observation, time.monotonic()
             )
             if accepted:
-                self.tape_initial_detection_complete = (
-                    self.tape_initial_detection_complete
-                    or AutoDockNode.warning_tape_initial_approach_complete(
-                        self, self.latest_tape_guidance
+                if observation is not None and self.state in {'y_slot_centering', 'y_slot_inserting'}:
+                    self.slot_rgb_observations.append(observation)
+                    if (self.state == 'y_slot_centering'
+                            and getattr(self, 'y_slot_cycle_phase', 'measure') == 'measure'
+                            and self.boolean('y_slot_homography_once_enabled', False)):
+                        self.y_slot_start_observations.append(observation)
+                if getattr(self, "mission_kind", None) != "Y_PLACE":
+                    self.tape_initial_detection_complete = (
+                        self.tape_initial_detection_complete
+                        or AutoDockNode.warning_tape_initial_approach_complete(
+                            self, self.latest_tape_guidance
+                        )
                     )
-                )
                 self.tape_recovery_start_position = None
                 self.tape_recovery_direction = None
                 self.tape_recovery_done = False
@@ -2438,12 +3509,38 @@ class AutoDockNode(Node):
         return min(intersections)
 
     def on_odom(self, msg):
+        stamp = msg.header.stamp
+        source_ns = int(stamp.sec)*1_000_000_000+int(stamp.nanosec)
+        self.odom_received_at = time.monotonic()
         pose = msg.pose.pose
         self.odom_position = (float(pose.position.x), float(pose.position.y))
         q = pose.orientation
         self.odom_yaw = math.atan2(
             2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         )
+        if getattr(self, "mission_kind", None) != "Y_PLACE":
+            return
+        history = getattr(self, 'y_slot_response_history', None)
+        if history is not None:
+            stamp = msg.header.stamp
+            source_ns = int(stamp.sec)*1_000_000_000+int(stamp.nanosec)
+            age = (self.get_clock().now().nanoseconds-source_ns)/1e9
+            if source_ns <= getattr(self, 'y_slot_last_odom_source_ns', 0):
+                return
+            self.y_slot_odom_source_received_at = 0.0
+            if source_ns > 0 and -.1 <= age <= .35:
+                self.y_slot_last_odom_source_ns = source_ns
+                self.y_slot_odom_source_received_at = self.odom_received_at-max(0., age)
+                history.append((self.odom_received_at-age, self.odom_yaw))
+
+    def on_response_command(self, msg):
+        """Keep actual command-topic history, including operator commands."""
+        if getattr(self, "mission_kind", None) != "Y_PLACE":
+            return
+        history = getattr(self, 'y_slot_command_history', None)
+        if history is not None:
+            history.append((time.monotonic(), float(msg.linear.x),
+                            float(msg.linear.y), float(msg.angular.z)))
 
     def on_imu_rpy(self, msg):
         self.imu_yaw = float(msg.vector.z)
@@ -2659,25 +3756,6 @@ class AutoDockNode(Node):
             center_x = 0.5 * (float(box[0]) + float(box[2]))
             center_error, pallet_lateral_ratio = pallet_center_pose(center_x)
             entity_streak = int(entity.get("seen_count", 1))
-            tracked_candidate = detection.get("candidate")
-            legacy = (
-                getattr(self, "nearest_recognition_mode", "CURRENT")
-                == "LEGACY"
-            )
-            if (
-                not legacy
-                and locked_entity_id is not None
-                and isinstance(tracked_candidate, dict)
-                and tracked_candidate.get("entity_id") == entity_id
-            ):
-                # Entity reconstruction can reset seen_count after an odom
-                # alignment step even while YOLO keeps tracking the same
-                # locked candidate continuously.  Use that continuous streak
-                # for the post-step stability check.
-                entity_streak = max(
-                    entity_streak,
-                    int(tracked_candidate.get("streak", 0)),
-                )
             pallet_pnp = dict(pnp)
             pallet_pnp["tag_lateral_ratio"] = pnp.get("lateral_ratio")
             pallet_pnp["lateral_ratio"] = pallet_lateral_ratio
@@ -2768,12 +3846,6 @@ class AutoDockNode(Node):
                 pallet_tags[id(min(matches, key=lambda item: item[0])[1])].append(
                     symbol
                 )
-        legacy = getattr(self, "nearest_recognition_mode", "CURRENT") == "LEGACY"
-        partial_streak_key = (
-            "stable_detection_frames" if legacy
-            else "nearest_stable_detection_frames"
-        )
-        partial_streak_default = 2 if legacy else 3
         for pallet in pallets:
             box = [float(value) for value in pallet["box"]]
             edge_margin = image_width * self.number(
@@ -2818,7 +3890,7 @@ class AutoDockNode(Node):
                 "entity_id": None,
                 "matrix": matrix,
                 "streak": int(self.number(
-                    partial_streak_key, partial_streak_default, 1, 30
+                    "stable_detection_frames", 2, 1, 30
                 )),
                 "center_error": center_error,
                 "frontal_error": 0.0,
@@ -2846,129 +3918,6 @@ class AutoDockNode(Node):
             candidates.append((
                 distance_cm, abs(candidate["center_error"]), candidate
             ))
-        if (
-            self.product_type == "FRESH"
-            and getattr(self, "nearest_recognition_mode", "CURRENT")
-            != "LEGACY"
-        ):
-            maximum_single_star_distance_cm = self.number(
-                "single_star_fresh_max_distance_cm", 300.0, 20.0, 500.0
-            )
-            detections = [
-                item for item in (detection.get("detections") or [])
-                if isinstance(item, dict)
-            ]
-            pallets = [
-                item for item in detections
-                if item.get("class") == "pallet"
-                and isinstance(item.get("box"), list)
-                and len(item["box"]) == 4
-            ]
-            for star in detections:
-                if star.get("class") != "star":
-                    continue
-                star_box = star.get("box")
-                depth = star.get("depth")
-                if not isinstance(star_box, list) or len(star_box) != 4:
-                    continue
-                try:
-                    star_center_x = 0.5 * (
-                        float(star_box[0]) + float(star_box[2])
-                    )
-                except (TypeError, ValueError):
-                    continue
-                distance_cm = None
-                bearing_deg = None
-                if isinstance(depth, dict):
-                    try:
-                        measured_distance_cm = float(depth["forward_distance_cm"])
-                        measured_bearing_deg = float(depth["bearing_deg"])
-                    except (KeyError, TypeError, ValueError):
-                        pass
-                    else:
-                        if (
-                            math.isfinite(measured_distance_cm)
-                            and 5.0 <= measured_distance_cm
-                            <= maximum_single_star_distance_cm
-                            and math.isfinite(measured_bearing_deg)
-                            and abs(measured_bearing_deg) <= 45.0
-                        ):
-                            distance_cm = measured_distance_cm
-                            bearing_deg = measured_bearing_deg
-                matches = []
-                for pallet in pallets:
-                    box = [float(value) for value in pallet["box"]]
-                    pallet_width = max(box[2] - box[0], 1.0)
-                    horizontal_margin = pallet_width * 0.15
-                    vertical_gap = box[1] - float(star_box[3])
-                    if (
-                        not box[0] - horizontal_margin
-                        <= star_center_x <= box[2] + horizontal_margin
-                        or vertical_gap < -pallet_width * 0.25
-                        or vertical_gap > pallet_width * 1.25
-                    ):
-                        continue
-                    pallet_center_x = 0.5 * (box[0] + box[2])
-                    score = (
-                        abs(star_center_x - pallet_center_x) / pallet_width
-                        + max(vertical_gap, 0.0) / pallet_width
-                        - 0.10 * float(pallet.get("confidence", 0.0))
-                    )
-                    matches.append((score, pallet, box, pallet_center_x))
-                if not matches:
-                    continue
-                _score, pallet, box, pallet_center_x = min(
-                    matches, key=lambda item: item[0]
-                )
-                center_error, pallet_lateral_ratio = pallet_center_pose(
-                    pallet_center_x
-                )
-                candidate = {
-                    "entity_id": None,
-                    "matrix": ["star"],
-                    "streak": int(self.number(
-                        "stable_detection_frames", 2, 1, 30
-                    )),
-                    "center_error": center_error,
-                    "frontal_error": 0.0,
-                    "top_row_error": 0.0,
-                    "bottom_row_error": 0.0,
-                    "pallet_box": [int(round(value)) for value in box],
-                    "pnp": None,
-                    "depth_yaw": None,
-                    "fresh_single_star": True,
-                    "fresh_pose_pending": distance_cm is None,
-                    "star_confidence": float(star.get("confidence", 0.0)),
-                }
-                if distance_cm is not None:
-                    candidate["pnp"] = {
-                        "reprojection_error_px": 999.0,
-                        "tag_lateral_ratio": math.tan(math.radians(bearing_deg)),
-                        "lateral_ratio": pallet_lateral_ratio,
-                        "lateral_source": "pallet_box",
-                        "depth_fallback": True,
-                        "distance_source": "depth",
-                    }
-                    candidate["depth_yaw"] = {
-                        "forward_distance_cm": distance_cm,
-                        "yaw_deg": 0.0,
-                    }
-                if not AutoDockNode.nearest_candidate_allowed(
-                    self, candidate, respect_lock
-                ):
-                    continue
-                # A pallet lower in the image is normally closer.  Use that
-                # only to rank depth-less visual candidates; actual depth
-                # candidates always win and forward motion still requires depth.
-                distance_rank = (
-                    distance_cm if distance_cm is not None else
-                    maximum_single_star_distance_cm + clamp(
-                        (image_height - box[3]) / image_height, 0.0, 1.0
-                    )
-                )
-                candidates.append((
-                    distance_rank, abs(candidate["center_error"]), candidate
-                ))
         ranked_candidates = sorted(
             candidates, key=lambda item: (item[0], item[1])
         )
@@ -2988,8 +3937,7 @@ class AutoDockNode(Node):
                 "rank": rank,
                 "entity_id": candidate.get("entity_id"),
                 "source": (
-                    "fresh_single_star" if candidate.get("fresh_single_star")
-                    else "pallet_tags" if candidate.get("pallet_tag_candidate")
+                    "pallet_tags" if candidate.get("pallet_tag_candidate")
                     else "complete_entity"
                 ),
                 "matrix": candidate.get("matrix"),
@@ -3186,10 +4134,6 @@ class AutoDockNode(Node):
             if 1 <= len(matrix) <= 4 and pallet_product_type(matrix) == self.product_type:
                 return True, None
             return False, "pallet_tag_product_mismatch"
-        if candidate.get("fresh_single_star"):
-            if getattr(self, "product_type", None) == "FRESH":
-                return True, None
-            return False, "single_star_requires_fresh_product"
         detection = self.latest_detection or {}
         entities = detection.get("entities") or []
         candidate_box = candidate.get("pallet_box")
@@ -3239,68 +4183,7 @@ class AutoDockNode(Node):
             matches, reason = self.candidate_matches_best_entity(candidate)
             if not matches:
                 return None, None, reason
-        legacy_nearest = (
-            getattr(self, "target_type", "SYMBOLS") == "NEAREST"
-            and getattr(self, "nearest_recognition_mode", "CURRENT")
-            == "LEGACY"
-        )
-        if (
-            getattr(self, "target_type", "SYMBOLS") == "NEAREST"
-            and not legacy_nearest
-            and not candidate.get("fresh_single_star")
-        ):
-            box = candidate.get("pallet_box")
-            candidate_width = 0.0
-            if isinstance(box, (list, tuple)) and len(box) == 4:
-                try:
-                    candidate_width = max(0.0, float(box[2]) - float(box[0]))
-                except (TypeError, ValueError):
-                    candidate_width = 0.0
-            visible_widths = []
-            for entity in (getattr(self, "latest_detection", None) or {}).get(
-                "entities", []
-            ):
-                entity_box = entity.get("image_pallet_box") if isinstance(entity, dict) else None
-                if not isinstance(entity_box, (list, tuple)) or len(entity_box) != 4:
-                    continue
-                try:
-                    visible_widths.append(max(
-                        0.0, float(entity_box[2]) - float(entity_box[0])
-                    ))
-                except (TypeError, ValueError):
-                    continue
-            largest_visible_width = max(visible_widths, default=candidate_width)
-            relative_width = (
-                candidate_width / largest_visible_width
-                if largest_visible_width > 0.0 else 1.0
-            )
-            depth_yaw = candidate.get("depth_yaw") or {}
-            try:
-                depth_yaw_deg = float(depth_yaw["yaw_deg"])
-                depth_distance_cm = float(depth_yaw["forward_distance_cm"])
-                depth_yaw_valid = (
-                    math.isfinite(depth_yaw_deg)
-                    and abs(depth_yaw_deg) <= 45.0
-                    and math.isfinite(depth_distance_cm)
-                    and 5.0 <= depth_distance_cm <= 300.0
-                )
-            except (KeyError, TypeError, ValueError):
-                depth_yaw_valid = False
-            minimum_relative_width = self.number(
-                "nearest_confirmation_min_relative_width_ratio",
-                0.60, 0.10, 1.0,
-            )
-            if relative_width < minimum_relative_width and not depth_yaw_valid:
-                return None, None, "nearest_candidate_relatively_small_without_depth_yaw"
-        frame_key = "stable_detection_frames"
-        if (
-            getattr(self, "target_type", "SYMBOLS") == "NEAREST"
-            and not legacy_nearest
-            and not candidate.get("fresh_single_star")
-        ):
-            frame_key = "nearest_stable_detection_frames"
-        frame_default = 3 if frame_key == "nearest_stable_detection_frames" else 2
-        frames = int(self.number(frame_key, frame_default, 1, 30))
+        frames = int(self.number("stable_detection_frames", 2, 1, 30))
         if int(candidate.get("streak", 0)) < frames:
             return None, None, "unstable_detection"
         if getattr(self, "target_type", "SYMBOLS") == "NEAREST":
@@ -3790,6 +4673,11 @@ class AutoDockNode(Node):
                 range_m=round(distance, 3), clearance_m=round(clearance, 3),
             )
             return True
+        if self.state in {"y_slot_centering", "y_slot_inserting"}:
+            # Generic backoff may command lateral motion, which is unreliable
+            # with the modified vehicle's front-loaded payload.
+            self.cancel(f"y_slot_lidar_{direction}_blocked")
+            return True
         if not AutoDockNode.boolean(self, "lidar_backoff_enabled", True):
             self.cancel(f"lidar_{direction}_blocked")
             return True
@@ -3828,6 +4716,12 @@ class AutoDockNode(Node):
                 self.stop_drive(10)
             except Exception:
                 pass
+            if (self.state == 'y_slot_inserting'
+                    or self.state == 'y_slot_centering'
+                    and getattr(self, 'y_slot_cycle_phase', '') in {'approach', 'reverse'}):
+                self.cancel('y_slot_timed_execution_exception')
+                self.get_logger().error(traceback.format_exc())
+                return
             now = time.monotonic()
             signature = f"{type(exc).__name__}: {exc}"
             if (
@@ -4150,7 +5044,6 @@ class AutoDockNode(Node):
             self.stop_drive()
             self.publish_status(
                 "running", "candidate_stationary_confirmation",
-                pose_pending=bool(candidate.get("fresh_pose_pending", False)),
             )
             return
         if self.candidate_stop_due_at is not None and now >= self.candidate_stop_due_at:
@@ -4980,13 +5873,16 @@ class AutoDockNode(Node):
         self.target_entity_id = previous_entity_id
         self.nearest_lock_signature = previous_lock_signature
         if optimal_candidate is None:
-            self.publish_status(
-                "waiting", "nearest_optimal_recheck_not_confirmed",
-                measurement_reason=optimal_reason,
-                previous_entity_id=previous_entity_id,
-                nearest_decision=getattr(self, "last_nearest_decision", None),
-            )
-            return
+            locked_candidate, locked_pnp, locked_reason = self.valid_measurement()
+            if locked_candidate is None:
+                self.publish_status(
+                    "waiting", "nearest_optimal_recheck_not_confirmed",
+                    measurement_reason=locked_reason or optimal_reason,
+                    previous_entity_id=previous_entity_id,
+                    nearest_decision=getattr(self, "last_nearest_decision", None),
+                )
+                return
+            optimal_candidate, optimal_pnp = locked_candidate, locked_pnp
         optimal_entity_id = optimal_candidate.get("entity_id")
         matrix = optimal_candidate.get("matrix") or []
         optimal_target_top = tuple(matrix[:2]) if len(matrix) >= 2 else (None, None)
@@ -5307,18 +6203,27 @@ class AutoDockNode(Node):
             lateral_command = clamp(
                 -lateral_gain * center_error, -max_lateral, max_lateral
             )
-            angular_command = clamp(1.2 * yaw_error, -0.20, 0.20)
+            max_angular = self.number(
+                "coarse_align_max_angular_speed_rad_s", 0.38, 0.35, 1.0
+            )
+            min_angular = min(max_angular, self.number(
+                "coarse_align_min_angular_speed_rad_s", 0.38, 0.35, 1.0
+            ))
+            angular_command = clamp(
+                1.2 * yaw_error, -max_angular, max_angular
+            )
+            if yaw_error and abs(angular_command) < min_angular:
+                angular_command = math.copysign(min_angular, angular_command)
             if (
                 getattr(self, "target_type", "SYMBOLS") == "NEAREST"
                 and getattr(self, "nearest_center_reconfirm_pending", False)
             ):
-                minimum_linear = self.number(
-                    "real_vehicle_min_linear_speed_m_s", 0.10, 0.10, 0.20
+                lateral_speed = self.number(
+                    "nearest_coarse_lateral_speed_m_s", 0.12, 0.10, 0.50
                 )
                 lateral_command = math.copysign(
-                    max(minimum_linear, abs(lateral_command)), lateral_command
+                    lateral_speed, lateral_command
                 )
-                angular_command = 0.0
             self.publish_drive(
                 0.0,
                 lateral_command,
@@ -5621,11 +6526,11 @@ class AutoDockNode(Node):
                 "translation_alignment_max_lateral_speed_m_s", 0.08, 0.03, 0.15
             )
             max_angular = self.number(
-                "translation_alignment_max_angular_speed_rad_s", 0.20, 0.0, 0.20
+                "translation_alignment_max_angular_speed_rad_s", 0.38, 0.35, 1.0
             )
             angular = clamp(0.6 * yaw, -max_angular, max_angular)
             min_angular = min(max_angular, self.number(
-                "translation_alignment_min_angular_speed_rad_s", 0.20, 0.0, 0.20
+                "translation_alignment_min_angular_speed_rad_s", 0.38, 0.35, 1.0
             ))
             if not yaw_ready and 0.0 < abs(angular) < min_angular:
                 angular = math.copysign(min_angular, angular)
@@ -5694,301 +6599,605 @@ class AutoDockNode(Node):
         )
 
 
-    def tick_y_slot_centering(self):
-        now = time.monotonic()
-        started_at = getattr(self, "y_slot_centering_started_at", None)
-        if started_at is None:
-            started_at = now
-            self.y_slot_centering_started_at = now
-        timeout = self.number(
-            "y_slot_centering_timeout_sec", 8.0, 1.0, 60.0
-        )
-        tape = getattr(self, "latest_tape_guidance", None)
-        x_latched = isinstance(tape, dict)
-        if not x_latched and now - started_at >= timeout:
-            self.cancel("y_slot_centering_timeout")
-            return
-        if not x_latched:
+
+
+
+
+    def tick_y_slot_floor_final_straight(self):
+        now=time.monotonic()
+        due=getattr(self,'fork_command_due_at',None)
+        if due is not None:
             self.stop_drive()
-            self.y_slot_center_confirmation_count = 0
-            self.y_slot_last_counted_tape_at = None
-            self.y_slot_centered_since = None
-            self.publish_status(
-                "waiting", "y_slot_tape_not_detected",
-                elapsed_sec=round(now - started_at, 2),
-            )
+            if now >= due:
+                self.state='waiting_fork'
+                self.fork_command_due_at=None
+                self.fork_pub.publish(String(data='DOWN'))
+                self.publish_status('waiting','y_slot_20cm_complete_fork_down')
             return
-        tape_age = now - getattr(self, "latest_tape_guidance_at", 0.0)
-        maximum_age = self.number(
-            "y_slot_tape_max_age_sec", 0.35, 0.05, 1.0
-        )
-        if tape_age > maximum_age:
-            self.stop_drive()
-            self.y_slot_lateral_pulse_speed = 0.0
-            self.y_slot_lateral_pulse_until = 0.0
-            self.y_slot_yaw_pulse_speed = 0.0
-            self.y_slot_yaw_pulse_until = 0.0
-            self.y_slot_center_confirmation_count = 0
-            self.y_slot_last_counted_tape_at = None
-            self.y_slot_centered_since = None
-            self.publish_status(
-                "waiting", "y_slot_x_latched_waiting_fresh_frame",
-                center_x_px=round(float(tape.get("center_x_px", 0.0)), 1),
-                tape_age_sec=round(tape_age, 3),
-            )
+        if now-self.y_slot_insert_started_at > 8.:
+            self.cancel('y_slot_20cm_straight_timeout')
             return
         try:
-            center_x_ratio = float(tape["center_x_ratio"])
-            center_x_px = float(tape["center_x_px"])
-            image_width_px = float(tape["image_width_px"])
-            center_y_ratio = float(tape["center_y_ratio"])
-            border_angle_deg = float(tape["border_angle_deg"])
-        except (KeyError, TypeError, ValueError):
-            self.stop_drive()
-            self.y_slot_lateral_pulse_speed = 0.0
-            self.y_slot_lateral_pulse_until = 0.0
-            self.y_slot_yaw_pulse_speed = 0.0
-            self.y_slot_yaw_pulse_until = 0.0
-            self.publish_status("waiting", "y_slot_border_not_detected")
+            pose=self.calibrated_y_slot_pose()
+            if pose.get('top_center_cm') is None: raise ValueError('y_slot_waiting_independent_top_line')
+        except (ValueError,KeyError,TypeError) as exc:
+            self.cancel('y_slot_final_observation_lost:'+str(exc))
             return
-        observation_at = getattr(self, "latest_tape_guidance_at", 0.0)
-        border_target = self.number(
-            "y_slot_border_target_angle_deg", 0.0, -15.0, 15.0
-        )
-        border_tolerance = self.number(
-            "y_slot_border_angle_tolerance_deg", 2.0, 0.2, 10.0
-        )
-        border_error = border_angle_deg - border_target
-        yaw_pulse_speed = getattr(self, "y_slot_yaw_pulse_speed", 0.0)
-        yaw_pulse_until = getattr(self, "y_slot_yaw_pulse_until", 0.0)
-        yaw_settle_until = getattr(self, "y_slot_yaw_settle_until", 0.0)
-        yaw_settle_sec = self.number(
-            "y_slot_border_rotation_settle_sec", 0.30, 0.10, 2.0
-        )
-        if abs(border_error) > border_tolerance:
-            self.y_slot_center_confirmation_count = 0
-            self.y_slot_last_counted_tape_at = None
-            self.y_slot_centered_since = None
-            self.y_slot_lateral_pulse_speed = 0.0
-            self.y_slot_lateral_pulse_until = 0.0
-            rotation_speed = self.number(
-                "y_slot_border_rotation_speed_rad_s", 0.35, 0.10, 1.0
-            )
-            desired_yaw = math.copysign(rotation_speed, -border_error)
-            if yaw_pulse_speed != 0.0 and now < yaw_pulse_until:
-                if math.copysign(1.0, yaw_pulse_speed) != math.copysign(
-                    1.0, desired_yaw
-                ):
-                    self.stop_drive()
-                    self.y_slot_yaw_pulse_speed = 0.0
-                    self.y_slot_yaw_pulse_until = 0.0
-                    self.y_slot_yaw_settle_until = now + yaw_settle_sec
-                    self.publish_status(
-                        "running", "y_slot_yaw_direction_change_settle",
-                        border_angle_deg=round(border_angle_deg, 2),
-                        settle_sec=yaw_settle_sec,
-                    )
-                    return
-                self.publish_drive(0.0, 0.0, yaw_pulse_speed)
-                return
-            if yaw_pulse_speed != 0.0:
-                self.stop_drive()
-                self.y_slot_yaw_pulse_speed = 0.0
-                self.y_slot_yaw_pulse_until = 0.0
-                self.y_slot_yaw_settle_until = now + yaw_settle_sec
-                self.publish_status(
-                    "running", "y_slot_yaw_pulse_settle",
-                    border_angle_deg=round(border_angle_deg, 2),
-                    settle_sec=yaw_settle_sec,
-                )
-                return
-            if now < yaw_settle_until:
-                self.stop_drive()
-                return
-            if observation_at == self.y_slot_last_yaw_tape_at:
-                self.stop_drive()
-                return
-            yaw_pulse_sec = self.number(
-                "y_slot_border_rotation_pulse_sec", 0.05, 0.03, 0.30
-            )
-            self.y_slot_last_yaw_tape_at = observation_at
-            self.y_slot_yaw_pulse_speed = desired_yaw
-            self.y_slot_yaw_pulse_until = now + yaw_pulse_sec
-            self.publish_drive(0.0, 0.0, desired_yaw)
-            self.publish_status(
-                "running", "y_slot_border_leveling_pulse",
-                border_angle_deg=round(border_angle_deg, 2),
-                border_error_deg=round(border_error, 2),
-                angular_speed_rad_s=round(desired_yaw, 3),
-                pulse_sec=yaw_pulse_sec,
-                settle_sec=yaw_settle_sec,
-            )
+        delta=normalize_angle(self.odom_yaw-self.y_slot_floor_insert_start_yaw)
+        yaw_tol = self.number('y_slot_stage_yaw_tolerance_deg', 2., .5, 10.)
+        if abs(math.degrees(delta))>yaw_tol or abs(pose['heading_left_deg'])>yaw_tol:
+            self.cancel('y_slot_final_straight_yaw_deviation')
             return
-        if yaw_pulse_speed != 0.0:
-            self.stop_drive()
-            self.y_slot_yaw_pulse_speed = 0.0
-            self.y_slot_yaw_pulse_until = 0.0
-            self.y_slot_yaw_settle_until = now + yaw_settle_sec
+        right,forward=pose['top_center_cm']
+        # Rotate the current camera vector back to the insertion-start frame; no odom distance.
+        c=np.array([right*math.cos(delta)-forward*math.sin(delta),
+                    right*math.sin(delta)+forward*math.cos(delta)])
+        angle=self.y_slot_floor_insert_heading
+        gap=float(c@np.array([-math.sin(angle),math.cos(angle)]))
+        lateral = float(c@np.array([math.cos(angle),math.sin(angle)]))
+        if abs(lateral)>self.number('y_slot_stage_lateral_tolerance_cm',1.5,.2,10.):
+            self.cancel('y_slot_final_straight_lateral_deviation')
             return
-        if now < yaw_settle_until:
-            self.stop_drive()
-            return
-        target_ratio = self.number(
-            "y_slot_target_center_x_ratio", 0.50, 0.05, 0.95
-        )
-        tolerance = self.number(
-            "y_slot_center_tolerance_ratio", 0.0, 0.0, 0.25
-        )
-        error = center_x_ratio - target_ratio
-        error_px = error * image_width_px
-        target_x_px = target_ratio * image_width_px
-        centered = (
-            int(round(center_x_px)) == int(round(target_x_px))
-            if tolerance <= 0.0 else abs(error) <= tolerance
-        )
-        if centered:
-            self.stop_drive()
-            self.y_slot_lateral_pulse_speed = 0.0
-            self.y_slot_lateral_pulse_until = 0.0
-            minimum_start_y = self.number(
-                "y_slot_insertion_start_min_center_y_ratio",
-                0.9101, 0.0, 1.0,
-            )
-            if center_y_ratio < minimum_start_y:
-                self.y_slot_center_confirmation_count = 0
-                self.y_slot_last_counted_tape_at = None
-                self.y_slot_centered_since = None
-                approach_speed = self.number(
-                    "y_slot_approach_speed_m_s", 0.10, 0.10, 0.30
-                )
-                self.publish_drive(approach_speed, 0.0, 0.0)
-                self.publish_status(
-                    "running", "y_slot_approaching_insertion_start_distance",
-                    center_x_px=round(center_x_px, 1),
-                    center_y_px=round(
-                        center_y_ratio * float(tape.get("image_height_px", 480)),
-                        1,
-                    ),
-                    center_y_ratio=round(center_y_ratio, 4),
-                    required_min_center_y_ratio=minimum_start_y,
-                    forward_speed_m_s=approach_speed,
-                )
-                return
-            if self.y_slot_centered_since is None:
-                self.y_slot_centered_since = now
-            observation_at = getattr(self, "latest_tape_guidance_at", 0.0)
-            if observation_at != self.y_slot_last_counted_tape_at:
-                self.y_slot_last_counted_tape_at = observation_at
-                self.y_slot_center_confirmation_count += 1
-            required = int(self.number(
-                "y_slot_center_confirmation_frames", 5, 1, 20
-            ))
-            settle_sec = self.number(
-                "y_slot_center_settle_sec", 0.50, 0.10, 3.0
-            )
-            stable_sec = now - self.y_slot_centered_since
-            if (
-                self.y_slot_center_confirmation_count < required
-                or stable_sec < settle_sec
-            ):
-                self.publish_status(
-                    "running", "y_slot_center_confirming",
-                    center_x_px=round(center_x_px, 1),
-                    center_error_px=round(error_px, 1),
-                    border_angle_deg=round(border_angle_deg, 2),
-                    confirmed_frames=self.y_slot_center_confirmation_count,
-                    required_frames=required,
-                    stable_sec=round(stable_sec, 2),
-                    required_stable_sec=settle_sec,
-                )
-                return
-            if self.odom_position is None or self.odom_yaw is None:
-                self.cancel("odom_missing_before_y_slot_insertion")
-                return
+        travelled=self.y_slot_floor_insert_initial_gap-gap
+        target_cm = float(getattr(
+            self, 'y_slot_frozen_insertion_distance_cm',
+            self.number('y_slot_insertion_distance_cm', 20., 1., 100.)))
+        if travelled >= max(0., target_cm-.5):
             self.stop_drive(10)
-            self.y_slot_insert_start_position = self.odom_position
-            self.y_slot_insert_start_yaw = self.odom_yaw
-            self.y_slot_insert_started_at = now
-            self.fork_command_due_at = None
-            self.state = "y_slot_inserting"
-            self.publish_status(
-                "running", "y_slot_centered_inserting",
-                center_x_px=round(center_x_px, 1),
-                center_error_px=round(error_px, 1),
-                insertion_distance_cm=(
-                    self.y_slot_requested_insertion_distance_cm
-                    if self.y_slot_requested_insertion_distance_cm is not None
-                    else self.number(
-                        "y_slot_insertion_distance_cm", 15.0, 1.0, 100.0
-                    )
-                ),
-            )
+            self.completed_insertion_distance_m=travelled/100
+            self.fork_command_due_at=now+.3
+            self.publish_status('running','y_slot_insertion_straight_complete',
+                                travelled_cm=travelled,target_cm=target_cm)
             return
-        self.y_slot_center_confirmation_count = 0
-        self.y_slot_last_counted_tape_at = None
-        self.y_slot_centered_since = None
-        minimum_speed = self.number(
-            "y_slot_min_lateral_speed_m_s", 0.10, 0.10, 0.30
+        self.publish_drive(.1,0.,0.)
+        self.publish_status('running','y_slot_insertion_straight',travelled_cm=travelled,target_cm=target_cm,
+                            top_gap_cm=gap,yaw_change_deg=math.degrees(delta))
+
+    def calibrated_y_slot_pose(self):
+        """RGB selects the line; registered depth supplies its metric pose."""
+        now = time.monotonic()
+        if self.odom_yaw is None or now-getattr(self, 'y_slot_odom_source_received_at', 0.) > .35:
+            raise ValueError('y_slot_depth_waiting_fresh_odom_yaw')
+        observation = getattr(
+            self, 'y_slot_guidance',
+            getattr(self, 'latest_tape_guidance', None),
         )
-        maximum_speed = max(minimum_speed, self.number(
-            "y_slot_max_lateral_speed_m_s", 0.12, 0.10, 0.30
-        ))
-        gain = self.number("y_slot_center_gain", 0.40, 0.05, 2.0)
-        speed = clamp(abs(error) * gain, minimum_speed, maximum_speed)
-        lateral = math.copysign(speed, -error)
-        pulse_speed = getattr(self, "y_slot_lateral_pulse_speed", 0.0)
-        pulse_until = getattr(self, "y_slot_lateral_pulse_until", 0.0)
-        settle_until = getattr(self, "y_slot_lateral_settle_until", 0.0)
-        settle_sec = self.number(
-            "y_slot_lateral_pulse_settle_sec", 0.30, 0.10, 2.0
+        observation_at = getattr(
+            self, 'y_slot_guidance_at',
+            getattr(self, 'latest_tape_guidance_at', 0.0),
         )
-        if pulse_speed != 0.0 and now < pulse_until:
-            if math.copysign(1.0, pulse_speed) != math.copysign(1.0, lateral):
-                self.stop_drive()
-                self.y_slot_lateral_pulse_speed = 0.0
-                self.y_slot_lateral_pulse_until = 0.0
-                self.y_slot_lateral_settle_until = now + settle_sec
+        if (
+            not isinstance(observation, dict)
+            or now-observation_at > .35
+        ):
+            raise ValueError('y_slot_depth_waiting_fresh_vision')
+        if (observation.get('square_top_line_px') is None
+                and not any(item.get('square_top_line_px') is not None
+                            for item in getattr(self, 'slot_rgb_observations', ()))):
+            raise ValueError('y_slot_depth_square_top_line_missing')
+        # The executor may process RGB before its same-stamp depth callback.
+        # Keep recent observations and choose the newest actual matching pair;
+        # replacing the sole RGB observation every frame can starve pairing.
+        observations = list(getattr(self, 'slot_rgb_observations', ())) or [observation]
+        pending = getattr(self, 'slot_pending_depth_frame', None)
+        if isinstance(pending, dict):
+            for candidate in reversed(observations):
+                if self.consume_pending_slot_depth(candidate):
+                    break
+        frames = list(getattr(self, 'slot_depth_frames', ()))
+        if not frames or getattr(self, 'slot_camera_matrix', None) is None:
+            raise ValueError('y_slot_depth_waiting_depth_and_intrinsics')
+        after = (getattr(self, 'y_slot_measure_after', 0.)
+                 if getattr(self, 'y_slot_cycle_phase', 'measure') in {'measure', 'verify'} else 0.)
+        pairs = [(rgb, depth) for rgb in observations for depth in frames
+                 if rgb.get('square_top_line_px') is not None and rgb.get('rgb_stamp_ns', 0) > 0
+                 and depth.get('rgb_stamp_ns') == rgb['rgb_stamp_ns']
+                 and depth['stamp_ns'] == rgb['rgb_stamp_ns']
+                 and min(depth['source_at'], rgb.get('rgb_source_at', 0.)) > after
+                 and now-min(depth['source_at'], rgb.get('rgb_source_at', 0.)) <= .35]
+        if not pairs:
+            raise ValueError('y_slot_depth_unsynchronized')
+        observation, frame = max(pairs, key=lambda pair: (
+            min(pair[0]['rgb_stamp_ns'], pair[1]['stamp_ns']),
+            -abs(pair[0]['rgb_stamp_ns']-pair[1]['stamp_ns'])))
+        rgb_stamp = observation['rgb_stamp_ns']
+        skew = abs(frame['stamp_ns']-rgb_stamp)/1e9
+        size = (observation['image_width_px'], observation['image_height_px'])
+        if (frame['frame_id'] != observation.get('rgb_frame_id')
+                or frame['frame_id'] != self.slot_camera_frame
+                or size != self.slot_camera_size
+                or frame['depth_samples'].get('image_size') != list(size)):
+            raise ValueError('y_slot_depth_registration_mismatch')
+        if ('y_slot_depth_camera_pitch_deg' not in self.config
+                or 'y_slot_depth_camera_to_fork_tip_offset_cm' not in self.config):
+            raise ValueError('y_slot_depth_camera_extrinsics_missing')
+        pose = measure_sampled_top_line_depth(
+            frame['depth_samples'], self.slot_camera_matrix,
+            self.slot_distortion,
+            pitch_deg=float(self.config['y_slot_depth_camera_pitch_deg']),
+            yaw_deg=float(self.config.get('camera_yaw_deg', 0.)),
+            forward_offset_cm=float(
+                self.config['y_slot_depth_camera_to_fork_tip_offset_cm']),
+            right_offset_cm=float(
+                self.config.get('y_slot_centerline_offset_cm', 0.)))
+        pose.update(depth_stamp_ns=frame['stamp_ns'], rgb_stamp_ns=rgb_stamp,
+                    square_top_line_px=observation['square_top_line_px'],
+                    pose_line_definition='far_edge_of_20cm_square',
+                    depth_rgb_skew_sec=skew,
+                    camera_extrinsics={key:self.config.get(key, 0.) for key in (
+                        'y_slot_depth_camera_pitch_deg', 'camera_yaw_deg',
+                        'y_slot_depth_camera_to_fork_tip_offset_cm',
+                        'y_slot_centerline_offset_cm')})
+        return pose
+
+    def loaded_response_coefficients(self):
+        """Recording-derived delayed-yaw equation used by the frozen plan."""
+        values = dict(
+            immediate_gain=.18565,
+            total_gain=1.50914,
+            release_command_cm=3.80,
+            settling_sec=.001,
+            forward_scale=.980,
+            fork_offset_cm=28.7528,
+            model_id='vehicle1-loaded-w035-source-time-regression-20260906',
+            validated=False,
+            left_immediate_gain=.1587,
+            left_total_gain=1.401222,
+            right_immediate_gain=.2126,
+            right_total_gain=1.617065)
+        configured = self.config.get('y_slot_response_model', {})
+        if configured:
+            if not isinstance(configured, dict):
+                raise ValueError('y_slot_response_model_invalid')
+            values.update(configured)
+        return ResponseCoefficients(**values)
+
+    def loaded_response_estimate(self):
+        return estimate_from_history(
+            list(getattr(self,'y_slot_command_history',())),
+            list(getattr(self,'y_slot_response_history',())),
+            AutoDockNode.loaded_response_coefficients(self), time.monotonic(),
+            reset_time=getattr(self,'y_slot_history_reset_at',None))
+
+    def y_slot_observation_evidence(self, pose):
+        observation = getattr(
+            self, 'y_slot_guidance',
+            getattr(self, 'latest_tape_guidance', None),
+        ) or {}
+        profile = self.config.get('floor_calibration_presets',{}).get('loaded',{})
+        return dict(depth_measurement={key:value for key,value in pose.items()
+                                      if key.startswith('depth_') or key in ('measurement_source','camera_extrinsics','rgb_stamp_ns')},
+                    top_line_px=pose.get('top_line_px', observation.get('top_line_px')),
+                    square_top_line_px=pose.get(
+                        'square_top_line_px', observation.get('square_top_line_px')),
+                    pose_line_definition=pose.get('pose_line_definition'),
+                    top_center_cm=pose.get('top_center_cm'),
+                    calibration_created_at=profile.get('created_at'),
+                    calibration_h=profile.get('image_to_floor_h'),
+                    observation_at=getattr(
+                        self, 'y_slot_guidance_at',
+                        getattr(self, 'latest_tape_guidance_at', None)))
+
+    def tick_y_slot_homography_once(self):
+        """Calculate once from vision, then replay every command unchanged."""
+        now = time.monotonic()
+        phase = getattr(self, 'y_slot_cycle_phase', 'measure')
+        speed = self.number('y_slot_response_linear_speed_m_s', .10, .10, .20)
+        angular = self.number('y_slot_response_angular_speed_rad_s', .35, .10, 1.0)
+        if phase == 'manual_insertion_execute':
+            if not self.y_slot_cycle_segments:
+                self.stop_drive(10)
+                self.state = 'ready'
+                self.y_slot_cycle_phase = 'staging_hold'
                 self.publish_status(
-                    "running", "y_slot_lateral_direction_change_settle",
-                    settle_sec=settle_sec,
-                )
+                    'ready', 'y_slot_manual_insertion_complete',
+                    insertion_distance_cm=self.completed_insertion_distance_m*100.)
                 return
-            self.publish_drive(0.0, pulse_speed, 0.0)
+            segment = self.y_slot_cycle_segments[0]
+            started = getattr(self, 'y_slot_segment_started_at', None)
+            if started is None:
+                started = now
+                self.y_slot_segment_started_at = now
+                self.completed_insertion_distance_m = (
+                    float(segment['distance_cm'])/100.)
+                self.publish_status(
+                    'running', 'y_slot_manual_insertion_forward', **segment)
+            if now-started >= float(segment['duration_sec']):
+                self.stop_drive(10)
+                self.y_slot_cycle_segments.pop(0)
+                self.y_slot_segment_started_at = None
+                return
+            self.publish_drive(*segment['drive'])
             return
-        if pulse_speed != 0.0:
+        if phase == 'plan_locked':
+            # Keep the immutable plan status observable for a complete timer
+            # interval before the first fixed command replaces it.
             self.stop_drive()
-            self.y_slot_lateral_pulse_speed = 0.0
-            self.y_slot_lateral_pulse_until = 0.0
-            self.y_slot_lateral_settle_until = now + settle_sec
+            self.y_slot_cycle_phase = 'feedback_execute'
+            return
+        if phase in {'feedback_execute', 'reverse'}:
+            if not self.y_slot_cycle_segments:
+                self.stop_drive(10)
+                executed = getattr(self, 'y_slot_execute_kind', 'stage')
+                if executed == 'reverse':
+                    depth_poses = getattr(self, 'y_slot_start_depth_poses', None)
+                    if depth_poses is not None:
+                        depth_poses.clear()
+                    observations = getattr(self, 'y_slot_start_observations', None)
+                    if observations is not None:
+                        observations.clear()
+                    self.y_slot_cycle_phase = 'measure'
+                    self.y_slot_measure_after = now+self.number(
+                        'y_slot_response_settle_sec', .50, .10, 2.)
+                    self.publish_status('waiting', 'y_slot_waiting_post_reverse_depth')
+                    return
+                action = post_staging_action(
+                    self.y_slot_frozen_insertion_enabled)
+                if action == 'HOLD':
+                    self.state = 'ready'
+                    self.y_slot_cycle_phase = 'staging_hold'
+                    self.publish_status(
+                        'ready', 'y_slot_staging_insertion_disabled',
+                        requested_insertion_distance_cm=(
+                            self.y_slot_frozen_insertion_distance_cm))
+                    return
+                self.y_slot_floor_insert_initial_gap = None
+                self.y_slot_insert_start_position = self.odom_position
+                self.y_slot_insert_start_yaw = self.odom_yaw
+                self.y_slot_insert_started_at = now
+                self.state = 'y_slot_inserting'
+                self.publish_status(
+                    'running', 'y_slot_40cm_complete_straight_inserting',
+                    insertion_distance_cm=self.y_slot_frozen_insertion_distance_cm)
+                return
+            segment = self.y_slot_cycle_segments[0]
+            started = getattr(self, 'y_slot_segment_started_at', None)
+            if started is None:
+                started = now
+                self.y_slot_segment_started_at = now
+                self.publish_status('running', 'y_slot_frozen_plan_action',
+                                    phase=phase, **segment)
+            elapsed = now-started
+            if segment['control'] != 'fixed_replay':
+                self.cancel('y_slot_feedback_control_invalid')
+                return
+            if elapsed >= float(segment['duration_sec']):
+                self.stop_drive(10)
+                self.y_slot_cycle_segments.pop(0)
+                self.y_slot_segment_started_at = None
+                return
+            self.publish_drive(*segment['drive'])
+            return
+        if phase == 'fork_pause':
+            self.stop_drive()
+            if now < self.y_slot_measure_after:
+                return
+            self.state = 'waiting_fork'
+            self.fork_pub.publish(String(data='DOWN'))
+            self.publish_status('waiting', 'y_slot_fixed_insertion_fork_down')
+            return
+
+        self.stop_drive()
+        source = str(self.config.get('y_slot_pose_source', 'homography')).lower()
+        minimum = int(self.number('y_slot_start_consensus_frames', 5, 3, 30))
+        if source == 'depth':
+            try:
+                measured = self.calibrated_y_slot_pose()
+                depth_poses = getattr(self, 'y_slot_start_depth_poses', None)
+                if depth_poses is None:
+                    depth_poses = self.y_slot_start_depth_poses = deque(maxlen=30)
+                if not depth_poses or depth_poses[-1].get('rgb_stamp_ns') != measured.get('rgb_stamp_ns'):
+                    depth_poses.append(measured)
+                pose = y_slot_metric_pose_consensus(depth_poses, minimum)
+            except (ValueError, KeyError, TypeError) as exc:
+                self.publish_status('waiting', str(exc), y_slot_pose_source=source)
+                return
+            if pose is None:
+                self.publish_status(
+                    'waiting', 'y_slot_waiting_start_depth_consensus',
+                    observations=len(depth_poses), required=minimum,
+                    y_slot_pose_source=source)
+                return
+        else:
+            profile = self.config.get('floor_calibration_presets', {}).get('loaded')
+            if not isinstance(profile, dict):
+                self.publish_status('waiting', 'y_slot_loaded_homography_missing')
+                return
+            pose = y_slot_homography_consensus(
+                getattr(self, 'y_slot_start_observations', ()), profile, minimum,
+                self.number('y_slot_target_center_x_ratio', .5, .05, .95))
+            if pose is not None:
+                pose['top_center_cm'][0] += float(
+                    self.config.get('y_slot_centerline_offset_cm', 0.))
+                pose['right_cm'] = float(pose['top_center_cm'][0])
+                pose['bearing_left_deg'] = math.degrees(math.atan2(
+                    -pose['right_cm'], float(pose['top_center_cm'][1])))
+            if pose is None:
+                self.publish_status(
+                    'waiting', 'y_slot_waiting_start_homography_consensus',
+                    observations=len(getattr(self, 'y_slot_start_observations', ())),
+                    required=minimum, y_slot_pose_source=source)
+                return
+        target_gap = self.number('y_slot_staging_distance_cm', 40., 1., 100.)
+        if phase == 'verify':
+            try:
+                geometry = y_slot_stage_geometry(pose, target_gap)
+                gap = float(geometry['gap_cm'])
+                lateral = float(geometry['lateral_cm'])
+                heading = float(pose['heading_left_deg'])
+                if not all(math.isfinite(v) for v in (gap, lateral, heading)):
+                    raise ValueError('y_slot_invalid_stage_pose')
+            except (ValueError, KeyError, TypeError) as exc:
+                self.publish_status('waiting', str(exc), y_slot_pose_source=source)
+                return
+            gap_tol = self.number('y_slot_stage_distance_tolerance_cm', 1., .2, 10.)
+            lat_tol = self.number('y_slot_stage_lateral_tolerance_cm', 1.5, .2, 10.)
+            yaw_tol = self.number('y_slot_stage_yaw_tolerance_deg', 2., .5, 10.)
+            accepted = (abs(gap-target_gap) <= gap_tol
+                        and abs(lateral) <= lat_tol and abs(heading) <= yaw_tol)
             self.publish_status(
-                "running", "y_slot_lateral_pulse_settle",
-                settle_sec=settle_sec,
-            )
+                'running', 'y_slot_40cm_depth_verification', accepted=accepted,
+                gap_cm=gap, lateral_cm=lateral, top_line_yaw_deg=heading,
+                y_slot_pose_source=source, **self.y_slot_observation_evidence(pose))
+            if accepted:
+                if not self.y_slot_frozen_insertion_enabled:
+                    self.state = 'ready'
+                    self.y_slot_cycle_phase = 'staging_hold'
+                    self.publish_status(
+                        'ready', 'y_slot_staging_verified_insertion_disabled',
+                        requested_insertion_distance_cm=(
+                            self.y_slot_frozen_insertion_distance_cm))
+                    return
+                self.y_slot_floor_insert_initial_gap = gap
+                self.y_slot_floor_insert_heading = math.radians(heading)
+                self.y_slot_floor_insert_start_yaw = self.odom_yaw
+                self.y_slot_insert_started_at = now
+                self.state = 'y_slot_inserting'
+                self.publish_status(
+                    'running', 'y_slot_40cm_depth_verified_straight_inserting',
+                    gap_cm=gap, lateral_cm=lateral, top_line_yaw_deg=heading,
+                    insertion_distance_cm=self.y_slot_frozen_insertion_distance_cm)
+                return
+            attempts = getattr(self, 'y_slot_retry_count', 0)
+            maximum = int(self.number('y_slot_stage_max_retries', 3, 1, 10))
+            if attempts >= maximum:
+                self.cancel('y_slot_stage_verification_failed')
+                return
+            self.y_slot_retry_count = attempts+1
+            clearance = self.number('y_slot_stage_reverse_clearance_cm', 15., 5., 40.)
+            self.y_slot_cycle_segments = [dict(
+                action='reverse_before_remeasure', control='fixed_replay',
+                duration_sec=clearance/(speed*100.), drive=(-speed, 0., 0.))]
+            self.y_slot_segment_started_at = None
+            self.y_slot_execute_kind = 'reverse'
+            self.y_slot_cycle_phase = 'reverse'
+            self.publish_status(
+                'running', 'y_slot_reverse_before_remeasure', gap_cm=gap,
+                lateral_cm=lateral, top_line_yaw_deg=heading,
+                retry=self.y_slot_retry_count)
             return
-        if now < settle_until:
+
+        requested = self.y_slot_requested_insertion_distance_cm
+        if requested is None:
+            requested = getattr(
+                self, 'y_slot_insertion_distance_override_cm', None)
+        if requested is None:
+            requested = self.number('y_slot_insertion_distance_cm', 35., 1., 100.)
+        try:
+            insertion_enabled = (self.boolean('y_slot_execute_insertion', True)
+                                 and not getattr(self, 'y_slot_stage_only', False))
+            result = y_slot_homography_frozen_plan(
+                pose, target_gap,
+                clamp(float(requested), 1., 100.), speed, angular,
+                self.loaded_response_coefficients(),
+                False,
+                settle_sec=self.number(
+                    'y_slot_response_settle_sec', .50, .10, 2.))
+        except (ValueError, KeyError, TypeError) as exc:
+            if str(exc).endswith('approach_needs_reverse_clearance'):
+                clearance = self.number(
+                    'y_slot_stage_reverse_clearance_cm', 15., 5., 40.)
+                self.y_slot_cycle_segments = [dict(
+                    action='reverse_before_initial_remeasure',
+                    control='fixed_replay', duration_sec=clearance/(speed*100.),
+                    drive=(-speed, 0., 0.))]
+                self.y_slot_segment_started_at = None
+                self.y_slot_execute_kind = 'reverse'
+                self.y_slot_cycle_phase = 'reverse'
+                self.publish_status(
+                    'running', 'y_slot_reverse_before_initial_remeasure',
+                    clearance_cm=clearance)
+                return
+            self.cancel('y_slot_feedback_plan_failed:'+str(exc))
+            return
+        result['insertion_enabled'] = insertion_enabled
+        self.y_slot_cycle_phase = 'plan_locked'
+        self.y_slot_cycle_segments = list(result['stages'])
+        self.y_slot_segment_started_at = None
+        self.y_slot_execute_kind = 'stage'
+        self.y_slot_frozen_insertion_distance_cm = result['insertion_distance_cm']
+        self.y_slot_frozen_insertion_enabled = result['insertion_enabled']
+        self.y_slot_frozen_plan = dict(result, input_pose=pose)
+        self.publish_status('running', 'y_slot_feedback_plan_locked',
+                            plan=self.y_slot_frozen_plan,
+                            y_slot_pose_source=source,
+                            **self.y_slot_observation_evidence(pose))
+
+    def tick_y_slot_centering(self):
+        """Plan once, execute fully, verify; on failure reverse before replanning."""
+        if self.boolean('y_slot_homography_once_enabled', False):
+            return self.tick_y_slot_homography_once()
+        now = time.monotonic()
+        phase = getattr(self, 'y_slot_cycle_phase', 'measure')
+        speed = self.number('y_slot_response_linear_speed_m_s', .10, .10, .20)
+        angular = self.number('y_slot_response_angular_speed_rad_s', .35, .10, 1.0)
+        if phase in {'approach', 'reverse'}:
+            # Loss of safety inputs aborts the frozen exposure; never resume a
+            # partially executed timed plan as though it had completed.
+            if now-getattr(self, 'y_slot_camera_received_at', 0.) > .35:
+                self.cancel('y_slot_plan_vision_stale')
+                return
+            if now-getattr(self, 'y_slot_odom_source_received_at', 0.) > .35:
+                self.cancel('y_slot_plan_odom_stale')
+                return
+            if phase == 'reverse':
+                yaw_change = math.atan2(math.sin(self.odom_yaw-self.y_slot_reverse_yaw),
+                                        math.cos(self.odom_yaw-self.y_slot_reverse_yaw))
+                if abs(yaw_change) > math.radians(3.):
+                    self.cancel('y_slot_reverse_yaw_deviation')
+                    return
+            due = getattr(self, 'y_slot_segment_until', None)
+            if due is not None and now < due:
+                self.publish_drive(*self.y_slot_cycle_segments[0]['drive'])
+                return
+            if due is not None:
+                self.stop_drive()
+                self.y_slot_cycle_segments.pop(0)
+                self.y_slot_segment_until = None
+            if self.y_slot_cycle_segments:
+                segment = self.y_slot_cycle_segments[0]
+                self.y_slot_segment_until = now+segment['duration_sec']
+                self.publish_status('running', 'y_slot_frozen_plan_action',
+                                    phase=phase, **segment)
+                self.publish_drive(*segment['drive'])
+                return
             self.stop_drive()
+            self.y_slot_cycle_phase = 'verify' if phase == 'approach' else 'measure'
+            self.y_slot_measure_after = now+self.number(
+                'y_slot_response_settle_sec', .50, .10, 2.)
             return
-        if observation_at == self.y_slot_last_motion_tape_at:
-            self.stop_drive()
+
+        self.stop_drive()
+        measure_after = getattr(self, 'y_slot_measure_after', 0.)
+        guidance_at = getattr(
+            self, 'y_slot_guidance_at',
+            getattr(self, 'latest_tape_guidance_at', 0.),
+        )
+        if now < measure_after or guidance_at <= measure_after:
+            self.publish_status('waiting', 'y_slot_waiting_post_motion_observation', phase=phase)
             return
-        pulse_sec = self.number(
-            "y_slot_lateral_pulse_sec", 0.08, 0.05, 0.30
-        )
-        self.y_slot_last_motion_tape_at = observation_at
-        self.y_slot_lateral_pulse_speed = lateral
-        self.y_slot_lateral_pulse_until = now + pulse_sec
-        self.publish_drive(0.0, lateral, 0.0)
-        self.publish_status(
-            "running", "y_slot_centering_pulse",
-            center_x_px=round(center_x_px, 1),
-            center_error_px=round(error_px, 1),
-            border_angle_deg=round(border_angle_deg, 2),
-            lateral_speed_m_s=round(lateral, 3),
-            pulse_sec=pulse_sec,
-            settle_sec=settle_sec,
-        )
+        try:
+            pose = self.calibrated_y_slot_pose()
+            target_gap = self.number('y_slot_staging_distance_cm', 40., 1., 100.)
+            geometry = y_slot_stage_geometry(pose, target_gap)
+            gap, lateral = geometry['gap_cm'], geometry['lateral_cm']
+            heading = float(pose['heading_left_deg'])
+            if not all(math.isfinite(v) for v in (gap, lateral, heading)):
+                raise ValueError('y_slot_invalid_stage_pose')
+        except (ValueError, KeyError, TypeError) as exc:
+            self.publish_status('waiting', str(exc))
+            return
+        gap_tol = self.number('y_slot_stage_distance_tolerance_cm', 1., .2, 10.)
+        lat_tol = self.number('y_slot_stage_lateral_tolerance_cm', 1.5, .2, 10.)
+        yaw_tol = self.number('y_slot_stage_yaw_tolerance_deg', 2., .5, 10.)
+        accepted = (abs(gap-target_gap) <= gap_tol and abs(lateral) <= lat_tol
+                    and abs(heading) <= yaw_tol)
+        if accepted:
+            estimate = self.loaded_response_estimate()
+            if not estimate['observable']:
+                self.publish_status('waiting','y_slot_response_history_required',
+                                    history_reason=estimate['reason'])
+                if phase != 'verify':
+                    return
+                accepted=False
+        if accepted:
+            check = insertion_check(
+                *pose['top_center_cm'], heading, estimate['state'],
+                self.loaded_response_coefficients(), speed_m_s=speed,
+                staging_cm=target_gap, lateral_tolerance_cm=lat_tol,
+                heading_tolerance_deg=yaw_tol, gap_tolerance_cm=gap_tol)
+            if estimate.get('max_error_deg',float('inf'))>yaw_tol:
+                check['accepted']=False
+                check['reasons'].append('observed_response_model_mismatch')
+            self.publish_status('running','y_slot_stage_verification',
+                                accepted=check['accepted'], reasons=check['reasons'],
+                                max_tail_yaw_deg=check['max_tail_yaw_deg'],
+                                max_tail_lateral_cm=check['max_tail_lateral_cm'],
+                                **self.y_slot_observation_evidence(pose))
+            accepted=check['accepted']
+        if accepted:
+            self.y_slot_floor_insert_initial_gap = gap
+            self.y_slot_floor_insert_heading = math.radians(heading)
+            self.y_slot_floor_insert_start_yaw = self.odom_yaw
+            self.y_slot_insert_started_at = now
+            self.state = 'y_slot_inserting'
+            self.publish_status('running', 'y_slot_40cm_aligned_straight_inserting',
+                                gap_cm=gap, lateral_cm=lateral, top_line_yaw_deg=heading)
+            return
+        # A failed completed approach ALWAYS retreats, regardless of yaw error.
+        reverse = phase == 'verify' or gap <= target_gap+gap_tol
+        if not reverse:
+            future = getattr(self,'y_slot_plan_future',None)
+            if future is None:
+                estimate = self.loaded_response_estimate()
+                if not estimate['observable']:
+                    self.publish_status('waiting','y_slot_response_history_required',
+                                        history_reason=estimate['reason'])
+                    return
+                if estimate.get('max_error_deg',float('inf'))>yaw_tol:
+                    self.publish_status('waiting','y_slot_observed_response_model_mismatch',
+                                        max_error_deg=estimate['max_error_deg'])
+                    return
+                self.y_slot_plan_anchor_yaw=self.odom_yaw
+                self.y_slot_plan_started_at=now
+                self.y_slot_plan_input_evidence=self.y_slot_observation_evidence(pose)
+                self.y_slot_plan_future=self.y_slot_plan_executor.submit(
+                    plan_approach, *pose['top_center_cm'], heading, estimate['state'],
+                    self.loaded_response_coefficients(), staging_cm=target_gap,
+                    speed_m_s=speed, angular_rad_s=angular,
+                    lateral_tolerance_cm=lat_tol, heading_tolerance_deg=yaw_tol,
+                    gap_tolerance_cm=gap_tol)
+                self.publish_status('running','y_slot_response_plan_calculating')
+                return
+            if not future.done():
+                return
+            self.y_slot_plan_future=None
+            # A worker computes only numbers. It cannot start a stale plan after
+            # cancellation, external movement, or a changed vehicle heading.
+            changed = abs(normalize_angle(self.odom_yaw-self.y_slot_plan_anchor_yaw))>math.radians(.5)
+            changed |= any(t>self.y_slot_plan_started_at and (vx or vy or wz)
+                           for t,vx,vy,wz in getattr(self,'y_slot_command_history',()))
+            if changed:
+                self.publish_status('waiting','y_slot_plan_start_pose_changed')
+                return
+            try:
+                result=future.result()
+            except (ValueError, np.linalg.LinAlgError) as exc:
+                self.cancel('y_slot_response_planning_failed:'+str(exc))
+                return
+            self.publish_status('running','y_slot_response_plan_prediction',
+                                accepted=result['accepted'],reason_detail=result['reason'],
+                                model=result['model'],initial_state=result['initial_state'],
+                                predicted_stage=result.get('predicted_stage'),
+                                predicted_state=result.get('predicted_state'),
+                                **self.y_slot_plan_input_evidence)
+            if not result['accepted']:
+                reverse = True
+            else:
+                segments=result['actions']
+        if reverse:
+            attempts = getattr(self, 'y_slot_retry_count', 0)
+            if attempts >= int(self.number('y_slot_max_retries', 3, 1, 10)):
+                self.cancel('y_slot_stage_verification_failed')
+                return
+            self.y_slot_retry_count = attempts+1
+            # Reverse is a fixed straight command exposure, not a claim of
+            # measured travel. Re-estimate distance and yaw only after stopping.
+            clearance = self.number('y_slot_stage_reverse_clearance_cm', 15., 5., 40.)
+            segments = [dict(action='reverse', duration_sec=clearance/(speed*100.),
+                             drive=(-speed, 0., 0.))]
+            self.y_slot_reverse_yaw = self.odom_yaw
+        self.y_slot_cycle_phase = 'reverse' if reverse else 'approach'
+        self.y_slot_cycle_segments = segments
+        self.y_slot_segment_until = None
+        self.publish_status('running', 'y_slot_reverse_before_remeasure' if reverse else 'y_slot_approach_plan_locked',
+                            gap_cm=gap, lateral_cm=lateral, top_line_yaw_deg=heading,
+                            segments=segments, retry=getattr(self, 'y_slot_retry_count', 0),
+                            **self.y_slot_observation_evidence(pose))
 
     def tick_y_slot_inserting(self):
+        if getattr(self,'y_slot_floor_insert_initial_gap',None) is not None:
+            return self.tick_y_slot_floor_final_straight()
         now = time.monotonic()
         fork_command_due_at = getattr(self, "fork_command_due_at", None)
         if fork_command_due_at is not None:
@@ -6008,16 +7217,6 @@ class AutoDockNode(Node):
             or self.odom_position is None
         ):
             self.cancel("odom_missing_during_y_slot_insertion")
-            return
-        started_at = getattr(self, "y_slot_insert_started_at", None)
-        if started_at is None:
-            started_at = now
-            self.y_slot_insert_started_at = now
-        timeout = self.number(
-            "y_slot_insertion_timeout_sec", 4.0, 1.0, 30.0
-        )
-        if now - started_at >= timeout:
-            self.cancel("y_slot_insertion_timeout")
             return
         dx = self.odom_position[0] - self.y_slot_insert_start_position[0]
         dy = self.odom_position[1] - self.y_slot_insert_start_position[1]
@@ -6167,7 +7366,7 @@ class AutoDockNode(Node):
             "distance_coefficient", 1.0, 0.10, 2.0
         )
         if travelled_actual < reverse_m:
-            if self.location in {"Y1", "Y2", "Y3", "Y4"}:
+            if getattr(self, "mission_kind", None) == "Y_PLACE":
                 speed = self.number(
                     "y_slot_insertion_speed_m_s", 0.10, 0.10, 0.20
                 )
@@ -6228,32 +7427,66 @@ class AutoDockNode(Node):
         self.publish_status("running", "lidar_replanned_virtual_dock" if self.state == "docking" else "lidar_recovery_search")
 
     def destroy_node(self):
-        # ROS shutdown may already have invalidated publishers when launch
-        # delivers SIGINT.  Do not turn an otherwise clean shutdown into an
-        # exception; normal cancel paths still send STOP while ROS is alive.
-        if rclpy.ok():
-            self.stop_drive(10)
-            self.fork_pub.publish(String(data="STOP"))
-        self.control_socket.close()
-        return super().destroy_node()
+        # No callbacks are spun during cleanup. Keep DDS alive for a paced
+        # stop burst; publication alone cannot guarantee actuator receipt.
+        executor = getattr(self, "y_slot_plan_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+        try:
+            for _ in range(10):
+                if not rclpy.ok():
+                    break
+                for publish in (
+                    lambda: self.stop_drive(1),
+                    lambda: self.fork_pub.publish(String(data="STOP")),
+                ):
+                    try:
+                        publish()
+                    except Exception as exc:
+                        self.get_logger().error(
+                            f"shutdown stop publication failed: {exc}"
+                        )
+                time.sleep(0.02)
+        finally:
+            try:
+                self.control_socket.close()
+            finally:
+                destroyed = super().destroy_node()
+        return destroyed
 
 
 def main(args=None):
-    rclpy.init(args=args)
-    node = AutoDockNode()
+    # Default rclpy handlers shut down the context before node cleanup.
+    # Instead request an exit and let the main thread publish STOP first.
+    stopping = False
+
+    def request_stop(signum, frame):
+        nonlocal stopping
+        stopping = True
+
+    previous_handlers = {
+        sig: signal.signal(sig, request_stop)
+        for sig in (signal.SIGINT, signal.SIGTERM)
+    }
+    node = None
     try:
-        rclpy.spin(node)
+        rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+        node = AutoDockNode()
+        while rclpy.ok() and not stopping:
+            rclpy.spin_once(node, timeout_sec=0.1)
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         try:
-            node.destroy_node()
-        except KeyboardInterrupt:
-            # launch may deliver a second SIGINT while rclpy destroys the
-            # publisher handles; shutdown is already in progress.
-            pass
-        if rclpy.ok():
-            rclpy.shutdown()
+            if node is not None:
+                node.destroy_node()
+        finally:
+            try:
+                if rclpy.ok():
+                    rclpy.shutdown()
+            finally:
+                for sig, handler in previous_handlers.items():
+                    signal.signal(sig, handler)
 
 
 if __name__ == "__main__":

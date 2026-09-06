@@ -8,7 +8,8 @@
   "camera_distance_scale_cm_per_pnp_unit": 6.366069808066864,
   "camera_distance_offset_cm": -17.381442423258008,
   "_comment_centerline_offset_cm": "카메라 인식 중심과 실제 포크 중심선 사이의 좌우 보정값(cm)",
-  "centerline_offset_cm": 1,
+  "centerline_offset_cm": 2.0,
+  "y_slot_centerline_offset_cm": 3,
   "_comment_dock_standoff_m": "정렬을 끝내고 직진 삽입을 시작할 팔레트 전면까지의 거리(m)",
   "dock_standoff_m": 0.2,
   "_comment_insertion_distance_cm": "팔레트 전면을 통과한 뒤 내부로 추가 삽입할 실제 깊이(cm)",
@@ -52,14 +53,8 @@
   "dock_lateral_tape_target_center_y_ratio": 0.95,
   "_comment_nearest_odom_step_settle_sec": "최근접 목표는 확정 화면으로 odom 이동한 뒤 정지하여 새 카메라 프레임을 기다림",
   "nearest_odom_step_settle_sec": 0.5,
-  "_comment_y_slot_centering_enabled": "arrival.location이 Y1~Y4일 때 주의선 슬롯 중심을 화면 중앙에 맞추는 기능",
+  "_comment_y_slot_centering_enabled": "arrival.location이 Y일 때 주의선 슬롯 중심을 화면 중앙에 맞추는 기능",
   "y_slot_centering_enabled": true,
-  "y_slot_centering_locations": [
-    "Y1",
-    "Y2",
-    "Y3",
-    "Y4"
-  ],
   "_comment_y_slot_target_center_x_ratio": "차량 직진축 기준 캡처 X=406.69px/640; 카메라 광학 중심과 다름",
   "y_slot_target_center_x_ratio": 0.6354510714285715,
   "_comment_y_slot_center_tolerance_ratio": "중앙정렬 완료 허용 오차; 640px 영상에서 0.015는 약 9.6px",
@@ -70,22 +65,16 @@
   "y_slot_insertion_start_min_center_y_ratio": 0.9101,
   "_comment_y_slot_approach_speed_m_s": "중앙·수평 정렬 후 삽입 시작 거리까지 전진 접근 속도",
   "y_slot_approach_speed_m_s": 0.1,
-  "y_slot_center_gain": 0.4,
-  "_comment_y_slot_lateral_speed_m_s": "실차 횡이동 데드존을 넘기는 중앙정렬 최소/최대 속도",
-  "y_slot_min_lateral_speed_m_s": 0.1,
-  "y_slot_max_lateral_speed_m_s": 0.12,
   "y_slot_tape_max_age_sec": 0.35,
-  "y_slot_lateral_pulse_sec": 0.08,
-  "y_slot_lateral_pulse_settle_sec": 0.3,
-  "_comment_y_slot_border_angle": "외곽 주의선 수평각을 먼저 맞춘 뒤 내부 X로 횡이동",
+  "_comment_y_slot_border_angle": "X 방향으로 회전·직진 접근 후 외곽 주의선 수평각 최종 정렬",
   "y_slot_border_target_angle_deg": 0,
   "y_slot_border_angle_tolerance_deg": 2,
   "y_slot_border_rotation_speed_rad_s": 0.35,
-  "y_slot_border_rotation_pulse_sec": 0.05,
-  "y_slot_border_rotation_settle_sec": 0.3,
-  "y_slot_centering_timeout_sec": 8,
+  "y_slot_centering_timeout_sec": 30,
   "_comment_y_slot_insertion_distance_cm": "Y 슬롯 중앙정렬 완료 후 직진 삽입 거리(cm)",
-  "y_slot_insertion_distance_cm": 15,
+  "y_slot_insertion_distance_cm": 32.0,
+  "_comment_y_slot_execute_insertion": "일반 Arrival은 staging 뒤 자동 진입/하강하며 Control GUI는 stage_only로 분리 시험",
+  "y_slot_execute_insertion": true,
   "_comment_y_slot_insertion_speed_m_s": "Y 슬롯 직진 삽입 속도; 실차 데드존 이상으로 설정",
   "y_slot_insertion_speed_m_s": 0.1,
   "y_slot_insertion_timeout_sec": 4,
@@ -101,8 +90,12 @@
   "nearest_optimal_recheck_delay_sec": 3.0,
   "_comment_stable_detection_frames": "목표를 확정하기 위해 연속 검출되어야 하는 프레임 수",
   "stable_detection_frames": 2,
-  "_comment_depth_camera_to_fork_tip_offset_cm": "깊이 카메라 기준점과 포크 끝 사이의 전후 거리(cm)",
-  "depth_camera_to_fork_tip_offset_cm": 14,
+  "_comment_depth_camera_to_fork_tip_offset_cm": "DOCK 태그 depth용 깊이 카메라 기준점과 포크 끝 사이의 전후 거리(cm)",
+  "depth_camera_to_fork_tip_offset_cm": 14.0,
+  "_comment_y_slot_depth_camera_to_fork_tip_offset_cm": "Y 슬롯 registered-depth top line용 깊이 카메라 기준점과 포크 끝 사이의 전후 거리(cm)",
+  "y_slot_depth_camera_to_fork_tip_offset_cm": 30.0,
+  "_comment_y_slot_depth_camera_pitch_deg": "Y 슬롯 registered-depth top line 3D 복원에 사용하는 카메라 pitch(도)",
+  "y_slot_depth_camera_pitch_deg": -7.0045071389682825,
   "_comment_lidar_self_filter_distance_m": "라이다 최소 유효거리 필터(m); 안전거리보다 작아야 함",
   "lidar_self_filter_distance_m": 0.03,
   "_comment_lidar_front_clearance_m": "차체 외곽 기준 전방 여유거리(m)",
@@ -169,11 +162,162 @@
   "tape_below_pallet_margin_ratio": 0.02,
   "max_frontal_error": 0.35,
   "coarse_center_error_max": 0.1,
+  "nearest_coarse_lateral_speed_m_s": 0.12,
+  "coarse_align_min_angular_speed_rad_s": 0.38,
+  "coarse_align_max_angular_speed_rad_s": 0.38,
+  "translation_alignment_min_angular_speed_rad_s": 0.38,
+  "translation_alignment_max_angular_speed_rad_s": 0.38,
   "depth_fallback_confirmation_frames": 3,
   "coarse_alignment_timeout_sec": 5,
   "insertion_lateral_gain": 0.5,
   "insertion_max_lateral_speed_m_s": 0.025,
   "insertion_yaw_gain": 0.8,
   "insertion_max_angular_speed_rad_s": 0.12,
-  "motion_transition_pause_sec": 0.5
+  "motion_transition_pause_sec": 0.5,
+  "floor_calibration_presets": {
+    "loaded": {
+      "schema_version": 3,
+      "kind": "loaded_floor_plane",
+      "load_state": "loaded",
+      "method": "top_line_endpoints_at_two_measured_distances",
+      "sample_distances_cm": [
+        50.0,
+        80.0
+      ],
+      "vehicle": 1,
+      "source_topic": "/ascamera/camera_publisher/rgb0/image",
+      "image_size": [
+        640,
+        480
+      ],
+      "created_at": "2026-09-05T11:58:41+0000",
+      "coordinate_frame": "fork_tip_center; right_cm positive right, forward_cm positive forward",
+      "distance_reference": "fork tip to FAR outer warning-border line, measured along floor",
+      "width_cm": 20.0,
+      "image_to_floor_h": [
+        [
+          1.0773679813544919,
+          0.03513907385660639,
+          -403.0013066371442
+        ],
+        [
+          0.13206557837235777,
+          -0.7869261317412941,
+          613.3785824356021
+        ],
+        [
+          0.0016508197296544699,
+          0.03254797022069445,
+          1.0
+        ]
+      ],
+      "calibration_pixel_hull": [
+        [
+          307.4157409667969,
+          157.30337524414062
+        ],
+        [
+          432.35955810546875,
+          157.30337524414062
+        ],
+        [
+          455.7303466796875,
+          242.69662475585938
+        ],
+        [
+          280.4494323730469,
+          239.1011199951172
+        ]
+      ],
+      "accuracy_validation": "not independently measured; four points exactly determine homography",
+      "fit_rmse_cm": 2.1983525684448946e-06,
+      "samples": [
+        {
+          "sample_id": 2,
+          "far_line_cm": 50.0,
+          "image_size": [
+            640,
+            480
+          ],
+          "top_line_px": [
+            [
+              280.44943820224717,
+              239.1011235955056
+            ],
+            [
+              455.7303370786517,
+              242.69662921348313
+            ]
+          ],
+          "image": "/home/ubuntu/recordings/vehicle1/floor_calibration/1788609425793091178/sample_2.png",
+          "captured_monotonic": 18380.403540529,
+          "load_state": "loaded",
+          "alignment_source": "operator_aligned"
+        },
+        {
+          "sample_id": 1,
+          "far_line_cm": 80.0,
+          "image_size": [
+            640,
+            480
+          ],
+          "top_line_px": [
+            [
+              307.4157303370786,
+              157.30337078651687
+            ],
+            [
+              432.35955056179773,
+              157.30337078651687
+            ]
+          ],
+          "image": "/home/ubuntu/recordings/vehicle1/floor_calibration/1788609425793091178/sample_1.png",
+          "captured_monotonic": 18520.00484645,
+          "load_state": "loaded",
+          "alignment_source": "operator_aligned"
+        }
+      ],
+      "assumptions": [
+        "loaded camera posture remains fixed",
+        "flat floor",
+        "same top line endpoints at both distances",
+        "fork centre aligned to line centre and perpendicular to line during capture"
+      ]
+    }
+  },
+  "y_slot_floor_control_enabled": true,
+  "_comment_y_slot_homography_once_enabled": "Y arrival에서 시작 RGB homography를 한 번만 고정해 전진 전용 4구간과 고정 삽입을 실행",
+  "y_slot_homography_once_enabled": true,
+  "y_slot_start_consensus_frames": 5,
+  "y_slot_staging_distance_cm": 40.0,
+  "y_slot_stage_distance_tolerance_cm": 1.0,
+  "y_slot_stage_yaw_tolerance_deg": 2.0,
+  "y_slot_stage_reverse_clearance_cm": 15.0,
+  "y_slot_stage_max_retries": 3,
+  "y_slot_control_hold": false,
+  "y_slot_response_model": {
+    "immediate_gain": 0.18565,
+    "total_gain": 1.50914,
+    "left_immediate_gain": 0.1587,
+    "left_total_gain": 1.401222,
+    "right_immediate_gain": 0.2126,
+    "right_total_gain": 1.617065,
+    "release_command_cm": 3.8,
+    "settling_sec": 0.001,
+    "forward_scale": 0.98,
+    "fork_offset_cm": 28.7528,
+    "model_id": "vehicle1-loaded-w035-source-time-regression-20260906",
+    "validated": false
+  },
+  "y_slot_response_total_yaw_gain": 1.50914,
+  "y_slot_response_forward_scale": 0.98,
+  "y_slot_response_fork_rotation_offset_cm": 28.7528,
+  "y_slot_final_trim_fraction": 0.2,
+  "y_slot_final_trim_min_cm": 4.0,
+  "y_slot_final_trim_max_cm": 6.0,
+  "y_slot_response_linear_speed_m_s": 0.1,
+  "y_slot_response_angular_speed_rad_s": 0.35,
+  "y_slot_response_settle_sec": 0.5,
+  "y_slot_stage_lateral_tolerance_cm": 1.5,
+  "y_slot_pose_source": "homography"
 }

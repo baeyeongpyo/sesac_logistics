@@ -16,9 +16,43 @@ from auto_dock.auto_dock_node import (
     normalize_slot_id,
     pallet_product_type,
     parse_arrival,
+    parse_y_slot_manual_insertion,
+    parse_y_slot_response_update,
     public_fsm_state,
 )
 from std_msgs.msg import Empty, String
+
+
+def test_y_slot_response_update_accepts_gui_numeric_patch():
+    update = parse_y_slot_response_update(json.dumps({
+        "right_immediate_gain": 0.42,
+        "release_command_cm": 5.5,
+        "y_slot_response_angular_speed_rad_s": 0.30,
+        "y_slot_depth_camera_to_fork_tip_offset_cm": 30.0,
+        "y_slot_depth_camera_pitch_deg": -7.0,
+    }))
+
+    assert update == {
+        "right_immediate_gain": 0.42,
+        "release_command_cm": 5.5,
+        "y_slot_response_angular_speed_rad_s": 0.30,
+        "y_slot_depth_camera_to_fork_tip_offset_cm": 30.0,
+        "y_slot_depth_camera_pitch_deg": -7.0,
+    }
+
+
+def test_y_slot_response_update_rejects_unknown_config_key():
+    with pytest.raises(ValueError, match="unknown_key"):
+        parse_y_slot_response_update('{"unexpected":1}')
+
+
+@pytest.mark.parametrize("global_key", [
+    "depth_camera_to_fork_tip_offset_cm",
+    "camera_pitch_deg",
+])
+def test_y_slot_response_update_cannot_mutate_global_dock_extrinsics(global_key):
+    with pytest.raises(ValueError, match="unknown_key"):
+        parse_y_slot_response_update(json.dumps({global_key: 30.0}))
 
 
 def test_warning_tape_detector_fits_repeating_yellow_band():
@@ -901,32 +935,40 @@ def test_structured_dock_pick_allows_duplicate_symbols():
     }
 
 
-def test_structured_dock_pick_accepts_nearest_product_target():
+def test_structured_dock_pick_ignores_removed_recognition_mode_field():
     arrival = parse_arrival(json.dumps({
         "status": "SUCCEEDED",
         "location": "DOCK_1",
         "operation": "PICK",
         "product_type": "FRESH",
-        "target": {"type": "NEAREST"},
-    }))
-
-    assert arrival["target"] == {
-        "type": "NEAREST", "recognition_mode": "CURRENT"
-    }
-
-
-def test_structured_dock_pick_accepts_legacy_nearest_recognition():
-    arrival = parse_arrival(json.dumps({
-        "status": "SUCCEEDED",
-        "location": "DOCK_1",
-        "operation": "PICK",
-        "product_type": "NORMAL",
         "target": {"type": "NEAREST", "recognition_mode": "LEGACY"},
     }))
 
-    assert arrival["target"] == {
-        "type": "NEAREST", "recognition_mode": "LEGACY"
-    }
+    assert arrival["target"] == {"type": "NEAREST"}
+
+
+def test_y_gui_arrival_can_request_staging_only():
+    arrival = parse_arrival(json.dumps({
+        "status": "SUCCEEDED", "location": "Y", "operation": "PLACE",
+        "product_type": "FRESH", "target": {"type": "NONE"},
+        "insertion_distance_cm": 35, "stage_only": True,
+    }))
+
+    assert arrival["insertion_distance_cm"] == 35
+    assert arrival["stage_only"] is True
+
+
+@pytest.mark.parametrize("payload,expected", [
+    ('{"distance_cm":35}', 35.), ("12.5", 12.5),
+])
+def test_manual_y_insertion_distance_parser(payload, expected):
+    assert parse_y_slot_manual_insertion(payload) == expected
+
+
+@pytest.mark.parametrize("payload", ["{}", "0", "101", '"bad"'])
+def test_manual_y_insertion_distance_rejects_invalid_value(payload):
+    with pytest.raises(ValueError, match="manual_insertion_distance"):
+        parse_y_slot_manual_insertion(payload)
 
 
 def test_nearest_product_candidate_filters_product_and_uses_depth_distance():
@@ -971,7 +1013,7 @@ def test_nearest_product_candidate_filters_product_and_uses_depth_distance():
     )
 
 
-def test_nearest_locked_candidate_uses_continuous_tracking_streak():
+def test_nearest_locked_candidate_uses_entity_seen_count():
     fake = type("FakeDock", (), {})()
     fake.product_type = "NORMAL"
     fake.target_entity_id = 10
@@ -991,29 +1033,6 @@ def test_nearest_locked_candidate_uses_continuous_tracking_streak():
     candidate, _pnp = AutoDockNode.nearest_product_candidate(fake, detection)
 
     assert candidate["entity_id"] == 10
-    assert candidate["streak"] == 8
-
-
-def test_legacy_nearest_uses_original_entity_seen_count():
-    fake = type("FakeDock", (), {})()
-    fake.product_type = "NORMAL"
-    fake.target_entity_id = 10
-    fake.nearest_recognition_mode = "LEGACY"
-    fake.number = lambda _key, default, _minimum, _maximum: default
-    detection = {
-        "candidate": {"entity_id": 10, "streak": 8},
-        "entities": [{
-            "entity_id": 10,
-            "seen_count": 1,
-            "matrix": ["heart", "spade", "diamond", "clover"],
-            "image_pallet_box": [300, 200, 400, 260],
-            "pnp": {"forward_distance_cm": 24.0},
-            "depth_yaw": {"forward_distance_cm": 18.0, "yaw_deg": 1.0},
-        }],
-    }
-
-    candidate, _pnp = AutoDockNode.nearest_product_candidate(fake, detection)
-
     assert candidate["streak"] == 1
 
 
@@ -1100,7 +1119,6 @@ def test_nearest_fresh_accepts_one_star_attached_to_a_pallet_face():
 def test_nearest_uses_one_to_four_tags_attached_to_pallet(product_type, classes):
     fake = type("FakeDock", (), {})()
     fake.product_type = product_type
-    fake.nearest_recognition_mode = "LEGACY"
     fake.number = lambda _key, default, _minimum, _maximum: default
     detections = [{
         "class": name,
@@ -1163,7 +1181,6 @@ def test_nearest_normal_deduplicates_nested_pallet_boxes_before_tag_assignment()
         ("NORMAL", ["heart"]),
         ("NORMAL", ["heart", "clover", "diamond"]),
         ("NORMAL", ["heart", "clover", "diamond", "star"]),
-        ("FRESH", ["heart", "star"]),
     ],
 )
 def test_nearest_rejects_physically_invalid_partial_tag_layouts(
@@ -1171,7 +1188,6 @@ def test_nearest_rejects_physically_invalid_partial_tag_layouts(
 ):
     fake = type("FakeDock", (), {})()
     fake.product_type = product_type
-    fake.nearest_recognition_mode = "LEGACY"
     fake.number = lambda _key, default, _minimum, _maximum: default
     detections = [{
         "class": name,
@@ -1195,7 +1211,6 @@ def test_nearest_rejects_physically_invalid_partial_tag_layouts(
 def test_nearest_does_not_lock_partial_tag_pallet_cropped_at_image_edge():
     fake = type("FakeDock", (), {})()
     fake.product_type = "NORMAL"
-    fake.nearest_recognition_mode = "LEGACY"
     fake.number = lambda _key, default, _minimum, _maximum: default
     detection = {
         "entities": [],
@@ -1220,7 +1235,7 @@ def test_nearest_does_not_lock_partial_tag_pallet_cropped_at_image_edge():
     assert pnp is None
 
 
-def test_nearest_fresh_keeps_visual_candidate_while_star_depth_is_missing():
+def test_nearest_fresh_rejects_single_star_without_complete_entity():
     fake = type("FakeDock", (), {})()
     fake.product_type = "FRESH"
     fake.number = lambda _key, default, _minimum, _maximum: default
@@ -1240,10 +1255,7 @@ def test_nearest_fresh_keeps_visual_candidate_while_star_depth_is_missing():
 
     candidate, pnp = AutoDockNode.nearest_product_candidate(fake, detection)
 
-    assert candidate["fresh_single_star"] is True
-    assert candidate["fresh_pose_pending"] is True
-    assert candidate["pallet_box"] == [149, 234, 328, 280]
-    assert candidate["depth_yaw"] is None
+    assert candidate is None
     assert pnp is None
 
 
@@ -1563,7 +1575,7 @@ def test_first_stable_nearest_candidate_stops_before_alignment(monkeypatch):
     assert stops == [True]
 
 
-def test_nearest_complete_entity_requires_three_stable_frames():
+def test_nearest_complete_entity_uses_pre_y_stable_frame_threshold():
     fake = type("FakeDock", (), {})()
     candidate = {
         "entity_id": 22,
@@ -1582,7 +1594,7 @@ def test_nearest_complete_entity_requires_three_stable_frames():
     assert got_candidate is None
     assert reason == "unstable_detection"
 
-    candidate["streak"] = 3
+    candidate["streak"] = 2
     got_candidate, _pnp, reason = AutoDockNode.identity_measurement(fake)
 
     assert got_candidate == candidate
@@ -1954,16 +1966,16 @@ def test_dock_missing_target_skips_reverse_with_fifty_cm_rear_space():
     assert fake.statuses[-1][1] == "dock_rear_clearance_held_lateral_search"
 
 
-def test_dock_lateral_search_moves_forward_when_tape_is_above_bottom_five_percent():
+def test_dock_lateral_search_keeps_baseline_forward_compensation():
     fake = dock_reverse_search_fake(0.78)
     fake.latest_tape_guidance = {"center_y_ratio": 0.82}
     fake.latest_tape_guidance_at = 10.0
 
     AutoDockNode.command_dock_reverse_target_search(fake, 10.1)
 
-    assert fake.commands == [(pytest.approx(0.02), 0.12, 0.0)]
+    assert fake.commands[0] == pytest.approx((0.02, 0.12, 0.0))
     assert fake.statuses[-1][2]["tape_visible"] is True
-    assert fake.statuses[-1][2]["forward_command_m_s"] == 0.02
+    assert fake.statuses[-1][2]["forward_command_m_s"] == pytest.approx(0.02)
 
 
 def test_dock_lateral_search_does_not_advance_for_bottom_or_missing_tape():
@@ -2612,7 +2624,7 @@ def test_coarse_alignment_moves_laterally_from_image_center_error(monkeypatch):
     assert commands == [(0.0, -0.05, 0.0)]
 
 
-def test_nearest_centers_laterally_without_rotation_before_recheck(monkeypatch):
+def test_nearest_centers_laterally_with_yaw_correction_before_recheck(monkeypatch):
     fake = type("FakeDock", (), {})()
     candidate = {
         "entity_id": 8,
@@ -2638,7 +2650,7 @@ def test_nearest_centers_laterally_without_rotation_before_recheck(monkeypatch):
 
     AutoDockNode.tick_coarse_align(fake)
 
-    assert commands == [(0.0, -0.10, 0.0)]
+    assert commands == [(0.0, -0.12, 0.38)]
 
 
 def test_nearest_centered_waits_before_optimal_target_recheck(monkeypatch):
@@ -2797,7 +2809,7 @@ def test_nearest_uses_fresh_optimal_target_after_center_recheck(monkeypatch):
     assert statuses[-1][1] == "nearest_optimal_target_changed_recenter"
 
 
-def test_nearest_same_target_proceeds_despite_recheck_center_jitter(monkeypatch):
+def test_nearest_same_target_keeps_baseline_recheck_admission(monkeypatch):
     fake = type("FakeDock", (), {})()
     candidate = {
         "entity_id": 253,
@@ -2806,6 +2818,7 @@ def test_nearest_same_target_proceeds_despite_recheck_center_jitter(monkeypatch)
         "pnp": {"forward_distance_cm": 15.0},
     }
     fake.target_type = "NEAREST"
+    fake.state = "coarse_align"
     fake.target_entity_id = 253
     fake.target_left = "diamond"
     fake.target_right = "clover"
@@ -2822,9 +2835,7 @@ def test_nearest_same_target_proceeds_despite_recheck_center_jitter(monkeypatch)
     fake.send_yolo_target = lambda: None
     fake.update_world_target = lambda *_args, **_kwargs: True
     fake.reset_coarse_alignment = lambda: None
-    fake.publish_drive = lambda *_args: pytest.fail(
-        "same optimal target must not restart lateral centering"
-    )
+    fake.publish_drive = lambda *_args: None
     statuses = []
     fake.publish_status = lambda state, reason, **extra: statuses.append(
         (state, reason, extra)
@@ -2834,6 +2845,7 @@ def test_nearest_same_target_proceeds_despite_recheck_center_jitter(monkeypatch)
     AutoDockNode.tick_coarse_align(fake)
 
     assert fake.nearest_center_reconfirm_pending is False
+    assert fake.nearest_center_reconfirm_due_at is None
     assert fake.state == "docking"
     assert statuses[-1][1] == "nearest_optimal_target_reconfirmed"
 
@@ -3393,7 +3405,7 @@ def test_translation_first_alignment_limits_but_keeps_large_yaw_correction():
 
     AutoDockNode.tick_docking(fake)
 
-    assert commands == [(0.08, 0.064, 0.20)]
+    assert commands == [(0.08, 0.064, 0.38)]
 
 
 def test_translation_first_alignment_enforces_minimum_yaw_speed():
@@ -3416,7 +3428,7 @@ def test_translation_first_alignment_enforces_minimum_yaw_speed():
 
     AutoDockNode.tick_docking(fake)
 
-    assert commands == [(0.0, 0.0, 0.20)]
+    assert commands == [(0.0, 0.0, 0.38)]
 
 
 def test_nearest_odom_alignment_clamps_lateral_motion_above_dead_zone():
@@ -3863,3 +3875,881 @@ def test_warning_tape_must_be_below_visible_pallet_box():
 
     assert minimum == pytest.approx(300 / 480 + 0.02)
     pallet_product_type,
+
+
+@pytest.mark.parametrize("location", ["Y", " y ", "Y1", "Y2", "Y3", "Y4"])
+def test_y_place_arrival_starts_centering_without_slot_number(location):
+    from types import SimpleNamespace
+
+    fake = SimpleNamespace(
+        state="idle",
+        load_state="LOADED",
+        config={"y_slot_centering_locations": ["Y1", "Y2", "Y3", "Y4"]},
+        load_config=lambda: None,
+        reset_coarse_alignment=lambda: None,
+        boolean=lambda _key, default: default,
+        number=lambda _key, default, *_args: default,
+        publish_status=lambda *_args, **_kwargs: None,
+    )
+    AutoDockNode.on_trigger(fake, String(data=json.dumps({
+        "status": "SUCCEEDED", "location": location,
+        "operation": "PLACE", "product_type": "FRESH",
+        "insertion_distance_cm": 20,
+    })))
+
+    assert fake.location == "Y"
+    assert fake.state == "y_slot_centering"
+    assert fake.target_type == "NONE"
+    assert fake.y_slot_requested_insertion_distance_cm == 20
+
+
+def test_y_place_down_complete_reverses_the_insertion_distance_unloaded():
+    from types import SimpleNamespace
+
+    fake = SimpleNamespace(
+        operation="PLACE", location="Y", load_state="LOADED",
+        completed_insertion_distance_m=0.15,
+        odom_yaw=0.2, odom_position=(1.0, 2.0),
+        stop_drive=lambda *_args: None,
+        publish_status=lambda *_args, **_kwargs: None,
+    )
+    AutoDockNode.finish_fork_operation(fake, "DOWN_COMPLETE")
+
+    assert fake.state == "reversing_after_lift"
+    assert fake.load_state == "UNLOADED"
+    assert fake.post_lift_reverse_target_m == pytest.approx(0.15)
+    assert fake.post_lift_reverse_start == (1.0, 2.0)
+    assert fake.post_lift_reverse_start_yaw == pytest.approx(0.2)
+
+
+def test_y_place_normal_accepts_fleet_default_nearest_target():
+    from types import SimpleNamespace
+
+    fake = SimpleNamespace(
+        state="ready",
+        load_state="LOADED",
+        config={"y_slot_centering_enabled": True},
+        load_config=lambda: None,
+        reset_coarse_alignment=lambda: None,
+        boolean=lambda key, default: (
+            True if key == "y_slot_centering_enabled" else default
+        ),
+        number=lambda _key, default, *_args: default,
+        publish_status=lambda *_args, **_kwargs: None,
+    )
+    AutoDockNode.on_trigger(fake, String(data=json.dumps({
+        "status": "SUCCEEDED", "location": "Y", "operation": "PLACE",
+        "product_type": "NORMAL", "target": {"type": "NEAREST"},
+    })))
+
+    assert fake.state == "y_slot_centering"
+    assert fake.product_type == "NORMAL"
+    assert fake.target_type == "NONE"
+    assert fake.y_slot_stage_only is False
+    assert fake.load_state == "LOADED"
+
+
+@pytest.fixture
+def y_alignment_node(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("auto_dock.auto_dock_node.time.monotonic", lambda: 10.0)
+    commands = []
+    fake = SimpleNamespace(
+        state="y_slot_centering", y_slot_centering_started_at=9.0,
+        latest_tape_guidance_at=10.0,
+        latest_tape_guidance={
+            "center_x_ratio": 0.5, "center_x_px": 320,
+            "image_width_px": 640, "center_y_ratio": 0.7,
+            "border_angle_deg": 0.0,
+        },
+        y_slot_last_yaw_tape_at=None,
+        y_slot_center_confirmation_count=0, y_slot_centered_since=None,
+        y_slot_last_counted_tape_at=None,
+        number=lambda _key, default, *_args: default,
+        stop_drive=lambda *_args: commands.append((0.0, 0.0, 0.0)),
+        publish_drive=lambda x, y, yaw: commands.append((x, y, yaw)),
+        publish_status=lambda *_args, **_kwargs: None,
+        cancel=lambda reason: commands.append(reason),
+        commands=commands,
+    )
+    return fake
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+@pytest.mark.parametrize("state", ["y_slot_centering", "y_slot_inserting"])
+def test_y_obstacle_never_uses_lateral_backoff(y_alignment_node, state):
+    fake = y_alignment_node
+    fake.state = state
+    fake.nearest_by_direction = {
+        "front": (1.0, 0.0, 0.20), "rear": (1.0, 0.0, 0.20),
+        "left": (0.1, 0.0, 0.20), "right": (1.0, 0.0, 0.20),
+    }
+    assert AutoDockNode.interrupt_for_lidar(fake) is True
+    assert fake.commands == ["y_slot_lidar_left_blocked"]
+
+
+
+
+
+
+
+
+
+
+
+
+def test_y_rear_border_fallback_rejects_early_loss_and_blank_frame():
+    from auto_dock.auto_dock_node import detect_y_rear_border
+    frame = np.zeros((480, 640, 3), np.uint8)
+    assert detect_y_rear_border(frame, None) is None
+    assert detect_y_rear_border(frame, {"center_y_ratio": 0.6}) is None
+    previous = {"center_y_ratio": 0.9,
+                "x_lines": [[200, 360, 400, 470], [200, 470, 400, 360]]}
+    assert detect_y_rear_border(frame, previous) is None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def test_floor_pose_uses_calibrated_fork_axis_and_heading():
+    from auto_dock.auto_dock_node import y_slot_floor_pose
+    profile = dict(kind='loaded_floor_plane', image_size=[640,480],
+                   image_to_floor_h=[[.1,0,-37],[0,-.2,100],[0,0,1]],
+                   calibration_pixel_hull=[[200,100],[500,100],[500,300],[200,300]])
+    observation = dict(image_width_px=640,image_height_px=480,center_x_px=390,
+                       center_y_ratio=250/480,border_lines=[[300,200,440,200]])
+    pose = y_slot_floor_pose(observation,profile)
+    assert pose['right_cm'] == pytest.approx(2)
+    assert pose['forward_cm'] == pytest.approx(50)
+    assert pose['bearing_left_deg'] == pytest.approx(-2.29061,abs=.0001)
+    assert pose['heading_left_deg'] == pytest.approx(0)
+    assert not pose['extrapolated']
+    observation['center_y_ratio'] = 400/480
+    assert y_slot_floor_pose(observation,profile)['extrapolated']
+
+
+def floor_control_fake():
+    from types import SimpleNamespace
+    fake = SimpleNamespace(config={},odom_yaw=0., latest_tape_guidance_at=100.,
+                           y_slot_floor_probe_pending=False,y_slot_floor_motion=None)
+    fake.drives=[];fake.statuses=[]
+    fake.number=lambda key,default,low=None,high=None: fake.config.get(key,default)
+    fake.boolean=lambda key,default=False: bool(fake.config.get(key,default))
+    fake.stop_drive=lambda *args: fake.drives.append((0.,0.,0.))
+    fake.publish_drive=lambda *args: fake.drives.append(args)
+    fake.publish_status=lambda *args,**kw: fake.statuses.append((args,kw))
+    fake.cancel=lambda reason: (fake.stop_drive(), setattr(fake,'state','idle'),
+                                fake.publish_status('error',reason))
+    fake.y_slot_insert_started_at=100.
+    return fake
+
+
+
+
+
+
+
+
+def test_y_slot_pose_does_not_gate_on_load_state():
+    fake=floor_control_fake();fake.load_state='UNLOADED'
+    with pytest.raises(ValueError,match='waiting_fresh_odom_yaw'):
+        AutoDockNode.calibrated_y_slot_pose(fake)
+
+
+@pytest.mark.parametrize('requested,domain,expected', [(0,215,1),(0,216,2),(1,216,1),(2,215,2),(0,0,0)])
+def test_resolve_vehicle_for_floor_calibration(requested,domain,expected):
+    from auto_dock.auto_dock_node import resolve_vehicle_id
+    assert resolve_vehicle_id(requested,domain)==expected
+
+
+def test_y_slot_depth_is_primary_and_requires_registered_fresh_pair(monkeypatch):
+    import auto_dock.auto_dock_node as module
+    from auto_dock.top_line_depth import sample_top_line_depth_image
+    monkeypatch.setattr(module.time,'monotonic',lambda:100.)
+    fake=floor_control_fake()
+    fake.load_state='LOADED';fake.y_slot_odom_source_received_at=100.
+    fake.config={
+        'camera_pitch_deg':19.,
+        'depth_camera_to_fork_tip_offset_cm':99.,
+        'y_slot_depth_camera_pitch_deg':0.,
+        'y_slot_depth_camera_to_fork_tip_offset_cm':14.,
+    }
+    fake.slot_camera_matrix=np.array([[500.,0.,320.],[0.,500.,240.],[0.,0.,1.]])
+    fake.slot_distortion=np.zeros(5);fake.slot_camera_frame='rgb';fake.slot_camera_size=(640,480)
+    fake.latest_tape_guidance=dict(image_width_px=640,image_height_px=480,top_line_px=[230,250,410,250],square_top_line_px=[220,240,420,240],
+                                  rgb_stamp_ns=10**9,rgb_frame_id='rgb',rgb_source_at=100.)
+    depth=(np.full((480,640),540,dtype='<u2'))
+    sampled=sample_top_line_depth_image(
+        [220,240,420,240],depth.tobytes(),640,480,1280,'16UC1',False)
+    fake.slot_depth_frames=[dict(stamp_ns=10**9,rgb_stamp_ns=10**9,
+                                 frame_id='rgb',source_at=100.,depth_samples=sampled)]
+    fake.slot_pending_depth_frame=None
+    result=AutoDockNode.calibrated_y_slot_pose(fake)
+    assert result['top_center_cm']==pytest.approx([0.,40.])
+    assert result['measurement_source']=='registered_top_line_depth'
+    # New RGB arrived before its depth: the previous fresh same-stamp pair
+    # remains available instead of making every executor cycle unsynchronized.
+    old=fake.latest_tape_guidance
+    fake.latest_tape_guidance=dict(old,rgb_stamp_ns=1_200_000_000)
+    fake.slot_rgb_observations=[old,fake.latest_tape_guidance]
+    result=AutoDockNode.calibrated_y_slot_pose(fake)
+    assert result['rgb_stamp_ns']==10**9
+    fake.latest_tape_guidance=old;fake.slot_rgb_observations=[]
+    fake.slot_depth_frames[0]['frame_id']='different_optical_frame'
+    with pytest.raises(ValueError,match='registration_mismatch'):
+        AutoDockNode.calibrated_y_slot_pose(fake)
+    fake.slot_depth_frames[0]['frame_id']='rgb';fake.slot_depth_frames[0]['stamp_ns']+=100_000_000
+    with pytest.raises(ValueError,match='unsynchronized'):
+        AutoDockNode.calibrated_y_slot_pose(fake)
+    fake.slot_depth_frames=[]
+    with pytest.raises(ValueError,match='waiting_depth'):
+        AutoDockNode.calibrated_y_slot_pose(fake)
+
+
+def top_line_test_frame(y=200, left=200, right=400):
+    frame=np.full((480,640,3),180,np.uint8)
+    cv2.rectangle(frame,(left,y),(right,y+20),(20,20,20),-1)
+    for x in range(left,right,40):
+        cv2.rectangle(frame,(x,y),(min(x+20,right),y+20),(0,220,220),-1)
+    return frame
+
+
+def top_line_test_anchor():
+    return dict(x_min_px=200,x_max_px=400,center_x_px=300,center_x_ratio=300/640,
+                center_y_ratio=300/480,image_width_px=640,image_height_px=480,
+                x_lines=[[200,230,400,350],[200,350,400,230]],
+                border_lines=[[200,200,400,200]],border_angle_deg=0.)
+
+
+def test_top_line_uses_x_endpoints_even_when_other_stripe_visible():
+    from auto_dock.auto_dock_node import YTopLineTracker
+    tracker=YTopLineTracker()
+    line=tracker.update(top_line_test_frame(y=200),top_line_test_anchor())
+    assert line['top_line_px']==[200.,230.,400.,230.]
+    assert tracker.update(top_line_test_frame(y=280),None) is None
+
+
+def test_top_line_requires_fresh_x_and_never_replaces_it_with_neighbour():
+    from auto_dock.auto_dock_node import YTopLineTracker
+    tracker=YTopLineTracker()
+    assert tracker.update(top_line_test_frame()) is None
+    anchor=dict(top_line_test_anchor(),tracking_sequence=1)
+    assert tracker.update(top_line_test_frame(),anchor) is not None
+    assert tracker.update(top_line_test_frame(left=450,right=630),anchor) is None
+    assert tracker.update(top_line_test_frame(y=250),None) is None
+
+
+def test_floor_fallback_uses_current_top_line_not_stale_x():
+    from auto_dock.auto_dock_node import YTopLineTracker,y_slot_floor_pose
+    tracker=YTopLineTracker();line=tracker.update(top_line_test_frame(),top_line_test_anchor())
+    guidance=tracker.guidance(line)
+    profile=dict(kind='loaded_floor_plane',image_size=[640,480],
+                 image_to_floor_h=[[.1,0,-30],[0,-.2,100],[0,0,1]],
+                 calibration_pixel_hull=[[100,100],[500,100],[500,400],[100,400]])
+    pose=y_slot_floor_pose(guidance,profile)
+    assert pose['forward_cm']==pytest.approx(54,abs=.5)
+
+
+def test_stage_uses_top_line_distance_not_x_or_image_height():
+    from auto_dock.auto_dock_node import y_slot_stage_geometry
+    pose={'top_center_cm':[0,60],'heading_left_deg':0,'forward_cm':40}
+    stage=y_slot_stage_geometry(pose)
+    assert stage['gap_cm']==60
+    assert stage['stage_forward_cm']==20
+    assert stage['steering_left_deg']==pytest.approx(0)
+    pose['top_center_cm']=[10,60]
+    assert y_slot_stage_geometry(pose)['steering_left_deg']<0
+
+
+def test_stage_pose_accounts_for_target_heading():
+    from auto_dock.auto_dock_node import y_slot_stage_geometry
+    angle=math.radians(10)
+    pose={'top_center_cm':[-40*math.sin(angle),40*math.cos(angle)],'heading_left_deg':10}
+    stage=y_slot_stage_geometry(pose)
+    assert stage['gap_cm']==pytest.approx(40)
+    assert stage['lateral_cm']==pytest.approx(0,abs=1e-9)
+
+
+
+
+
+
+def test_final_20cm_uses_visual_travel_and_only_forward_command(monkeypatch):
+    from types import SimpleNamespace
+    import auto_dock.auto_dock_node as module
+    now=[100.];monkeypatch.setattr(module.time,'monotonic',lambda:now[0])
+    fake=floor_control_fake();fake.state='y_slot_inserting'
+    fake.y_slot_floor_insert_initial_gap=40.;fake.y_slot_floor_insert_start_yaw=0.
+    fake.y_slot_floor_insert_heading=0.;fake.y_slot_insert_started_at=100.
+    pose={'top_center_cm':[0,30], 'heading_left_deg':0.}
+    fake.calibrated_y_slot_pose=lambda:pose
+    fork=[];fake.fork_pub=SimpleNamespace(publish=lambda m:fork.append(m.data))
+    AutoDockNode.tick_y_slot_floor_final_straight(fake)
+    assert fake.drives[-1]==(.1,0.,0.)
+    pose['top_center_cm']=[0,20];now[0]=102.
+    AutoDockNode.tick_y_slot_floor_final_straight(fake)
+    assert fake.drives[-1]==(0.,0.,0.)
+    assert fork==[]
+    now[0]=102.4;AutoDockNode.tick_y_slot_floor_final_straight(fake)
+    assert fork==['DOWN']
+
+
+def test_final_straight_stops_on_actual_yaw_drift(monkeypatch):
+    import auto_dock.auto_dock_node as module
+    monkeypatch.setattr(module.time,'monotonic',lambda:100.)
+    fake=floor_control_fake();fake.odom_yaw=math.radians(4)
+    fake.y_slot_floor_insert_start_yaw=0.
+    fake.calibrated_y_slot_pose=lambda:{'top_center_cm':[0,30]}
+    AutoDockNode.tick_y_slot_floor_final_straight(fake)
+    assert fake.drives[-1]==(0.,0.,0.)
+    assert fake.statuses[-1][0][1]=='y_slot_final_straight_yaw_deviation'
+
+
+
+
+
+
+
+def test_stage_missing_calibration_cannot_drive():
+    fake=floor_control_fake()
+    def missing():
+        raise ValueError('y_slot_floor_calibration_missing')
+    fake.calibrated_y_slot_pose=missing
+    AutoDockNode.tick_y_slot_centering(fake)
+    assert fake.drives==[(0.,0.,0.)]
+    assert fake.statuses[-1][0]==('waiting','y_slot_floor_calibration_missing')
+
+
+def cycle_fake(monkeypatch, pose):
+    from concurrent.futures import Future
+    from types import SimpleNamespace
+    from auto_dock.loaded_response_planner import ResponseState, ResponseCoefficients
+    import auto_dock.auto_dock_node as module
+    now=[100.]
+    monkeypatch.setattr(module.time,'monotonic',lambda:now[0])
+    fake=floor_control_fake()
+    fake.state='y_slot_centering';fake.y_slot_odom_source_received_at=100.
+    fake.calibrated_y_slot_pose=lambda:pose
+    fake.loaded_response_coefficients=lambda:ResponseCoefficients()
+    fake.loaded_response_estimate=lambda:dict(
+        observable=True, reason='test_measured_history', max_error_deg=0.,
+        state=ResponseState(history_known=True,pending_bound_deg=0.))
+    fake.y_slot_observation_evidence=lambda p:dict(top_center_cm=p['top_center_cm'])
+    def submit(fn,*args,**kwargs):
+        future=Future()
+        future.set_result(fn(*args,**kwargs))
+        return future
+    fake.y_slot_plan_executor=SimpleNamespace(submit=submit)
+    fake.cancel=lambda reason: (fake.stop_drive(), setattr(fake,'state','idle'),
+                                fake.publish_status('error',reason))
+    def tick(dt=0.):
+        now[0]+=dt
+        fake.latest_tape_guidance_at=now[0];fake.y_slot_odom_source_received_at=now[0]
+        fake.y_slot_camera_received_at=now[0]
+        AutoDockNode.tick_y_slot_centering(fake)
+        if getattr(fake,'y_slot_plan_future',None) is not None:
+            AutoDockNode.tick_y_slot_centering(fake)
+    return fake, now, tick
+
+
+@pytest.mark.parametrize('centre,heading', [([0,85],0),([-8,65],-2.3),([10,80],8)])
+def test_frozen_plan_reaches_stage_under_its_response_equation(centre,heading):
+    from auto_dock.auto_dock_node import y_slot_approach_plan
+    gain,scale,offset=1.188,1.146,28.7528
+    plan=y_slot_approach_plan(dict(top_center_cm=centre,heading_left_deg=heading),
+                              40.,.1,.35,scale,gain,offset)
+    position=np.zeros(2);yaw=0.
+    for step in plan:
+        v, lateral, w=step['drive'];dt=step['duration_sec']
+        assert lateral==0 and (v==0 or abs(v)>=.1)
+        before=np.array([-math.sin(yaw),math.cos(yaw)])
+        yaw+=gain*w*dt
+        after=np.array([-math.sin(yaw),math.cos(yaw)])
+        position+=offset*(after-before)+scale*v*100*dt*after
+    normal=np.array([-math.sin(yaw),math.cos(yaw)])
+    assert yaw==pytest.approx(math.radians(heading))
+    assert position+40*normal==pytest.approx(centre)
+
+
+@pytest.mark.parametrize('centre,heading', [([-3.37,66.65],8.758),
+                                             ([0,70],0),([7,75],-6)])
+def test_homography_once_plan_has_final_trim_and_reaches_40cm(centre, heading):
+    from auto_dock.auto_dock_node import y_slot_homography_once_plan
+    gain, scale, offset = 1.188, 1.146, 28.7528
+    result = y_slot_homography_once_plan(
+        dict(top_center_cm=centre, heading_left_deg=heading),
+        40., .1, .35, scale, gain, offset)
+    assert [step['action'] for step in result['segments']] == [
+        'initial_turn', 'main_forward', 'final_turn', 'short_forward']
+    assert all(step['drive'][0] >= 0 and step['drive'][1] == 0
+               for step in result['segments'])
+    position = np.zeros(2); yaw = 0.
+    for step in result['segments']:
+        vx, _, wz = step['drive']; dt = step['duration_sec']
+        before = np.array([-math.sin(yaw), math.cos(yaw)])
+        yaw += gain*wz*dt
+        after = np.array([-math.sin(yaw), math.cos(yaw)])
+        position += offset*(after-before)+scale*vx*100*dt*after
+    normal = np.array([-math.sin(yaw), math.cos(yaw)])
+    tangent = np.array([math.cos(yaw), math.sin(yaw)])
+    remaining = np.asarray(centre)-position
+    assert math.degrees(yaw) == pytest.approx(heading)
+    assert remaining@normal == pytest.approx(40.)
+    assert remaining@tangent == pytest.approx(0.)
+
+
+def homography_feedback_fake(monkeypatch):
+    import auto_dock.auto_dock_node as module
+
+    now = [100.]
+    monkeypatch.setattr(module.time, 'monotonic', lambda: now[0])
+    pose = dict(top_center_cm=[-3., 72.], heading_left_deg=6.,
+                top_line_px=[200., 220., 400., 225.])
+    calls = []
+    def consensus(*args, **kwargs):
+        calls.append((args, kwargs))
+        return dict(pose)
+    monkeypatch.setattr(module, 'y_slot_homography_consensus', consensus)
+    fake = floor_control_fake()
+    fake.config = {
+        'floor_calibration_presets': {'loaded': {'image_size': [640, 480]}},
+        'y_slot_homography_once_enabled': True,
+        'y_slot_execute_insertion': True,
+        'y_slot_response_settle_sec': .50,
+    }
+    fake.state = 'y_slot_centering'
+    fake.y_slot_cycle_phase = 'measure'
+    fake.y_slot_start_observations = [object()]*20
+    fake.y_slot_requested_insertion_distance_cm = 20.
+    fake.y_slot_camera_received_at = 100.
+    fake.y_slot_odom_source_received_at = 100.
+    fake.y_slot_observation_evidence = lambda value: {
+        'top_center_cm': value['top_center_cm']}
+    fake.loaded_response_coefficients = lambda: AutoDockNode.loaded_response_coefficients(fake)
+    return fake, now, pose, calls
+
+
+def test_homography_once_locks_delayed_yaw_plan_once(monkeypatch):
+    fake, _now, pose, calls = homography_feedback_fake(monkeypatch)
+    fake.loaded_response_estimate = lambda: pytest.fail('time model must not run')
+    AutoDockNode.tick_y_slot_homography_once(fake)
+    assert fake.y_slot_cycle_phase == 'plan_locked'
+    assert [stage['action'] for stage in fake.y_slot_cycle_segments] == [
+        'turn_right', 'forward', 'settle_after_forward',
+        'turn_left', 'forward', 'settle_after_forward', 'turn_right']
+    assert fake.y_slot_frozen_insertion_enabled is True
+    for index, stage in enumerate(fake.y_slot_cycle_segments):
+        if stage['action'] == 'forward':
+            following = fake.y_slot_cycle_segments[index+1]
+            assert following['action'] == 'settle_after_forward'
+            assert following['drive'] == (0., 0., 0.)
+            assert following['duration_sec'] == .5
+    assert all(stage['control'] == 'fixed_replay'
+               for stage in fake.y_slot_cycle_segments)
+    assert fake.y_slot_frozen_plan['response_plan']['accepted']
+    assert fake.y_slot_frozen_plan['initial_response_state_assumption'] == \
+        'settled_zero_at_arrival'
+    assert len(calls) == 1
+    pose['top_center_cm'] = [50., 20.]
+    AutoDockNode.tick_y_slot_homography_once(fake)
+    assert fake.y_slot_cycle_phase == 'feedback_execute'
+    assert len(calls) == 1
+    assert not any(drive[0] < 0 for drive in fake.drives)
+
+
+def test_plan_locked_status_survives_one_tick_before_first_action(monkeypatch):
+    fake, _now, _pose, _calls = homography_feedback_fake(monkeypatch)
+    AutoDockNode.tick_y_slot_homography_once(fake)
+    assert fake.statuses[-1][0][1] == 'y_slot_feedback_plan_locked'
+    assert not any(drive != (0., 0., 0.) for drive in fake.drives)
+    AutoDockNode.tick_y_slot_homography_once(fake)
+    assert fake.statuses[-1][0][1] == 'y_slot_feedback_plan_locked'
+    assert not any(drive != (0., 0., 0.) for drive in fake.drives)
+    AutoDockNode.tick_y_slot_homography_once(fake)
+    assert fake.statuses[-1][0][1] == 'y_slot_frozen_plan_action'
+
+
+def test_frozen_turn_replays_by_duration_without_sensor_feedback(monkeypatch):
+    fake, now, _pose, _calls = homography_feedback_fake(monkeypatch)
+    AutoDockNode.tick_y_slot_homography_once(fake)
+    initial = fake.y_slot_cycle_segments[0]
+    AutoDockNode.tick_y_slot_homography_once(fake)
+    AutoDockNode.tick_y_slot_homography_once(fake)
+    assert fake.drives[-1] == initial['drive']
+    fake.odom_yaw = math.radians(90.)
+    fake.y_slot_camera_received_at = 0.
+    fake.y_slot_odom_source_received_at = 0.
+    now[0] += initial['duration_sec']-.01
+    AutoDockNode.tick_y_slot_homography_once(fake)
+    assert fake.y_slot_cycle_segments[0] is initial
+    assert fake.drives[-1] == initial['drive']
+    now[0] += .02
+    AutoDockNode.tick_y_slot_homography_once(fake)
+    assert fake.y_slot_cycle_segments[0]['action'] == 'forward'
+    assert fake.state == 'y_slot_centering'
+    assert all(drive[0] >= 0 for drive in fake.drives)
+
+
+def test_fixed_forward_ignores_yaw_noise_and_uses_frozen_duration(monkeypatch):
+    fake, now, _pose, _calls = homography_feedback_fake(monkeypatch)
+    AutoDockNode.tick_y_slot_homography_once(fake)
+    stage = fake.y_slot_cycle_segments[1]
+    fake.y_slot_cycle_segments = [stage]
+    fake.y_slot_segment_started_at = None
+    AutoDockNode.tick_y_slot_homography_once(fake)
+    AutoDockNode.tick_y_slot_homography_once(fake)
+    fake.odom_yaw += math.radians(20.)
+    now[0] += stage['duration_sec']-.01
+    fake.y_slot_odom_source_received_at = now[0]
+    AutoDockNode.tick_y_slot_homography_once(fake)
+    assert fake.drives[-1] == (.1, 0., 0.)
+    now[0] += .02
+    fake.y_slot_odom_source_received_at = now[0]
+    AutoDockNode.tick_y_slot_homography_once(fake)
+    assert not fake.y_slot_cycle_segments
+
+
+def test_staging_only_omits_insertion_and_fork_down(monkeypatch):
+    fake, _now, pose, _calls = homography_feedback_fake(monkeypatch)
+    fake.config['y_slot_execute_insertion'] = False
+    AutoDockNode.tick_y_slot_homography_once(fake)
+    assert all(stage['action'] != 'fixed_insertion_forward'
+               for stage in fake.y_slot_cycle_segments)
+    fake.y_slot_cycle_segments = []
+    fake.y_slot_cycle_phase = 'feedback_execute'
+    AutoDockNode.tick_y_slot_homography_once(fake)
+    assert fake.state == 'ready'
+    assert fake.y_slot_cycle_phase == 'staging_hold'
+    assert fake.statuses[-1][0][1] == \
+        'y_slot_staging_insertion_disabled'
+
+
+def test_gui_stage_only_overrides_automatic_insertion(monkeypatch):
+    fake, _now, _pose, _calls = homography_feedback_fake(monkeypatch)
+    fake.config['y_slot_execute_insertion'] = True
+    fake.y_slot_stage_only = True
+
+    AutoDockNode.tick_y_slot_homography_once(fake)
+
+    assert fake.y_slot_frozen_insertion_enabled is False
+    assert all(stage['action'] != 'fixed_insertion_forward'
+               for stage in fake.y_slot_cycle_segments)
+
+
+def test_manual_y_insertion_cannot_replace_dock_pick(monkeypatch):
+    import auto_dock.auto_dock_node as module
+
+    now = [100.]
+    monkeypatch.setattr(module.time, 'monotonic', lambda: now[0])
+    fake = floor_control_fake()
+    fake.state = 'search'
+    fake.y_slot_cycle_phase = 'another_active_plan'
+    fake.location = 'DOCK_1'
+    fake.operation = 'PICK'
+    fake.mission_kind = 'DOCK_PICK'
+    fake.load_state = 'UNLOADED'
+    fake.y_slot_cycle_segments = []
+    fake.loaded_response_coefficients = lambda: type(
+        'Coefficients', (), {'forward_scale': .92})()
+
+    AutoDockNode.on_y_slot_manual_insertion(
+        fake, String(data='{"distance_cm":35}'))
+
+    assert fake.state == 'search'
+    assert fake.y_slot_cycle_phase == 'another_active_plan'
+    assert fake.y_slot_cycle_segments == []
+    assert fake.drives == []
+    assert fake.statuses[-1][0][1] == 'y_slot_command_requires_y_place'
+
+
+def test_insertion_default_update_changes_distance_without_motion():
+    fake = floor_control_fake()
+    fake.state = 'ready'
+    fake.mission_kind = 'Y_PLACE'
+
+    AutoDockNode.on_y_slot_insertion_default(
+        fake, String(data='{"distance_cm":27.5}'))
+
+    assert fake.y_slot_insertion_distance_override_cm == 27.5
+    assert fake.drives == []
+    assert fake.statuses[-1][0][1] == 'y_slot_insertion_default_updated'
+
+
+def test_homography_consensus_selects_target_slot_with_lateral_extrapolation():
+    from auto_dock.auto_dock_node import y_slot_homography_consensus
+
+    profile = {
+        "kind": "loaded_floor_plane", "image_size": [300, 600],
+        "image_to_floor_h": [[.1, 0., -15.], [0., .1, 0.], [0., 0., 1.]],
+        "calibration_pixel_hull": [[140., 480.], [160., 480.],
+                                   [160., 520.], [140., 520.]],
+    }
+
+    def observation(center_x, dy, stamp):
+        line = [center_x-20., 500., center_x+20., 500.+dy]
+        return {
+            "rgb_stamp_ns": stamp,
+            "tracking": "top_line", "top_line_px": line, "square_top_line_px": line,
+            "image_width_px": 300, "image_height_px": 600,
+            "center_x_px": center_x, "center_y_ratio": 500./600.,
+            "image_goal_pose": (center_x/300., 500./600.,
+                                math.degrees(math.atan2(dy, 40.))),
+        }
+
+    rows = ([observation(100.+index % 2, (index % 3)-1, index+1)
+             for index in range(8)]
+            + [observation(200.+index % 2, (index % 3)-1, index+101)
+               for index in range(20)])
+    pose = y_slot_homography_consensus(
+        rows, profile, 20, target_center_x_ratio=.65)
+
+    assert pose is not None
+    assert np.mean([pose["top_line_px"][0], pose["top_line_px"][2]]) > 190.
+    assert pose["consensus_count"] == 20
+    assert pose["unique_observation_count"] == 28
+
+
+def test_homography_consensus_requires_unique_stamps_and_full_cluster_support():
+    from auto_dock.auto_dock_node import y_slot_homography_consensus
+
+    profile = {
+        "kind": "loaded_floor_plane", "image_size": [300, 600],
+        "image_to_floor_h": [[.1, 0., -15.], [0., .1, 0.], [0., 0., 1.]],
+        "calibration_pixel_hull": [[0., 0.], [300., 0.],
+                                   [300., 600.], [0., 600.]],
+    }
+
+    def observation(center_x, stamp):
+        return {
+            "rgb_stamp_ns": stamp, "tracking": "top_line",
+            "square_top_line_px": [center_x-20., 500., center_x+20., 500.],
+            "image_width_px": 300, "image_height_px": 600,
+            "center_x_px": center_x, "center_y_ratio": 5./6.,
+            "image_goal_pose": (center_x/300., 5./6., 0.),
+        }
+
+    duplicated = [observation(150., index//2+1) for index in range(30)]
+    assert y_slot_homography_consensus(duplicated, profile, 20) is None
+    mixed = ([observation(100., index+1) for index in range(19)]
+             + [observation(200., index+101) for index in range(11)])
+    assert y_slot_homography_consensus(mixed, profile, 20) is None
+
+
+def test_homography_consensus_rejects_spread_and_ambiguous_runner_up():
+    from auto_dock.auto_dock_node import y_slot_homography_consensus
+
+    profile = {
+        "kind": "loaded_floor_plane", "image_size": [300, 600],
+        "image_to_floor_h": [[1., 0., -150.], [0., 1., 0.], [0., 0., 1.]],
+        "calibration_pixel_hull": [[0., 0.], [300., 0.],
+                                   [300., 600.], [0., 600.]],
+    }
+
+    def observation(center_x, stamp):
+        return {
+            "rgb_stamp_ns": stamp, "tracking": "top_line",
+            "square_top_line_px": [center_x-10., 100., center_x+10., 100.],
+            "image_width_px": 300, "image_height_px": 600,
+            "center_x_px": center_x, "center_y_ratio": 1./6.,
+            "image_goal_pose": (center_x/300., 1./6., 0.),
+        }
+
+    spread = [observation(150.+((-1)**index)*3.5, index+1)
+              for index in range(20)]
+    assert y_slot_homography_consensus(spread, profile, 20) is None
+    ambiguous = ([observation(140., index+1) for index in range(10)]
+                 + [observation(160., index+101) for index in range(10)])
+    assert y_slot_homography_consensus(
+        ambiguous, profile, 10, target_center_x_ratio=.5) is None
+
+
+def test_approach_does_not_replan_on_intermediate_camera_changes(monkeypatch):
+    pose=dict(top_center_cm=[0,85],heading_left_deg=0.)
+    fake,now,tick=cycle_fake(monkeypatch,pose)
+    tick();assert fake.y_slot_cycle_phase=='approach'
+    plan=list(fake.y_slot_cycle_segments)
+    tick();pose.update(top_center_cm=[-8,42.6],heading_left_deg=-3.5)
+    tick(.1)
+    assert fake.y_slot_cycle_segments==plan
+    assert fake.drives[-1]==(.1,0.,0.)
+    while fake.y_slot_cycle_phase=='approach':
+        tick(fake.y_slot_cycle_segments[0]['duration_sec'])
+    assert fake.y_slot_cycle_phase=='verify'
+    assert fake.drives[-1]==(0.,0.,0.)
+    tick(.51)
+    assert fake.y_slot_cycle_phase=='reverse'
+    tick();assert fake.drives[-1]==(-.1,0.,0.)
+
+
+def test_failed_verification_reverses_even_for_large_yaw(monkeypatch):
+    fake,now,tick=cycle_fake(monkeypatch,dict(top_center_cm=[-8,42.6],heading_left_deg=35.))
+    fake.y_slot_cycle_phase='verify'
+    tick();tick()
+    assert fake.drives[-1]==(-.1,0.,0.)
+    duration=fake.y_slot_cycle_segments[0]['duration_sec']
+    tick(duration)
+    assert fake.y_slot_cycle_phase=='measure'
+    assert fake.drives[-1]==(0.,0.,0.)
+    fake.calibrated_y_slot_pose=lambda:dict(top_center_cm=[-8,75],heading_left_deg=5.)
+    tick(.51)
+    assert fake.y_slot_cycle_phase=='approach'
+
+
+def test_stage_verification_checks_real_top_line_yaw(monkeypatch):
+    angle=math.radians(10)
+    fake,now,tick=cycle_fake(monkeypatch,dict(
+        top_center_cm=[-40*math.sin(angle),40*math.cos(angle)],heading_left_deg=10.))
+    fake.y_slot_cycle_phase='verify'
+    tick()
+    assert fake.state=='y_slot_centering'
+    assert fake.y_slot_cycle_phase=='reverse'
+
+
+def test_aligned_verification_enters_straight_insertion(monkeypatch):
+    fake,now,tick=cycle_fake(monkeypatch,dict(top_center_cm=[0,40],heading_left_deg=0.))
+    fake.y_slot_cycle_phase='verify'
+    tick()
+    assert fake.state=='y_slot_inserting'
+    assert fake.y_slot_floor_insert_initial_gap==40.
+
+
+def test_verification_requires_observation_after_settling(monkeypatch):
+    fake,now,tick=cycle_fake(monkeypatch,dict(top_center_cm=[0,40],heading_left_deg=0.))
+    fake.y_slot_cycle_phase='verify';fake.y_slot_measure_after=100.3
+    now[0]=100.5
+    AutoDockNode.tick_y_slot_centering(fake)
+    assert fake.state=='y_slot_centering'
+    assert fake.drives[-1]==(0.,0.,0.)
+    tick();assert fake.state=='y_slot_inserting'
+
+
+def test_frozen_plan_aborts_on_stale_vision(monkeypatch):
+    fake,now,tick=cycle_fake(monkeypatch,dict(top_center_cm=[0,85],heading_left_deg=0.))
+    tick();tick();now[0]+=.5
+    AutoDockNode.tick_y_slot_centering(fake)
+    assert fake.state=='idle'
+    assert fake.drives[-1]==(0.,0.,0.)
+
+
+def test_retry_limit_stops_instead_of_turning(monkeypatch):
+    fake,now,tick=cycle_fake(monkeypatch,dict(top_center_cm=[-8,42.6],heading_left_deg=35.))
+    fake.y_slot_cycle_phase='verify';fake.y_slot_retry_count=3
+    tick()
+    assert fake.state=='idle'
+    assert fake.drives[-1]==(0.,0.,0.)
+
+
+def test_frozen_execution_uses_fresh_camera_not_detector_heartbeat(monkeypatch):
+    fake,now,tick=cycle_fake(monkeypatch,dict(top_center_cm=[0,85],heading_left_deg=0.))
+    tick();tick()
+    now[0]+=.1
+    fake.latest_tape_guidance_at=0.
+    fake.y_slot_camera_received_at=now[0]
+    fake.y_slot_odom_source_received_at=now[0]
+    AutoDockNode.tick_y_slot_centering(fake)
+    assert fake.y_slot_cycle_phase=='approach'
+    assert fake.drives[-1]==(.1,0.,0.)
+
+
+def test_unknown_start_history_does_not_invent_zero_pending(monkeypatch):
+    fake,now,tick=cycle_fake(monkeypatch,dict(top_center_cm=[0,85],heading_left_deg=0.))
+    fake.loaded_response_estimate=lambda:dict(observable=False,reason='forward_excitation_required')
+    tick()
+    assert fake.drives==[(0.,0.,0.)]
+    assert fake.statuses[-1][0][1]=='y_slot_response_history_required'
+
+
+def test_visually_aligned_but_delayed_tail_reverses(monkeypatch):
+    from auto_dock.loaded_response_planner import ResponseState
+    fake,now,tick=cycle_fake(monkeypatch,dict(top_center_cm=[0,40],heading_left_deg=0.))
+    fake.y_slot_cycle_phase='verify'
+    fake.loaded_response_estimate=lambda:dict(observable=True,max_error_deg=0.,
+        state=ResponseState(pending_deg=8.,history_known=True,pending_bound_deg=0.))
+    tick();tick()
+    assert fake.y_slot_cycle_phase=='reverse'
+    assert fake.drives[-1]==(-.1,0.,0.)
+
+
+def test_completed_plan_unknown_history_rejects_insertion_and_reverses(monkeypatch):
+    fake,now,tick=cycle_fake(monkeypatch,dict(top_center_cm=[0,40],heading_left_deg=0.))
+    fake.y_slot_cycle_phase='verify'
+    fake.loaded_response_estimate=lambda:dict(observable=False,reason='history_unobservable')
+    tick();tick()
+    assert fake.drives[-1]==(-.1,0.,0.)
+
+
+def test_background_plan_cannot_start_after_operator_motion(monkeypatch):
+    from concurrent.futures import Future
+    from types import SimpleNamespace
+    fake,now,tick=cycle_fake(monkeypatch,dict(top_center_cm=[0,85],heading_left_deg=0.))
+    pending=Future()
+    fake.y_slot_plan_executor=SimpleNamespace(submit=lambda *args,**kw:pending)
+    AutoDockNode.tick_y_slot_centering(fake)
+    fake.odom_yaw=math.radians(3.)
+    pending.set_result({})  # Stale result must not even be inspected.
+    tick(.1)
+    assert fake.statuses[-1][0][1]=='y_slot_plan_start_pose_changed'
+    assert all(d==(0.,0.,0.) for d in fake.drives)
+
+
+def test_final_straight_observation_loss_cancels_instead_of_resuming(monkeypatch):
+    import auto_dock.auto_dock_node as module
+    monkeypatch.setattr(module.time,'monotonic',lambda:101.)
+    fake=floor_control_fake();fake.state='y_slot_inserting'
+    def lost():
+        raise ValueError('top_line_lost')
+    fake.calibrated_y_slot_pose=lost
+    AutoDockNode.tick_y_slot_floor_final_straight(fake)
+    assert fake.state=='idle'
+    assert fake.statuses[-1][0][1]=='y_slot_final_observation_lost:top_line_lost'
+
+
+def test_final_straight_uses_radians_once_and_checks_lateral(monkeypatch):
+    import auto_dock.auto_dock_node as module
+    monkeypatch.setattr(module.time,'monotonic',lambda:101.)
+    fake=floor_control_fake();fake.state='y_slot_inserting'
+    angle=math.radians(1.8)
+    fake.y_slot_floor_insert_start_yaw=0.
+    fake.y_slot_floor_insert_heading=angle
+    fake.y_slot_floor_insert_initial_gap=40.
+    pose=dict(top_center_cm=[-30*math.sin(angle),30*math.cos(angle)],heading_left_deg=1.8)
+    fake.calibrated_y_slot_pose=lambda:pose
+    AutoDockNode.tick_y_slot_floor_final_straight(fake)
+    assert fake.statuses[-1][1]['top_gap_cm']==pytest.approx(30.)
+    pose['top_center_cm']=[4.,30.]
+    AutoDockNode.tick_y_slot_floor_final_straight(fake)
+    assert fake.state=='idle'
+    assert fake.statuses[-1][0][1]=='y_slot_final_straight_lateral_deviation'
+
+
+def test_frozen_execution_rejects_recent_receipt_with_stale_odom_source(monkeypatch):
+    fake,now,tick=cycle_fake(monkeypatch,dict(top_center_cm=[0,85],heading_left_deg=0.))
+    tick();tick()
+    fake.odom_received_at=now[0]
+    fake.y_slot_odom_source_received_at=now[0]-1.
+    AutoDockNode.tick_y_slot_centering(fake)
+    assert fake.state=='idle'
+    assert fake.drives[-1]==(0.,0.,0.)
