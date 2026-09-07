@@ -7,11 +7,12 @@ import subprocess
 import sys
 import threading
 import time
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from urllib.error import HTTPError
 from urllib.request import Request
 from urllib.request import urlopen
 import unittest
+from unittest.mock import patch
 import uuid
 
 
@@ -117,6 +118,19 @@ class RecordingStatusReporter:
         self.reports.append(payload)
 
 
+class RecordingPallet3Supervisor:
+    def __init__(self):
+        self.starts = []
+        self.stop_calls = 0
+
+    def start(self, operation_id, robot_id, pick_mode, fleet_manager_url):
+        self.starts.append((operation_id, robot_id, pick_mode, fleet_manager_url))
+        return 1234
+
+    def stop(self):
+        self.stop_calls += 1
+
+
 class FleetStatusReporterTest(unittest.TestCase):
     def test_posts_state_payload_to_bridge_for_configured_robot(self):
         module = load_server_module()
@@ -219,6 +233,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         self.initial_pose_publisher = RecordingInitialPose()
         self.auto_dock = RecordingAutoDock()
         self.status_reporter = RecordingStatusReporter()
+        self.pallet3_supervisor = RecordingPallet3Supervisor()
         self.service = self.module.VehicleCommandService(
             velocity=self.velocity,
             navigation=self.navigation,
@@ -231,6 +246,7 @@ class VehicleCommandApiServerTest(unittest.TestCase):
             vehicle_status=self.vehicle_status,
             status_reporter=self.status_reporter,
         )
+        self.service._pallet3_supervisor = self.pallet3_supervisor
         self.server = self.module.create_http_server('127.0.0.1', 0, self.service)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -248,6 +264,95 @@ class VehicleCommandApiServerTest(unittest.TestCase):
     def get_json(self, path):
         with urlopen(f'{self.base_url}{path}', timeout=2) as response:
             return response.status, json.load(response)
+
+    def test_manual_pallet3_pick_requires_fork_up_and_place_clears_operation_before_return(self):
+        idle_status, _idle = self.mark_idle()
+        self.assertEqual(idle_status, 200)
+        start_status, started = post_json(
+            f'{self.base_url}/v1/missions/pallet3',
+            {
+                'operation_id': INVENTORY_OPERATION_ID,
+                'robot_id': 'robot_2',
+                'pick_mode': 'manual',
+                'fleet_manager_url': 'http://fleet.example:8090',
+            },
+        )
+        self.assertEqual(start_status, 202)
+        self.assertEqual(started['state'], 'STARTING')
+        self.assertEqual(self.service.operation_status()['operation_id'], INVENTORY_OPERATION_ID)
+        self.assertEqual(self.service.operation_status()['detail'], 'PALLET3_MISSION_STARTED')
+        self.assertEqual(
+            self.pallet3_supervisor.starts,
+            [(INVENTORY_OPERATION_ID, 'robot_2', 'manual', 'http://fleet.example:8090')],
+        )
+
+        self.assertEqual(
+            post_json(f'{self.base_url}/v1/missions/pallet3/{INVENTORY_OPERATION_ID}/picked', {})[0],
+            409,
+        )
+        post_json(f'{self.base_url}/v1/fork/up', {'operation_id': INVENTORY_OPERATION_ID})
+        self.service.on_fork_state('{"state":"UP_COMPLETE","error":""}')
+        self.assertEqual(self.service.operation_status()['detail'], 'FORK_UP_COMPLETE')
+        picked_status, picked = post_json(
+            f'{self.base_url}/v1/missions/pallet3/{INVENTORY_OPERATION_ID}/picked', {}
+        )
+        self.assertEqual(picked_status, 200)
+        self.assertEqual(picked['state'], 'PICK_COMPLETE')
+
+        post_json(f'{self.base_url}/v1/fork/down', {'operation_id': INVENTORY_OPERATION_ID})
+        self.service.on_fork_state('{"state":"DOWN_COMPLETE","error":""}')
+        placed_status, placed = post_json(
+            f'{self.base_url}/v1/missions/pallet3/{INVENTORY_OPERATION_ID}/placed', {}
+        )
+        self.assertEqual(placed_status, 200)
+        self.assertIsNone(placed['operation_id'])
+        self.assertEqual(placed['detail'], 'PLACE_COMPLETED')
+
+    def test_stop_terminates_active_pallet3_shell_process_group(self):
+        self.mark_idle()
+        post_json(
+            f'{self.base_url}/v1/missions/pallet3',
+            {
+                'operation_id': INVENTORY_OPERATION_ID,
+                'robot_id': 'robot_2',
+                'pick_mode': 'auto_dock',
+                'fleet_manager_url': 'http://fleet.example:8090',
+            },
+        )
+
+        stop_status, _stopped = post_json(f'{self.base_url}/v1/stop', {})
+
+        self.assertEqual(stop_status, 200)
+        self.assertEqual(self.pallet3_supervisor.stop_calls, 1)
+
+    def test_navigation_cancel_terminates_active_pallet3_shell_process_group(self):
+        self.mark_idle()
+        post_json(
+            f'{self.base_url}/v1/missions/pallet3',
+            {
+                'operation_id': INVENTORY_OPERATION_ID,
+                'robot_id': 'robot_2',
+                'pick_mode': 'manual',
+                'fleet_manager_url': 'http://fleet.example:8090',
+            },
+        )
+        route_status, route = post_json(
+            f'{self.base_url}/v1/navigation/waypoints',
+            {
+                'operation_id': INVENTORY_OPERATION_ID,
+                'purpose': 'PLACE',
+                'waypoints': [{'frame_id': 'map', 'x': -0.44, 'y': -0.9, 'yaw': 0.0}],
+            },
+        )
+        self.assertEqual(route_status, 202)
+
+        cancel_status, _cancelled = post_json(
+            f'{self.base_url}/v1/navigation/cancel',
+            {'operation_id': route['operation_id']},
+        )
+
+        self.assertEqual(cancel_status, 202)
+        self.assertEqual(self.pallet3_supervisor.stop_calls, 1)
 
     def navigation_goal(self, operation_id=None, purpose=None):
         _, operation = self.get_json('/v1/operation-status')
@@ -516,6 +621,52 @@ class VehicleCommandApiServerTest(unittest.TestCase):
         self.assertEqual(report['attempt_id'], goal['attempt_id'])
         self.assertEqual(report['source'], 'API')
         self.assertEqual(report['detail'], 'API_STOP')
+
+    def test_goal_navigation_restarts_after_an_operator_stop(self):
+        _, stopped_goal = self.navigation_goal()
+        stop_status, stop = post_json(f'{self.base_url}/v1/stop', {})
+        restart_status, restarted_goal = self.navigation_goal()
+
+        self.assertEqual(stop_status, 200)
+        self.assertEqual(stop['state'], 'CANCELLED')
+        self.assertEqual(restart_status, 202)
+        self.assertEqual(restarted_goal['state'], 'DRIVE')
+        self.assertNotEqual(restarted_goal['attempt_id'], stopped_goal['attempt_id'])
+
+    def test_follow_waypoints_restarts_after_an_operator_stop(self):
+        _, stopped_goal = self.navigation_goal()
+        stop_status, stop = post_json(f'{self.base_url}/v1/stop', {})
+        restart_status, restarted_route = self.navigation_waypoints()
+
+        self.assertEqual(stop_status, 200)
+        self.assertEqual(stop['state'], 'CANCELLED')
+        self.assertEqual(restart_status, 202)
+        self.assertEqual(restarted_route['state'], 'DRIVE')
+        self.assertNotEqual(restarted_route['attempt_id'], stopped_goal['attempt_id'])
+
+    def test_navigation_cancel_does_not_authorize_a_new_drive(self):
+        _, goal = self.navigation_goal()
+        cancel_status, _ = post_json(
+            f'{self.base_url}/v1/navigation/cancel',
+            {'operation_id': goal['operation_id']},
+        )
+        restart_status, restart = self.navigation_goal()
+
+        self.assertEqual(cancel_status, 202)
+        self.assertEqual(restart_status, 409)
+        self.assertEqual(restart['error'], 'OPERATION_NOT_READY_FOR_DRIVE')
+
+    def test_navigation_failure_does_not_authorize_a_new_drive(self):
+        _, goal = self.navigation_goal()
+        self.navigation.complete(goal['attempt_id'], 'FAILED')
+
+        goal_restart_status, goal_restart = self.navigation_goal()
+        route_restart_status, route_restart = self.navigation_waypoints()
+
+        self.assertEqual(goal_restart_status, 409)
+        self.assertEqual(goal_restart['error'], 'OPERATION_NOT_READY_FOR_DRIVE')
+        self.assertEqual(route_restart_status, 409)
+        self.assertEqual(route_restart['error'], 'OPERATION_NOT_READY_FOR_DRIVE')
 
     def test_stop_from_wait_reports_fail_from_api(self):
         self.mark_idle()
@@ -843,6 +994,9 @@ class VehicleCommandApiServerTest(unittest.TestCase):
                 '/v1/operation-status',
                 '/v1/vehicle-status',
                 '/v1/operation/idle',
+                '/v1/missions/pallet3',
+                '/v1/missions/pallet3/{operation_id}/picked',
+                '/v1/missions/pallet3/{operation_id}/placed',
                 '/v1/cmd-vel',
                 '/v1/fork/up',
                 '/v1/fork/down',
@@ -1475,6 +1629,114 @@ class VehicleCommandApiCliTest(unittest.TestCase):
             'auto_dock_stop_topic': None,
             'auto_dock_drive_ready_topic': None,
         })
+
+
+class RosVehicleAdapterTopicTest(unittest.TestCase):
+    def create_adapter(self):
+        module = load_server_module()
+        publisher_topics = []
+        subscription_topics = []
+
+        class FakeContext:
+            def ok(self):
+                return True
+
+        class FakeNode:
+            def create_publisher(self, _message_type, topic, _qos):
+                publisher_topics.append(topic)
+                return SimpleNamespace(publish=lambda _message: None)
+
+            def create_subscription(
+                self, _message_type, topic, _callback, _qos,
+            ):
+                subscription_topics.append(topic)
+                return object()
+
+            def destroy_node(self):
+                return None
+
+        class FakeExecutor:
+            def __init__(self, context):
+                self.context = context
+
+            def add_node(self, _node):
+                return None
+
+            def spin(self):
+                return None
+
+            def shutdown(self):
+                return None
+
+        class FakeTwist:
+            def __init__(self):
+                self.linear = SimpleNamespace(x=0.0, y=0.0)
+                self.angular = SimpleNamespace(z=0.0)
+
+        class FakeQosProfile:
+            def __init__(self, **_kwargs):
+                pass
+
+        fake_rclpy = ModuleType('rclpy')
+        fake_rclpy.init = lambda **_kwargs: None
+        fake_rclpy.shutdown = lambda **_kwargs: None
+        fake_rclpy.create_node = lambda *_args, **_kwargs: FakeNode()
+
+        fake_modules = {
+            'rclpy': fake_rclpy,
+            'rclpy.action': SimpleNamespace(ActionClient=lambda *_args: object()),
+            'rclpy.context': SimpleNamespace(Context=FakeContext),
+            'rclpy.executors': SimpleNamespace(SingleThreadedExecutor=FakeExecutor),
+            'rclpy.qos': SimpleNamespace(
+                DurabilityPolicy=SimpleNamespace(TRANSIENT_LOCAL=object()),
+                QoSProfile=FakeQosProfile,
+                ReliabilityPolicy=SimpleNamespace(RELIABLE=object()),
+                qos_profile_sensor_data=object(),
+            ),
+            'action_msgs.msg': SimpleNamespace(GoalStatus=object()),
+            'geometry_msgs.msg': SimpleNamespace(
+                PoseStamped=object(),
+                PoseWithCovarianceStamped=object(),
+                Twist=FakeTwist,
+            ),
+            'nav2_msgs.action': SimpleNamespace(
+                FollowWaypoints=object(),
+                NavigateToPose=object(),
+            ),
+            'std_msgs.msg': SimpleNamespace(Empty=object(), String=object(), UInt16=object()),
+        }
+
+        with patch.dict(sys.modules, fake_modules):
+            adapter = module.RosVehicleAdapter(
+                robot_id='robot_2',
+                cmd_vel_topic='/cmd_vel',
+                action_name='/navigate_to_pose',
+                follow_waypoints_action_name='/follow_waypoints',
+                action_server_timeout_sec=1.0,
+                goal_response_timeout_sec=3.0,
+                cancel_response_timeout_sec=3.0,
+            )
+            return adapter, publisher_topics, subscription_topics
+
+    def test_default_auto_dock_arrival_publishes_to_global_topic(self):
+        """A namespaced arrival topic would prevent the vehicle Auto Dock from receiving commands."""
+        adapter, publisher_topics, _subscription_topics = self.create_adapter()
+        try:
+            self.assertIn('/nav2/arrival', publisher_topics)
+            self.assertNotIn('/robot_2/nav2/arrival', publisher_topics)
+        finally:
+            adapter.close()
+
+    def test_default_auto_dock_drive_ready_subscribes_to_global_topic(self):
+        """The Auto Dock completion event is published on the global ROS topic."""
+        adapter, _publisher_topics, subscription_topics = self.create_adapter()
+        try:
+            adapter.configure_auto_dock(lambda _status: None, lambda: None)
+
+            self.assertIn('/auto_dock/drive_ready', subscription_topics)
+            self.assertNotIn('/robot_2/auto_dock/drive_ready', subscription_topics)
+        finally:
+            adapter.close()
 
 
 class RosVehicleAdapterResultTest(unittest.TestCase):

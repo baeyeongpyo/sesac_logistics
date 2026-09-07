@@ -101,8 +101,8 @@ class UrllibTransport:
 @dataclass(frozen=True)
 class RunnerConfig:
     robot_id: str
-    inventory_url: str = "http://192.168.100.27:8081"
-    fleet_url: str = "http://192.168.100.27:8090"
+    inventory_url: str = "http://127.0.0.1:8081"
+    fleet_url: str = "http://127.0.0.1:8090"
     request_timeout_sec: float = 1.0
 
 

@@ -11,7 +11,13 @@ class ComposeContractTest(unittest.TestCase):
         self.assertIn("inventory-api:", compose)
         self.assertIn("../data:/data", compose)
         self.assertIn("INVENTORY_DB_PATH", compose)
-        self.assertIn("127.0.0.1", compose)
+
+    def test_compose_exposes_inventory_api_on_all_interfaces_by_default(self) -> None:
+        compose_path = Path(__file__).parents[1] / "docker-compose.yaml"
+
+        compose = compose_path.read_text()
+
+        self.assertIn("${INVENTORY_API_HOST:-0.0.0.0}", compose)
 
 
 if __name__ == "__main__":

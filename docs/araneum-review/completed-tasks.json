@@ -1,0 +1,68 @@
+{
+  "id": "ae9725ee-40d3-4d2b-9c29-8dad8052dfe0",
+  "ok": true,
+  "result": {
+    "runId": "run_336491621b65",
+    "legacyReadOnly": false,
+    "tasks": [
+      {
+        "id": "task_b7aa4f361903",
+        "parent_id": null,
+        "created_by_terminal_handle": "term_e80c0f10-4098-4f01-9cdb-86f17102335d",
+        "task_title": "당신은 ARANEUM 대본 검토의 audience 담당이다. 물류를 모르는 청중의 이해 관점. 팔레트/도크/관제/우선순위/대기구역을 처음...",
+        "display_name": "당신은 ARANEUM 대본 검토의 audience 담당이다. 물류를 모르는 청중의 이해 관점. 팔레트/도크/관제/우선순위/대기구역을 처음...",
+        "spec": "당신은 ARANEUM 대본 검토의 audience 담당이다. 물류를 모르는 청중의 이해 관점. 팔레트/도크/관제/우선순위/대기구역을 처음 듣는 사람이 공간과 흐름을 재설명할 수 있는지, 숫자·개별 ID 우회가 불필요한지, 5분 현장 시연으로 주의가 연결되는지 판단한다. 먼저 docs/…",
+        "status": "completed",
+        "deps": "[]",
+        "result": "{\"provenance\":\"worker_report\",\"outcome\":\"succeeded\",\"messageId\":\"msg_e0deb4dd0300\",\"reportedBy\":\"term_91437bbf-11b1-4e91-a913-8a9ae1bbbd9e\",\"subject\":\"청중 관점 5회 검토 완료: 최종 원고 수용\",\"body\":\"기존 대본과 새 사용자 원고 비교 및 서로 다른 v1~v4의 재검토를 수행하여 청중 관점의 1~5회 보고서를 저장했습니다. 팔레트와 공간 설명, 우선순위와 목적지 이름 구분, 시선 안내와 하역 데이터 확인이 개선되어 최종 문안을 수용하며 필수 교체 문장은 없습니다. 실제 20분 낭독과 5분 실차 시연 시간의 리허설 확인은 남아 있습니다.\",\"completedBy\":\"term_91437bbf-11b1-4e91-a913-8a9ae1bbbd9e\",\"filesModified\":[\"docs/araneum-review/round-1-audience.md\",\"docs/araneum-review/round-2-audience.md\",\"docs/araneum-review/round-3-audience.md\",\"docs/araneum-review/round-4-audience.md\",\"docs/araneum-review/round-5-audience.md\"],\"reportPath\":\"docs/araneum-review/round-5-audience.md\",\"completedAt\":\"2026-09-06T08:14:10.620Z\"}",
+        "created_at": "2026-09-06 07:51:03",
+        "completed_at": "2026-09-06 08:14:10",
+        "run_id": "run_336491621b65",
+        "created_by_pane_key": "a8ed2f8b-2519-49b9-9187-44ba6e4b2eab:7cd9cf0a-2190-46ac-adee-f9766e841a0c",
+        "created_by_process_incarnation": "a7c8e235-5d88-431b-9568-e11a49b2dfd5::/Users/yeongpyo/orca/workspaces/sesac_logistics/feature_nav_driving@@04c742c8:4a891c77-b90e-45a8-ad71-f855a222c0a7",
+        "created_by_run_generation": 1,
+        "spec_truncated": true
+      },
+      {
+        "id": "task_7fdc2b50325a",
+        "parent_id": null,
+        "created_by_terminal_handle": "term_e80c0f10-4098-4f01-9cdb-86f17102335d",
+        "task_title": "당신은 ARANEUM 대본 검토의 technical 담당이다. 로봇 시스템을 대략 아는 청중에게 너무 기술적으로 보이지 않는 설명 관점....",
+        "display_name": "당신은 ARANEUM 대본 검토의 technical 담당이다. 로봇 시스템을 대략 아는 청중에게 너무 기술적으로 보이지 않는 설명 관점....",
+        "spec": "당신은 ARANEUM 대본 검토의 technical 담당이다. 로봇 시스템을 대략 아는 청중에게 너무 기술적으로 보이지 않는 설명 관점. 기술명 나열을 줄이고 기능 역할을 정확히 설명하는지, SLAM과 저장 지도 위치추정, Nav2와 Auto Dock, Open-RMF와 차량 주행 책…",
+        "status": "completed",
+        "deps": "[]",
+        "result": "{\"provenance\":\"worker_report\",\"outcome\":\"succeeded\",\"messageId\":\"msg_2aa547c44542\",\"reportedBy\":\"term_f37d3eb6-0b17-4f9c-9e57-3ad9abd8c850\",\"subject\":\"기술 관점 5회 검토 완료: 문안 수용\",\"body\":\"기존·새 원고 비교와 서로 다른 수정본 v1~v4의 기술 관점 검토를 마치고 docs/araneum-review/round-1-technical.md, docs/araneum-review/round-2-technical.md, docs/araneum-review/round-3-technical.md, docs/araneum-review/round-4-technical.md, docs/araneum-review/round-5-technical.md에 5회 보고서를 저장했습니다. 기술 역할과 근거 수준, 도크 적재부터 P3 하역까지의 순서 및 별도 주행 정지·취소 절차가 정리되어 최종 문안을 수용했습니다. 실제 낭독·실차 시험은 하지 않았으므로 전체 20분 발표와 적재·하역·정상 복귀·별도 주행 정지·취소를 포함한 5분 시연의 소요 시간 확인이 남아 있습니다.\",\"completedBy\":\"term_f37d3eb6-0b17-4f9c-9e57-3ad9abd8c850\",\"filesModified\":[\"docs/araneum-review/round-1-technical.md\",\"docs/araneum-review/round-2-technical.md\",\"docs/araneum-review/round-3-technical.md\",\"docs/araneum-review/round-4-technical.md\",\"docs/araneum-review/round-5-technical.md\"],\"reportPath\":\"docs/araneum-review/round-5-technical.md\",\"completedAt\":\"2026-09-06T08:13:57.432Z\"}",
+        "created_at": "2026-09-06 07:51:03",
+        "completed_at": "2026-09-06 08:13:57",
+        "run_id": "run_336491621b65",
+        "created_by_pane_key": "a8ed2f8b-2519-49b9-9187-44ba6e4b2eab:7cd9cf0a-2190-46ac-adee-f9766e841a0c",
+        "created_by_process_incarnation": "a7c8e235-5d88-431b-9568-e11a49b2dfd5::/Users/yeongpyo/orca/workspaces/sesac_logistics/feature_nav_driving@@04c742c8:4a891c77-b90e-45a8-ad71-f855a222c0a7",
+        "created_by_run_generation": 1,
+        "spec_truncated": true
+      },
+      {
+        "id": "task_135a7fb5b3b6",
+        "parent_id": null,
+        "created_by_terminal_handle": "term_e80c0f10-4098-4f01-9cdb-86f17102335d",
+        "task_title": "당신은 ARANEUM 대본 검토의 business 담당이다. 사업 아이템의 이해와 구매 설득 관점. 누가 어떤 문제에 돈을 내는지, 기존...",
+        "display_name": "당신은 ARANEUM 대본 검토의 business 담당이다. 사업 아이템의 이해와 구매 설득 관점. 누가 어떤 문제에 돈을 내는지, 기존...",
+        "spec": "당신은 ARANEUM 대본 검토의 business 담당이다. 사업 아이템의 이해와 구매 설득 관점. 누가 어떤 문제에 돈을 내는지, 기존 지게차 자율화/자동화 통합/사전 검증 중 무엇을 파는지, 기존 AMR 시장과 부당한 비교가 없는지, 현장 적용 근거와 수익 모델 가설이 구분되는지…",
+        "status": "completed",
+        "deps": "[]",
+        "result": "{\"provenance\":\"worker_report\",\"outcome\":\"succeeded\",\"messageId\":\"msg_636020439188\",\"reportedBy\":\"term_f01c17dc-5836-47ba-a94f-39a3764301be\",\"subject\":\"사업 관점 5회 검토 완료: 최종 문안 수용\",\"body\":\"기존 대본과 새 원고의 비교부터 서로 다른 v1~v4 재검토까지 사업 관점 5회를 수행하고 회차별 보고서 5개를 저장했습니다. 최종 v4는 구매자·판매 단위·수익 가설과 실증 경계가 분명해 사업 문안 수용이며 필수 교체 문장은 없습니다. 남은 일은 코디네이터의 최종 통합과 실제 낭독·실차 리허설로 20분 발표 및 5분 시연 시간을 확인하는 것입니다.\",\"completedBy\":\"term_f01c17dc-5836-47ba-a94f-39a3764301be\",\"filesModified\":[\"docs/araneum-review/round-1-business.md\",\"docs/araneum-review/round-2-business.md\",\"docs/araneum-review/round-3-business.md\",\"docs/araneum-review/round-4-business.md\",\"docs/araneum-review/round-5-business.md\"],\"reportPath\":\"docs/araneum-review/round-5-business.md\",\"completedAt\":\"2026-09-06T08:14:23.973Z\"}",
+        "created_at": "2026-09-06 07:51:03",
+        "completed_at": "2026-09-06 08:14:23",
+        "run_id": "run_336491621b65",
+        "created_by_pane_key": "a8ed2f8b-2519-49b9-9187-44ba6e4b2eab:7cd9cf0a-2190-46ac-adee-f9766e841a0c",
+        "created_by_process_incarnation": "a7c8e235-5d88-431b-9568-e11a49b2dfd5::/Users/yeongpyo/orca/workspaces/sesac_logistics/feature_nav_driving@@04c742c8:4a891c77-b90e-45a8-ad71-f855a222c0a7",
+        "created_by_run_generation": 1,
+        "spec_truncated": true
+      }
+    ],
+    "count": 3
+  },
+  "_meta": {
+    "runtimeId": "43abd88b-abb0-4db2-b045-3fef5fe602ce"
+  }
+}

@@ -8,10 +8,12 @@ import math
 import os
 import queue
 import signal
+import subprocess
 import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -38,6 +40,56 @@ class InitialPoseMotionError(RuntimeError):
 
 class OperationConflictError(RuntimeError):
     pass
+
+
+class Pallet3MissionSupervisor:
+    """Start one shell mission in its own process group and stop it safely."""
+
+    def __init__(self, script_path, *, process_factory=None, killpg=None):
+        self._script_path = str(script_path)
+        self._process_factory = process_factory or subprocess.Popen
+        self._killpg = killpg or os.killpg
+        self._lock = threading.Lock()
+        self._process = None
+        self._operation_id = None
+
+    def start(self, operation_id, robot_id, pick_mode, fleet_manager_url):
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                raise OperationConflictError('PALLET3_MISSION_ACTIVE')
+            try:
+                process = self._process_factory(
+                    [
+                        self._script_path,
+                        '--operation-id', operation_id,
+                        '--robot-id', robot_id,
+                        '--pick-mode', pick_mode,
+                        '--fleet-manager-url', fleet_manager_url,
+                    ],
+                    start_new_session=True,
+                )
+            except OSError as error:
+                raise NavigationUnavailableError(
+                    f'PALLET3_MISSION_START_FAILED:{error}'
+                ) from error
+            self._process = process
+            self._operation_id = operation_id
+            return process.pid
+
+    def stop(self):
+        with self._lock:
+            process = self._process
+            self._process = None
+            self._operation_id = None
+        if process is None or process.poll() is not None:
+            return False
+        try:
+            self._killpg(process.pid, signal.SIGTERM)
+            return True
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return False
 
 
 class FleetStatusReporter:
@@ -107,6 +159,10 @@ class VehicleStatus:
         self._battery_raw_value = None
         self._battery_received_at = None
 
+    @property
+    def robot_id(self):
+        return self._robot_id
+
     def update_battery(self, raw_value):
         with self._lock:
             self._battery_raw_value = int(raw_value)
@@ -153,6 +209,7 @@ class VehicleCommandService:
         status_reporter=None,
         max_linear_y=None,
         fork_state_timeout_sec=15.0,
+        pallet3_supervisor=None,
     ):
         self.velocity = velocity
         self.navigation = navigation
@@ -168,6 +225,7 @@ class VehicleCommandService:
         self._initial_pose_yaw_variance = initial_pose_yaw_variance
         self._vehicle_status = vehicle_status or VehicleStatus('unknown', 3.0)
         self._status_reporter = status_reporter
+        self._pallet3_supervisor = pallet3_supervisor
         self._lock = threading.Lock()
         self._manual_timer = None
         self._manual_generation = 0
@@ -185,6 +243,9 @@ class VehicleCommandService:
         self._manual_restore_status = None
         self._auto_dock_active = False
         self._auto_dock_operation = None
+        self._pallet3_operation_id = None
+        self._pallet3_pick_mode = None
+        self._pallet3_fork_replies = set()
         self._last_reported_external_state = None
         self._status = {
             'operation_id': None,
@@ -204,6 +265,91 @@ class VehicleCommandService:
     def report_current_status(self):
         with self._lock:
             self._report_external_state('VEHICLE')
+
+    def start_pallet3_mission(self, payload):
+        self._validate_fields(
+            payload,
+            {'operation_id', 'robot_id', 'pick_mode', 'fleet_manager_url'},
+        )
+        operation_id = self._operation_id(payload.get('operation_id'), required=True)
+        robot_id = payload.get('robot_id')
+        if robot_id != self._vehicle_status.robot_id:
+            raise CommandValidationError('robot_id must match this vehicle')
+        pick_mode = payload.get('pick_mode')
+        if pick_mode not in {'auto_dock', 'manual'}:
+            raise CommandValidationError('pick_mode must be auto_dock or manual')
+        fleet_manager_url = payload.get('fleet_manager_url')
+        if (
+            not isinstance(fleet_manager_url, str)
+            or not fleet_manager_url.startswith(('http://', 'https://'))
+        ):
+            raise CommandValidationError('fleet_manager_url must be an HTTP URL')
+        with self._lock:
+            if self._pallet3_supervisor is None:
+                raise NavigationUnavailableError('PALLET3_MISSION_SUPERVISOR_UNAVAILABLE')
+            if self._pallet3_operation_id is not None:
+                raise OperationConflictError('PALLET3_MISSION_ACTIVE')
+            if self._status['state'] != 'IDLE':
+                raise OperationConflictError('OPERATION_NOT_READY_FOR_PALLET3')
+            pid = self._pallet3_supervisor.start(
+                operation_id, robot_id, pick_mode, fleet_manager_url.rstrip('/'),
+            )
+            self._pallet3_operation_id = operation_id
+            self._pallet3_pick_mode = pick_mode
+            self._pallet3_fork_replies = set()
+            self._set_status(
+                operation_id,
+                'IDLE',
+                'PALLET3_MISSION_STARTED',
+                'IDLE',
+                source='API',
+            )
+        return {
+            'operation_id': operation_id,
+            'state': 'STARTING',
+            'pid': pid,
+        }
+
+    def mark_pallet3_picked(self, operation_id):
+        operation_id = self._operation_id(operation_id, required=True)
+        with self._lock:
+            self._require_pallet3_operation(operation_id)
+            if self._pallet3_pick_mode != 'manual':
+                raise OperationConflictError('PALLET3_PICKED_IS_MANUAL_ONLY')
+            if 'FORK_UP_COMPLETE' not in self._pallet3_fork_replies:
+                raise OperationConflictError('FORK_UP_COMPLETE_REQUIRED')
+            if self._status['state'] != 'IDLE':
+                raise OperationConflictError('OPERATION_NOT_READY_FOR_PALLET3_PICK')
+            self._set_status(
+                operation_id,
+                'PICK_COMPLETE',
+                'MANUAL_PICK_COMPLETED',
+                'IDLE',
+                source='FORK',
+            )
+            return dict(self._status)
+
+    def mark_pallet3_placed(self, operation_id):
+        operation_id = self._operation_id(operation_id, required=True)
+        with self._lock:
+            self._require_pallet3_operation(operation_id)
+            if 'FORK_DOWN_COMPLETE' not in self._pallet3_fork_replies:
+                raise OperationConflictError('FORK_DOWN_COMPLETE_REQUIRED')
+            if (
+                self._status['state'] != 'PICK_COMPLETE'
+                or self._active_navigation_operation is not None
+                or self._auto_dock_active
+            ):
+                raise OperationConflictError('OPERATION_NOT_READY_FOR_PALLET3_PLACE')
+            self._complete_to_idle(
+                'PLACE_COMPLETED',
+                'PICK_COMPLETE',
+                source='FORK',
+            )
+            self._pallet3_operation_id = None
+            self._pallet3_pick_mode = None
+            self._pallet3_fork_replies = set()
+            return dict(self._status)
 
     def initial_pose(self, payload):
         pose = self._goal(payload)
@@ -352,7 +498,19 @@ class VehicleCommandService:
             error = 'INVALID_FORK_STATE'
         if state == f'{command}_COMPLETE' and not error:
             with self._lock:
+                is_pallet3_mission = operation_id == self._pallet3_operation_id
+                if is_pallet3_mission:
+                    detail = f'FORK_{command}_COMPLETE'
+                    self._pallet3_fork_replies.add(detail)
+                    self._set_status(
+                        operation_id,
+                        self._status['state'],
+                        detail,
+                        self._status['previous_state'],
+                    )
                 if (
+                    not is_pallet3_mission
+                    and
                     self._status['operation_id'] == operation_id
                     and self._status['state'] == 'PICK_COMPLETE'
                     and command == 'DOWN'
@@ -401,7 +559,11 @@ class VehicleCommandService:
 
         with self._lock:
             origin_state = self._status['state']
-            if origin_state not in {'IDLE', 'PICK_COMPLETE'}:
+            stopped_by_operator = (
+                origin_state in {'CANCELLED', 'FAILED'}
+                and self._status['detail'] == 'STOP_REQUESTED'
+            )
+            if origin_state not in {'IDLE', 'PICK_COMPLETE'} and not stopped_by_operator:
                 raise OperationConflictError('OPERATION_NOT_READY_FOR_DRIVE')
             if self._active_navigation_operation is not None:
                 raise OperationConflictError('NAVIGATION_OPERATION_ACTIVE')
@@ -586,6 +748,17 @@ class VehicleCommandService:
                     source='API',
                     attempt_id=active_attempt,
                 )
+            pallet3_supervisor = None
+            if self._pallet3_operation_id is not None:
+                pallet3_supervisor = self._pallet3_supervisor
+                self._pallet3_operation_id = None
+                self._pallet3_pick_mode = None
+                self._pallet3_fork_replies = set()
+        if pallet3_supervisor is not None:
+            try:
+                pallet3_supervisor.stop()
+            except Exception:
+                pass
         return {
             'operation_id': operation_id,
             'state': 'CANCELLED',
@@ -599,7 +772,17 @@ class VehicleCommandService:
             navigation_attempt = self._active_navigation_attempt
             auto_dock_active = self._auto_dock_active
             status_before_stop = dict(self._status)
+            pallet3_active = self._pallet3_operation_id is not None
+            pallet3_supervisor = self._pallet3_supervisor
+            self._pallet3_operation_id = None
+            self._pallet3_pick_mode = None
+            self._pallet3_fork_replies = set()
 
+        if pallet3_active and pallet3_supervisor is not None:
+            try:
+                pallet3_supervisor.stop()
+            except Exception:
+                pass
         self.velocity.publish(0.0, 0.0, 0.0)
 
         cancel_requested = False
@@ -853,6 +1036,10 @@ class VehicleCommandService:
             return
         self._last_reported_external_state = state
 
+    def _require_pallet3_operation(self, operation_id):
+        if self._pallet3_operation_id != operation_id:
+            raise OperationConflictError('PALLET3_MISSION_NOT_ACTIVE')
+
     def _goal(self, payload, extra_fields=None):
         allowed_fields = {'frame_id', 'x', 'y', 'yaw'}
         if extra_fields:
@@ -1092,6 +1279,47 @@ def openapi_document(service):
                     },
                 },
             },
+            '/v1/missions/pallet3': {
+                'post': {
+                    'requestBody': {
+                        'required': True,
+                        'content': {'application/json': {'schema': {
+                            'type': 'object',
+                            'additionalProperties': False,
+                            'required': [
+                                'operation_id', 'robot_id', 'pick_mode', 'fleet_manager_url',
+                            ],
+                            'properties': {
+                                'operation_id': {'type': 'string', 'format': 'uuid'},
+                                'robot_id': {'type': 'string'},
+                                'pick_mode': {'type': 'string', 'enum': ['auto_dock', 'manual']},
+                                'fleet_manager_url': {'type': 'string', 'format': 'uri'},
+                            },
+                        }}},
+                    },
+                    'responses': {
+                        '202': {'description': 'Pallet 3 shell mission process group started'},
+                        '409': {'description': 'Another mission is active or vehicle is not idle'},
+                        '422': {'description': 'Invalid P3 mission start payload'},
+                    },
+                },
+            },
+            '/v1/missions/pallet3/{operation_id}/picked': {
+                'post': {
+                    'responses': {
+                        '200': {'description': 'Manual PICK was confirmed after fork UP'},
+                        '409': {'description': 'P3 manual mission or fork UP completion is missing'},
+                    },
+                },
+            },
+            '/v1/missions/pallet3/{operation_id}/placed': {
+                'post': {
+                    'responses': {
+                        '200': {'description': 'PLACE was confirmed and local operation context cleared'},
+                        '409': {'description': 'P3 mission, fork DOWN completion, or state is invalid'},
+                    },
+                },
+            },
             '/v1/cmd-vel': {
                 'post': {
                     'requestBody': {
@@ -1319,6 +1547,19 @@ def create_http_server(host, port, service):
                 if path == '/v1/cmd-vel':
                     self._write_json(202, service.command(self._read_json()))
                     return
+                if path == '/v1/missions/pallet3':
+                    self._write_json(202, service.start_pallet3_mission(self._read_json()))
+                    return
+                if path.startswith('/v1/missions/pallet3/') and path.endswith('/picked'):
+                    operation_id = path[len('/v1/missions/pallet3/'):-len('/picked')]
+                    self._read_optional_json()
+                    self._write_json(200, service.mark_pallet3_picked(operation_id))
+                    return
+                if path.startswith('/v1/missions/pallet3/') and path.endswith('/placed'):
+                    operation_id = path[len('/v1/missions/pallet3/'):-len('/placed')]
+                    self._read_optional_json()
+                    self._write_json(200, service.mark_pallet3_placed(operation_id))
+                    return
                 if path == '/v1/fork/up':
                     self._write_json(
                         202,
@@ -1482,9 +1723,7 @@ class RosVehicleAdapter:
         robot_name = robot_id.strip('/')
         if not robot_name:
             raise ValueError('robot_id must be a non-empty string')
-        self._auto_dock_arrival_topic = (
-            auto_dock_arrival_topic or f'/{robot_name}/nav2/arrival'
-        )
+        self._auto_dock_arrival_topic = auto_dock_arrival_topic or '/nav2/arrival'
         self._auto_dock_status_topic = (
             auto_dock_status_topic or f'/{robot_name}/auto_dock/status'
         )
@@ -1492,7 +1731,7 @@ class RosVehicleAdapter:
             auto_dock_stop_topic or f'/{robot_name}/auto_dock/stop'
         )
         self._auto_dock_drive_ready_topic = (
-            auto_dock_drive_ready_topic or f'/{robot_name}/auto_dock/drive_ready'
+            auto_dock_drive_ready_topic or '/auto_dock/drive_ready'
         )
         self._fork_command_topic = fork_command_topic or '/fork/command'
         self._fork_state_topic = fork_state_topic or '/fork/state'
@@ -1762,6 +2001,13 @@ def parse_args(argv=None):
     parser.add_argument('--auto-dock-status-topic')
     parser.add_argument('--auto-dock-stop-topic')
     parser.add_argument('--auto-dock-drive-ready-topic')
+    parser.add_argument(
+        '--pallet3-mission-script',
+        default=os.environ.get(
+            'PALLET3_MISSION_SCRIPT',
+            str(Path(__file__).resolve().parent / 'tools' / 'pallet3_mission.sh'),
+        ),
+    )
     parser.add_argument('--max-linear-x', type=float, default=1.0)
     parser.add_argument('--max-linear-y', type=float, default=1.0)
     parser.add_argument('--max-angular-z', type=float, default=1.0)
@@ -1824,6 +2070,13 @@ def run_server(arguments, adapter_factory=None, http_server_factory=create_http_
         initial_pose_yaw_variance=arguments.initial_pose_yaw_variance,
         vehicle_status=vehicle_status,
         status_reporter=status_reporter,
+        pallet3_supervisor=Pallet3MissionSupervisor(
+            getattr(
+                arguments,
+                'pallet3_mission_script',
+                str(Path(__file__).resolve().parent / 'tools' / 'pallet3_mission.sh'),
+            )
+        ),
     )
     if hasattr(adapter, 'configure_auto_dock'):
         adapter.configure_auto_dock(

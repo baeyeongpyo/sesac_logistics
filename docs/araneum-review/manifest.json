@@ -1,0 +1,120 @@
+{
+  "review_count": 15,
+  "roles": [
+    "audience",
+    "technical",
+    "business"
+  ],
+  "rounds": 5,
+  "distinct_reviewed_revisions": 4,
+  "final_spoken_body_equals_v4": true,
+  "run_id": "run_336491621b65",
+  "task_statuses": {
+    "task_b7aa4f361903": "completed",
+    "task_7fdc2b50325a": "completed",
+    "task_135a7fb5b3b6": "completed"
+  },
+  "verification_scope": "문서 검토 및 파일 일관성 확인. 실제 청중·낭독·실차 시험 미실시.",
+  "files": [
+    {
+      "path": "docs/presentation-live-demo-script-2026-09-06.md",
+      "sha256": "bd0c971ebef3938109445df1afe75fcb83f2f3598eb46cd0ac5c691e54ae98cc"
+    },
+    {
+      "path": "docs/araneum-review/source-new-user-script.md",
+      "sha256": "58de6ffaf63490300b399ef7c7ad01232575104b62ae930d882a4b64dd5c9655"
+    },
+    {
+      "path": "docs/araneum-review/draft-v1.md",
+      "sha256": "41fe9bd74e0574e781c572fe9c70019d6077de977520cc2dcb711878e891d0d8"
+    },
+    {
+      "path": "docs/araneum-review/draft-v2.md",
+      "sha256": "190b2d2af830bf18cc287e910bbc9cdd3af7f182e5383219f3aca75b45d17e39"
+    },
+    {
+      "path": "docs/araneum-review/draft-v3.md",
+      "sha256": "de120e221f87a1db431d27e4305c33052b1b0ce6a31ec3e95c7d33ea2f0b0295"
+    },
+    {
+      "path": "docs/araneum-review/draft-v4.md",
+      "sha256": "89cf32be59bfa159f24f0d5ac4e1ecd8d7c49b53d6fa1c375565f86899a22c2b"
+    },
+    {
+      "path": "docs/araneum-review/round-1-audience.md",
+      "sha256": "0ba9b3b26c1c6964a341fcadcaea2cc75ce32d2099aadc7f0f4e665d5d38b12f"
+    },
+    {
+      "path": "docs/araneum-review/round-1-technical.md",
+      "sha256": "9665fa8c849283832378573fd3b7a59c9aa8b7b2b270f598434e6f0957acfe1d"
+    },
+    {
+      "path": "docs/araneum-review/round-1-business.md",
+      "sha256": "de5daa647adec01987b60666d0a9cc417026955779b07c2cfa6676ed4f5a602c"
+    },
+    {
+      "path": "docs/araneum-review/round-2-audience.md",
+      "sha256": "72b2131da2433e6f1b75746f074650b4bc7877f340da5f872d66be23a000a5a7"
+    },
+    {
+      "path": "docs/araneum-review/round-2-technical.md",
+      "sha256": "8b404ed622c8e818fb71731df5f75801c13e14f9dae59c8c9e0d25c61a519715"
+    },
+    {
+      "path": "docs/araneum-review/round-2-business.md",
+      "sha256": "9eec62b995f25911d76841cf756ee027589ce43e22b406e68b2f30cf7727997b"
+    },
+    {
+      "path": "docs/araneum-review/round-3-audience.md",
+      "sha256": "a1def2895782f81ba21531a3443d6be69719df1f97fab675f97269945f844879"
+    },
+    {
+      "path": "docs/araneum-review/round-3-technical.md",
+      "sha256": "0bb8ef8d0056dc9b7d71419652f91e828f168a139d4e15083d44cf244869186a"
+    },
+    {
+      "path": "docs/araneum-review/round-3-business.md",
+      "sha256": "cb86291e5b25eb5c8fecf75f1736564a97c862f578966722648375003800e05d"
+    },
+    {
+      "path": "docs/araneum-review/round-4-audience.md",
+      "sha256": "1bd4554878654269ae82d2867c516154f639b4896750430cc4a8eb7147aa34ea"
+    },
+    {
+      "path": "docs/araneum-review/round-4-technical.md",
+      "sha256": "4597103fab868858a8b66c1e4c1d5afd62c076d81b3f54451a58bc2758cce794"
+    },
+    {
+      "path": "docs/araneum-review/round-4-business.md",
+      "sha256": "c106b6c9f98708b2648eeb20411687736dd32c2573dd05629ac94cdf38e9229d"
+    },
+    {
+      "path": "docs/araneum-review/round-5-audience.md",
+      "sha256": "d9240f43c0eb5b0634ff8e0c6876fe5f3557c1862531a0dcde2f50f3336c47e9"
+    },
+    {
+      "path": "docs/araneum-review/round-5-technical.md",
+      "sha256": "c6db7f3138455baf996f2b3b75e584b72f85a592a374e2622b56ff28aac00f28"
+    },
+    {
+      "path": "docs/araneum-review/round-5-business.md",
+      "sha256": "fdd094e1a213cdea27bab2334b0d221384b7fd4dae92236eadd94f7d68a4c08a"
+    },
+    {
+      "path": "docs/araneum-live-presentation-script-2026-09-06.md",
+      "sha256": "d8c79224428459da2d90f70b212d2d5cdaaf673323a139429504bfd7193f6263"
+    },
+    {
+      "path": "docs/araneum-presentation-comparison-2026-09-06.md",
+      "sha256": "5292e751a7b658897c33c1c0b68a5e657541fbbc2e85903efc463ad345f24b39"
+    },
+    {
+      "path": "docs/araneum-review/iteration-log.md",
+      "sha256": "65651ad747f004a794505a0e0ebb90dbe486265e91d66b148dfb97147c45ae65"
+    },
+    {
+      "path": "docs/araneum-review/presenter-qa.md",
+      "sha256": "3c0440e0c0b2a316a7815b9e6c718abcff924dd1eb63a3c7e8fa6af341b06f45"
+    }
+  ]
+}

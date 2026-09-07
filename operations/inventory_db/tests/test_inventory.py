@@ -153,6 +153,64 @@ class InventoryStoreTest(unittest.TestCase):
         self.assertFalse(store.get_robot_pallet_state("robot_1").has_pallet)
         self.assertEqual(store.operation(operation_id).status, OperationStatus.COMPLETED)
 
+    def test_force_completion_from_to_pick_releases_source_reservation_and_empties_robot(
+        self,
+    ) -> None:
+        # This catches an operator-close leaving the source stock reserved forever.
+        store, operation = self._assigned_fresh_operation()
+
+        event = store.force_complete(
+            operation.operation_id, "robot_1", "force-complete-to-pick-1"
+        )
+        replayed = store.force_complete(
+            operation.operation_id, "robot_1", "force-complete-to-pick-1"
+        )
+
+        self.assertEqual(event.event_id, replayed.event_id)
+        self.assertEqual(event.event_type, "FORCE_COMPLETED")
+        self.assertEqual(event.quantity_delta, 0)
+        self.assertEqual(store.stock("source", PayloadType.FRESH).quantity, 3)
+        self.assertEqual(store.stock("source", PayloadType.FRESH).reserved_quantity, 0)
+        self.assertFalse(store.get_robot_pallet_state("robot_1").has_pallet)
+        self.assertEqual(
+            store.operation(operation.operation_id).status, OperationStatus.COMPLETED
+        )
+
+    def test_force_completion_from_to_place_accounts_destination_and_empties_robot(
+        self,
+    ) -> None:
+        # This catches a loaded failed P3 transfer being closed without recording its placement.
+        store, operation_id = self._picked_fresh_operation()
+
+        event = store.force_complete(
+            operation_id, "robot_1", "force-complete-to-place-1"
+        )
+
+        self.assertEqual(event.event_type, "FORCE_COMPLETED")
+        self.assertEqual(event.zone_id, "destination")
+        self.assertEqual(event.quantity_delta, 1)
+        self.assertEqual(store.stock("source", PayloadType.FRESH).quantity, 2)
+        self.assertEqual(store.stock("destination", PayloadType.FRESH).quantity, 1)
+        self.assertFalse(store.get_robot_pallet_state("robot_1").has_pallet)
+        self.assertEqual(store.operation(operation_id).status, OperationStatus.COMPLETED)
+
+    def test_force_completion_can_record_an_already_completed_operation_idempotently(
+        self,
+    ) -> None:
+        # This catches a retry after normal PLACE completion returning a conflict.
+        store, operation_id = self._picked_fresh_operation()
+        store.complete_place(operation_id, "robot_1", "place-op-1")
+
+        event = store.force_complete(
+            operation_id, "robot_1", "force-complete-completed-1"
+        )
+
+        self.assertEqual(event.event_type, "FORCE_COMPLETED")
+        self.assertEqual(event.quantity_delta, 0)
+        self.assertEqual(store.stock("destination", PayloadType.FRESH).quantity, 1)
+        self.assertFalse(store.get_robot_pallet_state("robot_1").has_pallet)
+        self.assertEqual(store.operation(operation_id).status, OperationStatus.COMPLETED)
+
     def test_second_operation_cannot_reserve_the_same_last_pallet(self) -> None:
         store = InventoryStore(self.database_path)
         store.initialize()

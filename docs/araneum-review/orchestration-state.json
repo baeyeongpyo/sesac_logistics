@@ -1,0 +1,20 @@
+{
+  "run_id": "run_336491621b65",
+  "roles": {
+    "audience": {
+      "task_id": "task_b7aa4f361903",
+      "dispatch_id": "ctx_849734a7298a",
+      "terminal": "term_91437bbf-11b1-4e91-a913-8a9ae1bbbd9e"
+    },
+    "technical": {
+      "task_id": "task_7fdc2b50325a",
+      "dispatch_id": "ctx_9f40e87740a2",
+      "terminal": "term_f37d3eb6-0b17-4f9c-9e57-3ad9abd8c850"
+    },
+    "business": {
+      "task_id": "task_135a7fb5b3b6",
+      "dispatch_id": "ctx_088189d24985",
+      "terminal": "term_f01c17dc-5836-47ba-a94f-39a3764301be"
+    }
+  }
+}

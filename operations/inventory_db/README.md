@@ -35,6 +35,7 @@ SQLite 파일은 호스트의 `operations/data/inventory.db`에 생성됩니다.
 - `GET /api/v1/robots/{robot_id}/next-instruction`
 - `POST /api/v1/operations/{operation_id}/pick-completions`
 - `POST /api/v1/operations/{operation_id}/place-completions`
+- `POST /api/v1/operations/{operation_id}/force-completions`
 
 `POST /api/v1/operations` 요청에는 `operation_id`를 넣지 않습니다. inventory가 예약 성공 후 UUID를 생성해 응답의 `operation_id`로 반환합니다.
 
@@ -49,6 +50,14 @@ SQLite 파일은 호스트의 `operations/data/inventory.db`에 생성됩니다.
 ```
 
 작업 생성은 `robot_id`가 비어 있거나 다른 활성 작업·적재 상태를 가지면 409으로 거부됩니다. 예를 들어 차량은 `next-instruction`의 `zone_id`까지 주행한 뒤, zone 내부의 비전·피킹 노드가 완료를 확인하면 `pick-completions` 또는 `place-completions`를 호출합니다. 이 서비스는 Nav2, 비전, 포크 제어를 직접 수행하지 않습니다.
+
+`force-completions`는 현장 운영자가 실제 화물 처리와 포크 비적재를 확인했을 때만 쓰는
+원장 종료 API입니다. `TO_PICK`이면 source 재고 수량은 그대로 두고 예약만 해제하며,
+`TO_PLACE`이면 destination 재고를 1 증가시킵니다. 두 경우 모두 차량 적재 상태와 작업을
+`COMPLETED`로 바꾸며, 물리 포크·주행 명령은 전혀 보내지 않습니다. Pallet 3 운영에서는
+직접 호출 대신 Orchestrator의
+`/api/v1/operations/{operation_id}/pallet-3/force-complete`를 사용해 `docker -> p3` 범위를
+검증해야 합니다.
 
 ## Orchestrator 이벤트 전달
 

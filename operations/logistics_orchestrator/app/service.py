@@ -20,6 +20,10 @@ class InventoryGateway(Protocol):
         self, operation_id: str, robot_id: str, idempotency_key: str
     ) -> None: ...
 
+    def force_complete(
+        self, operation_id: str, robot_id: str, idempotency_key: str
+    ) -> None: ...
+
     def pallet_state(self, robot_id: str) -> dict[str, Any]: ...
 
 
@@ -43,8 +47,8 @@ class Pallet3OperationConflictError(ValueError):
 
 OUTBOUND_PALLET3_WAYPOINTS = [
     {"frame_id": "map", "x": -0.440, "y": -0.900, "yaw": 0.0},
-    {"frame_id": "map", "x": -0.420, "y": -2.000, "yaw": -1.5707963267948966},
-    {"frame_id": "map", "x": -0.420, "y": -2.400, "yaw": -1.5707963267948966},
+    {"frame_id": "map", "x": -0.440, "y": -1.690, "yaw": -1.5707963267948966},
+    {"frame_id": "map", "x": -0.440, "y": -2.340, "yaw": -1.5707963267948966},
 ]
 
 RETURN_DOCK1_WAYPOINTS = [
@@ -126,6 +130,142 @@ class OrchestratorService:
             raise
         self._store.clear_error("pallet3_manual_pick")
         workflow, _confirmed = self._store.confirm_pallet3_manual_pick(operation_id)
+        if workflow is None:
+            raise RuntimeError(f"pallet 3 workflow disappeared: {operation_id}")
+        return workflow
+
+    def force_complete_pallet3_operation(
+        self, operation_id: str, operator_confirmed: bool
+    ) -> Pallet3OperationWorkflow:
+        """Close a docker-to-p3 transfer in server ledgers without commanding the vehicle."""
+        if not operator_confirmed:
+            raise Pallet3OperationConflictError("operator_confirmed must be true")
+        inventory = self._inventory.snapshot()
+        operation = next(
+            (
+                item
+                for item in inventory["active_operations"]
+                if str(item.get("operation_id")) == operation_id
+            ),
+            None,
+        )
+        if operation is None:
+            existing = self._store.get_pallet3_workflow(operation_id)
+            if existing is not None and existing.phase == "COMPLETED":
+                return existing
+            raise KeyError(f"unknown active operation: {operation_id}")
+        if not _is_pallet3_operation(operation):
+            raise Pallet3OperationConflictError(
+                "operation is not a docker to pallet 3 transfer"
+            )
+        robot_id = str(operation.get("robot_id") or "").strip()
+        if not robot_id:
+            raise Pallet3OperationConflictError("operation has no assigned robot")
+        workflow, _created = self._store.create_or_get_pallet3_workflow(
+            operation_id, robot_id
+        )
+        if workflow.robot_id != robot_id:
+            raise Pallet3OperationConflictError(
+                "pallet 3 workflow robot does not match the active operation"
+            )
+        try:
+            self._inventory.force_complete(
+                operation_id, robot_id, f"{operation_id}:force-complete"
+            )
+        except Exception as error:
+            self._store.set_error("pallet3_force_complete", str(error))
+            raise
+        self._store.clear_error("pallet3_force_complete")
+        self._store.clear_recovery_required(operation_id)
+        self._store.clear_pallet3_recovery_operator_ready(operation_id)
+        completed = self._store.force_complete_pallet3_workflow(operation_id)
+        if completed is None:
+            raise RuntimeError(f"pallet 3 workflow disappeared: {operation_id}")
+        return completed
+
+    def recover_pallet3_operation(self, operation_id: str) -> Pallet3OperationWorkflow:
+        inventory = self._inventory.snapshot()
+        operation = next(
+            (
+                item
+                for item in inventory["active_operations"]
+                if str(item.get("operation_id")) == operation_id
+            ),
+            None,
+        )
+        if operation is None:
+            raise KeyError(f"unknown active operation: {operation_id}")
+        if not _is_pallet3_operation(operation):
+            raise Pallet3OperationConflictError(
+                "operation is not a docker to pallet 3 transfer"
+            )
+        robot_id = str(operation.get("robot_id") or "").strip()
+        if not robot_id:
+            raise Pallet3OperationConflictError("operation has no assigned robot")
+        if str(operation.get("status")) not in {"TO_PICK", "TO_PLACE"}:
+            raise Pallet3OperationConflictError(
+                "operation is not ready for pallet 3 recover"
+            )
+        workflow = self._store.get_pallet3_workflow(operation_id)
+        if workflow is None:
+            raise Pallet3OperationConflictError("pallet 3 workflow was not found")
+        if workflow.robot_id != robot_id:
+            raise Pallet3OperationConflictError(
+                "pallet 3 workflow robot does not match the active operation"
+            )
+        if workflow.phase not in {"PICK_PENDING", "OUTBOUND_SENT"}:
+            raise Pallet3OperationConflictError(
+                "pallet 3 recover is allowed only before Fork DOWN"
+            )
+        status = str(operation.get("status"))
+        if (
+            workflow.phase == "OUTBOUND_SENT" and status != "TO_PLACE"
+        ) or (
+            workflow.phase == "PICK_PENDING"
+            and status == "TO_PICK"
+            and workflow.manual_pick_confirmed_at is not None
+        ):
+            raise Pallet3OperationConflictError(
+                "operation and pallet 3 workflow are not ready for pallet 3 recover"
+            )
+        try:
+            vehicles = self._fleet.list_vehicles()
+        except Exception as error:
+            self._store.set_error("pallet3_vehicle_snapshot", str(error))
+            raise
+        vehicle = next(
+            (item for item in vehicles if str(item.get("robot_id")) == robot_id),
+            None,
+        )
+        if vehicle is None:
+            raise KeyError(f"unknown vehicle: {robot_id}")
+        if (
+            str(vehicle.get("state")) != "WAIT"
+            or str(vehicle.get("detail")) != "OPERATOR_READY"
+        ):
+            raise Pallet3OperationConflictError(
+                "vehicle must report WAIT and OPERATOR_READY before pallet 3 recover"
+            )
+        operator_ready_observed_at = str(vehicle.get("observed_at") or "").strip()
+        if not operator_ready_observed_at:
+            raise Pallet3OperationConflictError(
+                "vehicle must provide observed_at with OPERATOR_READY before pallet 3 recover"
+            )
+        pallet3_errors = _pallet3_configuration_errors(inventory["zones"])
+        if pallet3_errors:
+            raise Pallet3OperationConflictError("; ".join(pallet3_errors))
+        if not self._store.claim_pallet3_recovery_operator_ready(
+            operation_id, operator_ready_observed_at
+        ):
+            raise Pallet3OperationConflictError(
+                "a new OPERATOR_READY report is required before another pallet 3 recover"
+            )
+        self._store.clear_error("pallet3_vehicle_snapshot")
+        self._store.mark_recovery_required(operation_id, robot_id)
+        self._continue_pallet3_operation(
+            robot_id, vehicle, operation, inventory["zones"]
+        )
+        workflow = self._store.get_pallet3_workflow(operation_id)
         if workflow is None:
             raise RuntimeError(f"pallet 3 workflow disappeared: {operation_id}")
         return workflow
@@ -506,7 +646,9 @@ class OrchestratorService:
             return
         command_type = "P3_OUTBOUND_WAYPOINTS"
         if recovery and self._store.has_command(operation_id, command_type):
-            command_type = "P3_OUTBOUND_WAYPOINTS_RECOVERY"
+            command_type = self._store.next_recovery_command_type(
+                operation_id, "P3_OUTBOUND_WAYPOINTS_RECOVERY"
+            )
         self._deliver_pallet3_workflow_command(
             workflow,
             command_type,
@@ -767,7 +909,9 @@ class OrchestratorService:
         zone = _zone_by_id(zones, zone_id)
         command_type = f"NAV_TO_{purpose}"
         if recovery and self._store.has_command(operation_id, command_type):
-            command_type = f"{command_type}_RECOVERY"
+            command_type = self._store.next_recovery_command_type(
+                operation_id, f"{command_type}_RECOVERY"
+            )
         payload = {
             "operation_id": operation_id,
             "purpose": purpose,

@@ -134,6 +134,7 @@ const state = {
   manualButton: null,
   manualSession: new ManualControlSession(),
   manualInFlight: false,
+  forkInFlight: false,
   manualSpeeds: { drive: 0.1, strafe: 0.1, rotation: 0.2 },
   toastTimer: null,
 };
@@ -173,6 +174,8 @@ const elements = {
   padStopButton: select('#padStopButton'),
   idleButton: select('#idleButton'),
   cancelButton: select('#cancelButton'),
+  forkUpButton: select('#forkUpButton'),
+  forkDownButton: select('#forkDownButton'),
   driveSpeedInput: select('#driveSpeedInput'),
   strafeSpeedInput: select('#strafeSpeedInput'),
   rotationSpeedInput: select('#rotationSpeedInput'),
@@ -229,7 +232,7 @@ export function fleetStateLabel(fleetState) {
   if (fleetState === 'INIT') return '초기화 중';
   if (fleetState === 'DRIVE') return '주행 중';
   if (fleetState === 'AUTO_DRIVE') return '자동 주행 중';
-  if (fleetState === 'MANUAL_DRIVE') return '수동 주행 중';
+  if (fleetState === 'MANUAL_DRIVE') return '개별 주행 중';
   if (fleetState === 'PICK') return '픽업 중';
   if (fleetState === 'PLACE') return '적치 중';
   if (fleetState === 'STOPPED') return '정지';
@@ -241,15 +244,37 @@ export function displayedFleetState(vehicle) {
   return vehicle?.display_state || vehicle?.fleet_state?.state;
 }
 
-export function taskLabel(task, fleetState) {
+export function canStartOperatorNavigation(vehicle) {
+  return ['STOPPED', 'IDLE'].includes(displayedFleetState(vehicle));
+}
+
+export function taskLabel(task, fleetState, report) {
   if (fleetState === 'STOPPED') return '정지 요청됨';
   if (fleetState === 'FAIL' || fleetState === 'FAILED') return '운행 복구 대기';
+  if (task?.status === 'RECOVERY_REQUIRED') return '운행 복구 대기';
+  const matchingReport = task?.operation_id && task.operation_id === report?.operation_id;
+  if (matchingReport) {
+    if (fleetState === 'PICK') return '파렛트 픽업 중';
+    if (fleetState === 'PLACE') return '파렛트 적치 중';
+    if (report.source === 'AUTO_DOCK' && report.detail === 'AUTO_DOCK_PICK_COMPLETED') {
+      return '파렛트 픽업 완료';
+    }
+    if (report.source === 'NAV2' && report.detail === 'NAVIGATION_SUCCEEDED') {
+      if (task.status === 'TO_PICK') return '픽업 구역 도착';
+      if (task.status === 'TO_PLACE') return '적치 구역 도착';
+    }
+    if (task.status === 'TO_PLACE') {
+      if (report.source === 'FORK' && report.detail === 'FORK_DOWN_COMPLETE') return '포크 하강 완료';
+      if (report.source === 'API' && report.detail === 'MANUAL_COMMAND_SENT') return '적치 후 이동 중';
+      if (report.source === 'API' && report.detail === 'MANUAL_COMMAND_EXPIRED') return '적치 완료 처리 대기';
+    }
+  }
   if (task?.status === 'TO_PICK') return '픽업 구역으로 이동';
   if (task?.status === 'PICKING') return '파렛트 픽업 중';
   if (task?.status === 'TO_PLACE') return '적치 구역으로 이동';
   if (task?.status === 'PLACING') return '파렛트 적치 중';
-  if (task?.status === 'RECOVERY_REQUIRED') return '운행 복구 대기';
-  if (fleetState === 'DRIVE' || fleetState === 'PICK' || fleetState === 'PLACE') return '작업 정보 수신 대기';
+  if (fleetState === 'MANUAL_DRIVE') return '운송 작업 외 주행';
+  if (['DRIVE', 'AUTO_DRIVE', 'PICK', 'PLACE'].includes(fleetState)) return '작업 정보 수신 대기';
   return '할당된 작업 없음';
 }
 
@@ -292,6 +317,11 @@ export function manualRepeatInterval(command) {
   const holdMs = Number(command?.hold_ms);
   if (!Number.isFinite(holdMs) || holdMs <= 0) return 220;
   return Math.max(50, Math.min(220, Math.floor(holdMs * 0.7)));
+}
+
+export function forkCommandPath(robotId, direction) {
+  if (!['up', 'down'].includes(direction)) throw new Error('지원하지 않는 포크 방향입니다.');
+  return `/api/vehicles/${encodeURIComponent(robotId)}/fork/${direction}`;
 }
 
 function boundedManualSpeed(value) {
@@ -440,7 +470,7 @@ function renderVehicleList(vehicles) {
     const connectivity = vehicle.connectivity || { state: 'unconfirmed' };
     const visualState = connectivityClass(connectivity.state);
     const fleetState = displayedFleetState(vehicle);
-    const task = taskLabel(vehicle.active_task, fleetState);
+    const task = taskLabel(vehicle.active_task, fleetState, vehicle.fleet_state);
     const battery = batteryLabel(vehicle.battery?.battery_raw);
     return `<button class="vehicle-item ${selected}" data-robot-id="${escapeHtml(vehicle.robot_id)}" type="button">
       <span class="vehicle-status-dot ${visualState}"></span>
@@ -471,14 +501,17 @@ function renderSourceHealth(sources) {
 
 function renderSelectedVehicle(vehicle) {
   const enabled = Boolean(vehicle);
-  const navigationEnabled = enabled && !isActiveOperation(vehicle?.fleet_state?.state);
-  elements.initialPoseButton.disabled = !navigationEnabled;
-  elements.goalPoseButton.disabled = !navigationEnabled;
-  elements.waypointButton.disabled = !navigationEnabled;
+  const initialPoseEnabled = enabled && !isActiveOperation(vehicle?.fleet_state?.state);
+  const operatorNavigationEnabled = canStartOperatorNavigation(vehicle);
+  elements.initialPoseButton.disabled = !initialPoseEnabled;
+  elements.goalPoseButton.disabled = !operatorNavigationEnabled;
+  elements.waypointButton.disabled = !operatorNavigationEnabled;
   elements.stopButton.disabled = !enabled;
   elements.padStopButton.disabled = !enabled;
   elements.idleButton.disabled = !enabled;
   elements.cancelButton.disabled = !enabled;
+  elements.forkUpButton.disabled = !enabled || state.forkInFlight;
+  elements.forkDownButton.disabled = !enabled || state.forkInFlight;
   document.querySelectorAll('[data-manual]').forEach((button) => {
     button.disabled = !enabled || isActiveOperation(vehicle?.fleet_state?.state);
   });
@@ -508,8 +541,8 @@ function renderSelectedVehicle(vehicle) {
   const task = vehicle.active_task;
   const taskRoute = task?.source_zone_id && task?.destination_zone_id
     ? `${task.source_zone_id} → ${task.destination_zone_id}`
-    : task ? '작업 상세 수신 대기' : fleetStateLabel(fleetState);
-  elements.taskCard.innerHTML = `<p class="eyebrow">현재 작업</p><strong>${escapeHtml(taskLabel(task, fleetState))}</strong><span>${escapeHtml(taskRoute)}</span>`;
+    : task ? '작업 상세 수신 대기' : '진행 중인 운송 작업 없음';
+  elements.taskCard.innerHTML = `<p class="eyebrow">현재 작업</p><strong>${escapeHtml(taskLabel(task, fleetState, vehicle.fleet_state))}</strong><span>${escapeHtml(taskRoute)}</span>`;
 }
 
 function renderInventory(inventory) {
@@ -527,8 +560,9 @@ function renderInventory(inventory) {
 }
 
 export function inventoryBreakdown(items) {
-  if (!items?.length) return '재고 없음';
-  return items.map((item) => `${item.payload_type} ${item.quantity}`).join(' · ');
+  const stockedItems = (items || []).filter((item) => item.quantity > 0);
+  if (!stockedItems.length) return '재고 없음';
+  return stockedItems.map((item) => `${item.payload_type} ${item.quantity}`).join(' · ');
 }
 
 function renderOverlay() {
@@ -687,6 +721,22 @@ function finishManual(sendStop = true) {
   return manualRobotId;
 }
 
+async function sendForkCommand(direction) {
+  const vehicle = selectedVehicle();
+  if (!vehicle || state.forkInFlight) return;
+  state.forkInFlight = true;
+  renderSelectedVehicle(vehicle);
+  try {
+    await postControl(forkCommandPath(vehicle.robot_id, direction));
+    showToast(`포크 ${direction === 'up' ? '올리기' : '내리기'} 요청을 전달했습니다.`);
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    state.forkInFlight = false;
+    renderSelectedVehicle(selectedVehicle());
+  }
+}
+
 function emergencyStop() {
   const manualRobotId = finishManual(true);
   if (state.selectedRobotId && state.selectedRobotId !== manualRobotId) {
@@ -739,7 +789,9 @@ function renderNavigationDraft() {
   const vehicle = selectedVehicle();
   const ownsDraft = state.navigationDraftRobotId === vehicle?.robot_id;
   const hasPending = ownsDraft && state.navigationDraft.hasPending(mode);
-  const navigationReady = Boolean(vehicle) && !isActiveOperation(vehicle.fleet_state?.state);
+  const navigationReady = mode === 'initial'
+    ? Boolean(vehicle) && !isActiveOperation(vehicle?.fleet_state?.state)
+    : canStartOperatorNavigation(vehicle);
   elements.executeNavigationButton.disabled = !navigationReady || !hasPending || state.navigationExecution.isPending();
   elements.clearNavigationButton.disabled = !hasPending;
   elements.navigationDraftTitle.textContent = navigationDraftTitle(mode);
@@ -805,6 +857,10 @@ async function executeNavigationDraft() {
   const vehicle = selectedVehicle();
   const mode = state.navigationMode;
   if (!vehicle || !mode || state.navigationDraftRobotId !== vehicle.robot_id || !state.navigationDraft.hasPending(mode)) return;
+  const navigationReady = mode === 'initial'
+    ? !isActiveOperation(vehicle.fleet_state?.state)
+    : canStartOperatorNavigation(vehicle);
+  if (!navigationReady) return;
   const execution = state.navigationExecution.begin(
     vehicle.robot_id,
     mode,
@@ -1008,6 +1064,8 @@ function installInteractions() {
     const vehicle = selectedVehicle(); if (!vehicle) return;
     try { await postControl(`/api/vehicles/${encodeURIComponent(vehicle.robot_id)}/navigation/cancel`); showToast('주행 취소 요청을 전달했습니다.'); refreshSnapshot(); } catch (error) { showToast(error.message, true); }
   });
+  elements.forkUpButton.addEventListener('click', () => sendForkCommand('up'));
+  elements.forkDownButton.addEventListener('click', () => sendForkCommand('down'));
   elements.zoomInButton.addEventListener('click', () => setMapZoom(state.mapZoom + 0.25));
   elements.zoomOutButton.addEventListener('click', () => setMapZoom(state.mapZoom - 0.25));
   elements.zoomResetButton.addEventListener('click', resetMapView);

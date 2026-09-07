@@ -198,6 +198,65 @@ class OrchestratorApiTest(unittest.TestCase):
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(conflict.status_code, 409)
 
+    def test_pallet3_recover_route_forwards_the_operation(self) -> None:
+        calls: list[str] = []
+
+        class RecoveringPallet3OperationService:
+            def __init__(self, store) -> None:
+                self.store = store
+
+            def recover_pallet3_operation(self, operation_id: str):
+                calls.append(operation_id)
+                workflow, _created = self.store.create_or_get_pallet3_workflow(
+                    operation_id, "robot_1"
+                )
+                self.store.transition_pallet3_workflow(
+                    operation_id, "PICK_PENDING", "OUTBOUND_SENT"
+                )
+                return self.store.get_pallet3_workflow(workflow.operation_id)
+
+        app = create_app(
+            str(Path(self.temporary_directory.name) / "pallet3-recover.db"),
+            service_factory=lambda store: RecoveringPallet3OperationService(store),
+        )
+        with TestClient(app) as client:
+            response = client.post("/api/v1/operations/operation-1/pallet-3/recover")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls, ["operation-1"])
+        self.assertEqual(response.json()["operation_id"], "operation-1")
+        self.assertEqual(response.json()["phase"], "OUTBOUND_SENT")
+
+    def test_pallet3_force_completion_route_forwards_the_operator_confirmation(self) -> None:
+        calls: list[tuple[str, bool]] = []
+
+        class ForceCompletingPallet3OperationService:
+            def __init__(self, store) -> None:
+                self.store = store
+
+            def force_complete_pallet3_operation(
+                self, operation_id: str, operator_confirmed: bool
+            ):
+                calls.append((operation_id, operator_confirmed))
+                workflow, _created = self.store.create_or_get_pallet3_workflow(
+                    operation_id, "robot_1"
+                )
+                return workflow
+
+        app = create_app(
+            str(Path(self.temporary_directory.name) / "pallet3-force-complete.db"),
+            service_factory=lambda store: ForceCompletingPallet3OperationService(store),
+        )
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/operations/operation-1/pallet-3/force-complete",
+                json={"operator_confirmed": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls, [("operation-1", True)])
+        self.assertEqual(response.json()["operation_id"], "operation-1")
+
     def test_pallet3_poc_forwards_explicit_pick_bypass_to_the_runtime_service(self) -> None:
         # This catches silently rejecting or dropping the explicit POC-only PICK bypass.
         calls: list[tuple[str, bool]] = []

@@ -136,6 +136,25 @@ class InventoryApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["event_type"], "PLACE_COMPLETED")
 
+    def test_force_completion_endpoint_closes_to_pick_and_releases_the_reservation(
+        self,
+    ) -> None:
+        response = self.client.post(
+            f"/api/v1/operations/{self.operation_id}/force-completions",
+            json={
+                "robot_id": "robot_1",
+                "idempotency_key": "force-complete-api-1",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["event_type"], "FORCE_COMPLETED")
+        self.assertEqual(response.json()["quantity_delta"], 0)
+        self.assertEqual(
+            self.client.get("/api/v1/stocks").json()[0]["reserved_quantity"], 0
+        )
+        self.assertEqual(self.client.get("/api/v1/operations/active").json(), [])
+
     def test_stock_list_endpoint_returns_available_quantity(self) -> None:
         response = self.client.get("/api/v1/stocks")
 

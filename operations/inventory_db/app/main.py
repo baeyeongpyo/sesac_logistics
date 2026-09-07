@@ -367,6 +367,28 @@ def create_app(
         )
         return _response(event)
 
+    @app.post(
+        "/api/v1/operations/{operation_id}/force-completions",
+        tags=["operations"],
+        summary="운영자 확인 강제 완료 반영",
+        description=_endpoint_description(
+            "현장에서 작업 완료와 포크 비적재를 확인한 뒤, 차량 명령 없이 서버의 운송 작업과 적재 상태를 종료합니다.",
+            "TO_PICK이면 source 예약만 해제하고, TO_PLACE이면 destination 재고를 1 증가시킨 뒤 차량을 비적재 및 작업을 COMPLETED로 전이합니다.",
+            "물리 포크 DOWN 또는 차량 주행 명령을 전송하지 않습니다. 같은 idempotency_key 재전송은 같은 이벤트를 반환합니다.",
+        ),
+    )
+    def force_complete(
+        operation_id: Annotated[
+            str, Path(description="운영자 확인으로 종료할 운송 작업의 UUID")
+        ],
+        body: CompletionRequest,
+        request: Request,
+    ) -> dict:
+        event = _store(request).force_complete(
+            operation_id, body.robot_id, body.idempotency_key, body.occurred_at
+        )
+        return _response(event)
+
     @app.get(
         "/api/v1/robots/{robot_id}/next-instruction",
         tags=["robots"],

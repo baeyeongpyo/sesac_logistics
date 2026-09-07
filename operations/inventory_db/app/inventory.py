@@ -264,10 +264,14 @@ class InventoryStore:
                     FOREIGN KEY (operation_id) REFERENCES transport_operations(operation_id),
                     FOREIGN KEY (zone_id) REFERENCES zones(zone_id),
                     FOREIGN KEY (payload_type) REFERENCES payload_types(payload_type),
-                    CHECK (event_type IN ('PICK_COMPLETED', 'PLACE_COMPLETED', 'STOCK_ADJUSTED')),
+                    CHECK (event_type IN (
+                        'PICK_COMPLETED', 'PLACE_COMPLETED', 'FORCE_COMPLETED',
+                        'STOCK_ADJUSTED'
+                    )),
                     CHECK (
                         (event_type = 'PICK_COMPLETED' AND quantity_delta = -1)
                         OR (event_type = 'PLACE_COMPLETED' AND quantity_delta = 1)
+                        OR (event_type = 'FORCE_COMPLETED' AND quantity_delta IN (0, 1))
                         OR (event_type = 'STOCK_ADJUSTED' AND quantity_delta <> 0)
                     )
                 );
@@ -924,6 +928,179 @@ class InventoryStore:
             )
             return event
 
+    def force_complete(
+        self,
+        operation_id: str,
+        robot_id: str,
+        idempotency_key: str,
+        occurred_at: str | None = None,
+    ) -> InventoryEvent:
+        """Close an operator-confirmed transfer without issuing a vehicle command.
+
+        A pre-pick transfer only releases its source reservation.  A transfer whose
+        source pick was recorded is accounted as placed at its destination.  In all
+        cases, the server-side robot pallet state becomes empty.
+        """
+        if not idempotency_key:
+            raise ValueError("idempotency_key must not be empty")
+        event_timestamp = occurred_at or self._timestamp()
+        created_at = self._timestamp()
+        with self._write_connection() as connection:
+            existing = connection.execute(
+                "SELECT * FROM inventory_events WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                self._validate_duplicate_event(
+                    existing, operation_id, robot_id, "FORCE_COMPLETED"
+                )
+                return self._event_from_row(existing)
+
+            operation = connection.execute(
+                "SELECT * FROM transport_operations WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if operation is None:
+                raise NotFoundError(f"unknown operation: {operation_id}")
+            if operation["robot_id"] != robot_id:
+                raise ConflictError("force-complete robot does not own this operation")
+
+            operation_status = OperationStatus(operation["status"])
+            if operation_status in {OperationStatus.TO_PICK, OperationStatus.PICKING}:
+                released = connection.execute(
+                    """
+                    UPDATE pallet_stocks
+                    SET reserved_quantity = reserved_quantity - 1,
+                        version = version + 1,
+                        updated_at = ?
+                    WHERE zone_id = ?
+                      AND payload_type = ?
+                      AND reserved_quantity > 0
+                    """,
+                    (
+                        created_at,
+                        operation["source_zone_id"],
+                        operation["payload_type"],
+                    ),
+                )
+                if released.rowcount != 1:
+                    raise ConflictError("source reservation is no longer available")
+                event_zone_id = operation["source_zone_id"]
+                quantity_delta = 0
+            elif operation_status in {
+                OperationStatus.TO_PLACE,
+                OperationStatus.PLACING,
+                OperationStatus.RECOVERY_REQUIRED,
+            }:
+                destination = connection.execute(
+                    "SELECT capacity FROM zones WHERE zone_id = ?",
+                    (operation["destination_zone_id"],),
+                ).fetchone()
+                if destination is None:
+                    raise NotFoundError(
+                        f"unknown zone: {operation['destination_zone_id']}"
+                    )
+                if destination["capacity"] is not None:
+                    occupied = connection.execute(
+                        "SELECT COALESCE(SUM(quantity), 0) AS occupied FROM pallet_stocks WHERE zone_id = ?",
+                        (operation["destination_zone_id"],),
+                    ).fetchone()["occupied"]
+                    if occupied + 1 > destination["capacity"]:
+                        raise ConflictError("destination zone capacity is full")
+                connection.execute(
+                    """
+                    INSERT INTO pallet_stocks (
+                        zone_id, payload_type, quantity, reserved_quantity, version, updated_at
+                    ) VALUES (?, ?, 1, 0, 1, ?)
+                    ON CONFLICT(zone_id, payload_type) DO UPDATE SET
+                        quantity = pallet_stocks.quantity + 1,
+                        version = pallet_stocks.version + 1,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        operation["destination_zone_id"],
+                        operation["payload_type"],
+                        created_at,
+                    ),
+                )
+                event_zone_id = operation["destination_zone_id"]
+                quantity_delta = 1
+            elif operation_status is OperationStatus.COMPLETED:
+                event_zone_id = operation["destination_zone_id"]
+                quantity_delta = 0
+            else:
+                raise ConflictError("operation cannot be force-completed")
+
+            connection.execute(
+                """
+                INSERT INTO robot_pallet_states (
+                    robot_id, has_pallet, payload_type, version, reported_at, updated_at
+                ) VALUES (?, 0, NULL, 1, ?, ?)
+                ON CONFLICT(robot_id) DO UPDATE SET
+                    has_pallet = 0,
+                    payload_type = NULL,
+                    version = robot_pallet_states.version + 1,
+                    reported_at = excluded.reported_at,
+                    updated_at = excluded.updated_at
+                """,
+                (robot_id, event_timestamp, created_at),
+            )
+            connection.execute(
+                """
+                UPDATE transport_operations
+                SET status = ?,
+                    version = version + 1,
+                    updated_at = ?,
+                    completed_at = COALESCE(completed_at, ?)
+                WHERE operation_id = ?
+                """,
+                (
+                    OperationStatus.COMPLETED.value,
+                    created_at,
+                    created_at,
+                    operation_id,
+                ),
+            )
+            event = InventoryEvent(
+                event_id=str(uuid4()),
+                idempotency_key=idempotency_key,
+                operation_id=operation_id,
+                robot_id=robot_id,
+                event_type="FORCE_COMPLETED",
+                zone_id=event_zone_id,
+                payload_type=PayloadType(operation["payload_type"]),
+                quantity_delta=quantity_delta,
+                occurred_at=event_timestamp,
+                created_at=created_at,
+            )
+            connection.execute(
+                """
+                INSERT INTO inventory_events (
+                    event_id, idempotency_key, operation_id, robot_id, event_type,
+                    zone_id, payload_type, quantity_delta, occurred_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.event_id,
+                    event.idempotency_key,
+                    event.operation_id,
+                    event.robot_id,
+                    event.event_type,
+                    event.zone_id,
+                    event.payload_type.value,
+                    event.quantity_delta,
+                    event.occurred_at,
+                    event.created_at,
+                ),
+            )
+            self._enqueue_outbox(
+                connection,
+                "inventory.force_completed",
+                self._inventory_event_payload(event),
+                event.created_at,
+            )
+            return event
+
     def operation(self, operation_id: str) -> Operation:
         connection = self._connect()
         try:
@@ -979,10 +1156,20 @@ class InventoryStore:
     def _rebuild_legacy_transport_tables(self) -> None:
         connection = self._connect()
         try:
-            table = connection.execute(
+            transport_table = connection.execute(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'transport_operations'"
             ).fetchone()
-            if table is None or "'QUEUED'" not in table["sql"]:
+            inventory_event_table = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'inventory_events'"
+            ).fetchone()
+            if (
+                transport_table is None
+                or inventory_event_table is None
+                or (
+                    "'QUEUED'" not in transport_table["sql"]
+                    and "'FORCE_COMPLETED'" in inventory_event_table["sql"]
+                )
+            ):
                 return
 
             connection.execute("PRAGMA foreign_keys = OFF")
@@ -1048,10 +1235,14 @@ class InventoryStore:
                         FOREIGN KEY (operation_id) REFERENCES transport_operations(operation_id),
                         FOREIGN KEY (zone_id) REFERENCES zones(zone_id),
                         FOREIGN KEY (payload_type) REFERENCES payload_types(payload_type),
-                        CHECK (event_type IN ('PICK_COMPLETED', 'PLACE_COMPLETED', 'STOCK_ADJUSTED')),
+                        CHECK (event_type IN (
+                            'PICK_COMPLETED', 'PLACE_COMPLETED', 'FORCE_COMPLETED',
+                            'STOCK_ADJUSTED'
+                        )),
                         CHECK (
                             (event_type = 'PICK_COMPLETED' AND quantity_delta = -1)
                             OR (event_type = 'PLACE_COMPLETED' AND quantity_delta = 1)
+                            OR (event_type = 'FORCE_COMPLETED' AND quantity_delta IN (0, 1))
                             OR (event_type = 'STOCK_ADJUSTED' AND quantity_delta <> 0)
                         )
                     )

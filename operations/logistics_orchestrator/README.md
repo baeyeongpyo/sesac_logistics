@@ -53,6 +53,8 @@ POST /api/v1/reconcile
 POST /api/v1/events/fleet
 POST /api/v1/events/inventory
 POST /api/v1/operations/{operation_id}/pallet-3/bypass-pick
+POST /api/v1/operations/{operation_id}/pallet-3/recover
+POST /api/v1/operations/{operation_id}/pallet-3/force-complete
 POST /api/v1/poc/pallet-3-missions
 GET  /api/v1/poc/pallet-3-missions/{mission_id}
 POST /api/v1/poc/pallet-3-missions/{mission_id}/unload-confirmation
@@ -164,7 +166,7 @@ curl --fail-with-body -X POST \
 
 Pallet 3 도착 뒤에는 별도 하역 확인 API가 없습니다. 일치하는 `operation_id`의
 `FORK_DOWN_COMPLETE`가 들어온 경우에만 p3 재고 반영과 후진·복귀가 진행됩니다. outbound
-waypoint는 `(-0.440,-0.900) -> (-0.420,-2.000) -> (-0.420,-2.400)`이고, 복귀 waypoint는
+waypoint는 `(-0.440,-0.900) -> (-0.440,-1.690) -> (-0.440,-2.340)`이고, 복귀 waypoint는
 `(-0.420,-2.000) -> (-0.440,-0.900) -> (0.085,-0.905)`입니다.
 
 ### 복구
@@ -175,6 +177,41 @@ Fleet가 `FAIL`이면 새 명령을 보내지 않습니다. 운영자가 `operat
 후진 또는 복귀 중 실패하면 실제 물리 수행 여부가 불명확하므로 자동 재발행하지 않고 stop과
 `FAILED` workflow를 남깁니다. 물류 상태를 현장에서 해소한 뒤에는 기존 작업을 초기화하지
 말고 새 Inventory `operation_id`로 다음 반복 작업을 생성합니다.
+
+수동 조작, cancel 또는 stop으로 PICK 전·Pallet 3 outbound waypoint가 중단되었을 때는
+현장 안전을 확인하고 차량이 `WAIT` / `OPERATOR_READY`를 실제 보고한 뒤 아래 recovery를
+명시적으로 호출할 수 있습니다. recovery는 같은 `operation_id`의 안전한 주행 단계만
+재전송하며 Inventory PICK/PLACE 또는 재고를 다시 변경하지 않습니다. Fork DOWN 이후에는
+물리 하역 여부가 불명확하므로 recovery를 거부합니다. 같은 `OPERATOR_READY` 보고는 한 번만
+사용할 수 있으므로, 다시 수동 조작·cancel·stop이 발생한 경우에는 차량이 새
+`OPERATOR_READY`를 보고한 뒤에만 recovery를 다시 호출합니다. HTTP 재시도나 중복 클릭만으로
+주행 명령이 재발행되지는 않습니다.
+
+```bash
+curl --fail-with-body -X POST \
+  http://127.0.0.1:8083/api/v1/operations/{operation_id}/pallet-3/recover
+```
+
+### 현장 확인 강제 완료
+
+현장에서 해당 화물을 Docker에 반납했거나 P3에 실제 적치했고, 차량 포크가 비어 있는 것을
+확인한 뒤 서버 원장만 종료해야 할 때 아래 API를 사용합니다. 이 API는 Fleet 상태(`DRIVE`,
+`WAIT`, `FAIL`, `INIT` 등)를 조건으로 확인하지 않으며, **차량 주행·정지·포크 DOWN 명령을
+전송하지 않습니다.** 물리 상태를 바꾸는 API가 아니라 현장 확인 결과를 서버에 반영하는
+작업입니다.
+
+```bash
+curl --fail-with-body -X POST \
+  http://127.0.0.1:8083/api/v1/operations/{operation_id}/pallet-3/force-complete \
+  -H 'Content-Type: application/json' \
+  -d '{"operator_confirmed":true}'
+```
+
+`docker -> p3` 작업만 허용됩니다. `TO_PICK`이면 Docker 실재고는 줄이지 않고 source 예약만
+해제합니다. `TO_PLACE`이면 Docker PICK이 이미 반영된 것으로 보고 P3 재고를 1 증가시킵니다.
+두 경우 모두 Inventory의 `robot_pallet_states.has_pallet`을 `false`로 바꾸고 작업·Pallet 3
+workflow를 `COMPLETED`로 종료합니다. 이미 이 API로 종료한 작업을 재호출해도 같은 완료 상태를
+반환합니다.
 
 ## Legacy Pallet 3 POC
 
@@ -248,7 +285,7 @@ FOLLOW_WAYPOINTS(dock_1 → pallet_3)
   → FOLLOW_WAYPOINTS(pallet_3 → dock_1)
 ```
 
-출발 waypoint는 `(-0.440,-0.900) → (-0.420,-2.000) → (-0.420,-2.400)`이고,
+출발 waypoint는 `(-0.440,-0.900) → (-0.440,-1.690) → (-0.440,-2.340)`이고,
 복귀 waypoint는 `(-0.420,-2.000) → (-0.440,-0.900) → (0.085,-0.905)`입니다.
 `DOWN_COMPLETE`와 후진 정지 보고는 모두 같은 `mission_id`여야 합니다. Fork 오류·타임아,
 Nav2 실패 또는 명령 전달 실패는 미션을 `FAILED`로 기록하고 Fleet Manager 경유 즉시 정지를

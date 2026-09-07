@@ -123,10 +123,11 @@ Foxglove Bridge의 허용 topic, QoS, 서비스/파라미터 차단, 압축 설�
 | `--initial-pose-topic` | `/initialpose` | AMCL 초기 위치 발행 토픽 |
 | `--initial-pose-position-variance` | `0.25` | initial pose X/Y covariance 대각값 (m²) |
 | `--initial-pose-yaw-variance` | `0.0685` | initial pose yaw covariance 대각값 (rad²) |
-| `--auto-dock-arrival-topic` | `/{robot_id}/nav2/arrival` | Auto Dock Pick·Place 시작 JSON 발행 토픽 |
+| `--auto-dock-arrival-topic` | `/nav2/arrival` | Auto Dock Pick·Place 시작 JSON 발행 토픽 |
 | `--auto-dock-status-topic` | `/{robot_id}/auto_dock/status` | Auto Dock 상태 JSON 구독 토픽 |
 | `--auto-dock-stop-topic` | `/{robot_id}/auto_dock/stop` | Auto Dock 중단 `std_msgs/msg/Empty` 발행 토픽 |
-| `--auto-dock-drive-ready-topic` | `/{robot_id}/auto_dock/drive_ready` | Auto Dock 실제 완료 `std_msgs/msg/Empty` 구독 토픽 |
+| `--auto-dock-drive-ready-topic` | `/auto_dock/drive_ready` | Auto Dock 실제 완료 `std_msgs/msg/Empty` 구독 토픽 |
+| `--pallet3-mission-script` | `tools/pallet3_mission.sh` | Pallet 3 direct mission을 실행할 차량 shell 경로 |
 | `--max-linear-x` | `1.0` | 수동 전진/후진 최대 속도 (m/s) |
 | `--max-linear-y` | `1.0` | 수동 횡이동 최대 속도 (m/s) |
 | `--max-angular-z` | `1.0` | 수동 회전 최대 속도 (rad/s) |
@@ -272,20 +273,50 @@ curl -i -X POST http://192.168.100.20:8082/v1/auto-dock \
 ```
 
 `PICK`은 `IDLE`, `PLACE`는 동일한 작업 ID의 `PICK_COMPLETE`에서만 수락한다. API는
-위 JSON에 `status: "SUCCEEDED"`를 추가하여 `/{robot_id}/nav2/arrival`에 발행한다.
+위 JSON에 `status: "SUCCEEDED"`를 추가하여 `/nav2/arrival`에 발행한다.
 Auto Dock의 `READY` status는 완료가 아니다. fork, 후진, 준비 자세까지 끝난
-`/{robot_id}/auto_dock/drive_ready`만 `PICK_COMPLETE` 또는 `PLACE_COMPLETE`으로
+`/auto_dock/drive_ready`만 `PICK_COMPLETE` 또는 `PLACE_COMPLETE`으로
 판정한다. `PLACE_COMPLETE` 뒤에는 자동으로 `IDLE` snapshot으로 전환한다.
 
 POC에서 Auto Dock PICK 완료를 가상으로 확인해야 할 때는, PICK 명령이 이미 `PICKING` 상태로
 수락된 뒤에만 아래처럼 `std_msgs/msg/Empty`를 한 번 발행한다.
 
 ```bash
-ros2 topic pub --once /robot_1/auto_dock/drive_ready std_msgs/msg/Empty "{}"
+ros2 topic pub --once /auto_dock/drive_ready std_msgs/msg/Empty "{}"
 ```
 
-Pallet 3 POC의 `DOWN_COMPLETE`는 기존 PICK operation ID를 유지한 채 적재 상태를 `IDLE`로
-해제한다. 따라서 이후 1초 후진과 dock_1 복귀를 같은 작업 ID로 추적할 수 있다.
+## Pallet 3 direct mission
+
+Pallet 3 mission은 차량에서 `tools/pallet3_mission.sh`가 실행하지만, 운영자는 shell을
+직접 실행하지 않는다. Fleet Manager가 Inventory operation을 만들고 Fleet Bridge를 통해
+차량의 shell process group을 시작한다. 작업 시작은 `pick_mode`를 반드시 명시한다.
+
+```bash
+curl -i -X POST http://127.0.0.1:8090/api/v1/vehicles/robot_1/missions/pallet3 \
+  -H 'Content-Type: application/json' \
+  --data '{"pick_mode":"auto_dock"}'
+
+# Auto Dock 없이 포크 UP 완료를 PICK으로 처리할 때
+curl -i -X POST http://127.0.0.1:8090/api/v1/vehicles/robot_1/missions/pallet3 \
+  -H 'Content-Type: application/json' \
+  --data '{"pick_mode":"manual"}'
+```
+
+차량에는 `curl`과 `jq`가 있어야 한다. Auto Dock 방식은 `/auto_dock/drive_ready`가 실제로
+도착한 뒤에만 PICK 완료를 보고한다. 수동 방식은 `/fork/state`의 `UP_COMPLETE`가 확인된
+뒤에만 PICK 완료를 보고한다. shell은 다음 순서를 고정한다.
+
+1. Inventory가 만든 `NORMAL docker -> p3` operation의 PICK을 완료한다.
+2. P3 waypoint 주행 후 포크를 내리고, Fleet Manager가 Inventory PLACE 완료를 확인한다.
+3. 차량 API의 Inventory operation context를 해제한 뒤 `-0.18 m/s`, `1000 ms` 후진한다.
+4. operation ID 없이 Docker waypoint로 복귀하고 Nav2 정지를 확인한 후 복귀 완료를 보고한다.
+
+PICK 또는 PLACE event에 대한 Fleet Manager 응답이 0.5초 간격으로 5초 동안 성공하지 않으면
+shell은 로컬 `/v1/stop`을 호출하고 실패 종료한다. `/v1/stop`과
+`/v1/navigation/cancel`은 활성 shell process group에도 `SIGTERM`을 전달하므로, 긴급 정지나
+경로 취소 뒤 다음 단계가 실행되지 않는다. PLACE 이전의 중단은 Inventory operation을 활성
+상태로 남겨 운영자가 실제 적재 상태를 확인해 복구한다. PLACE 뒤 중단은 이미 원장 완료 상태이며
+차량 복귀만 복구 대상이다.
 
 ### 차량 상태 조회
 

@@ -86,3 +86,9 @@ class Pallet3ManualPickRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     operator_confirmed: bool
+
+
+class Pallet3ForceCompletionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operator_confirmed: bool

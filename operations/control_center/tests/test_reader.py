@@ -68,6 +68,82 @@ class SnapshotReaderTests(unittest.TestCase):
         self.assertEqual(vehicle['fleet_state']['state'], 'DRIVE')
         self.assertEqual(vehicle['display_state'], 'AUTO_DRIVE')
 
+    def test_current_p3_work_is_not_replaced_by_completed_history(self):
+        with self._connect('inventory.db') as db:
+            db.execute("UPDATE transport_operations SET status = 'COMPLETED'")
+            db.execute(
+                "INSERT INTO transport_operations VALUES "
+                "('p3-current', 'R1', 'NORMAL', 'docker', 'p3', 'TO_PLACE', "
+                "0, NULL, 2, '2026-09-05T08:00:00Z', '2026-09-05T08:01:00Z', NULL)"
+            )
+        with self._connect('fleet_manager.db') as db:
+            db.execute(
+                "UPDATE vehicle_states SET state = 'DRIVE', operation_id = 'p3-current', "
+                "source = 'NAV2', detail = 'NAVIGATION_STARTED'"
+            )
+
+        snapshot = SnapshotReader(self.data_directory).snapshot()
+        vehicle = snapshot['vehicles'][0]
+
+        self.assertEqual(vehicle['active_task']['operation_id'], 'p3-current')
+        self.assertEqual(vehicle['active_task']['destination_zone_id'], 'p3')
+        self.assertEqual(vehicle['display_state'], 'AUTO_DRIVE')
+        self.assertIsNone(vehicle['orchestrator_step'])
+        self.assertEqual(len(snapshot['inventory']['transport_operations']), 2)
+
+    def test_completed_history_is_not_an_active_task_after_stop_or_return(self):
+        with self._connect('inventory.db') as db:
+            db.execute("UPDATE transport_operations SET status = 'COMPLETED'")
+        for state, operation_id in [('FAIL', 'return-route'), ('WAIT', 'op-1')]:
+            with self.subTest(state=state):
+                with self._connect('fleet_manager.db') as db:
+                    db.execute(
+                        "UPDATE vehicle_states SET state = ?, operation_id = ?, "
+                        "source = 'API', detail = 'API_STOP'",
+                        (state, operation_id),
+                    )
+
+                snapshot = SnapshotReader(self.data_directory).snapshot()
+
+                self.assertIsNone(snapshot['vehicles'][0]['active_task'])
+                self.assertIsNone(snapshot['vehicles'][0]['orchestrator_step'])
+                self.assertEqual(len(snapshot['inventory']['transport_operations']), 1)
+
+    def test_active_task_survives_a_newer_update_to_completed_history(self):
+        with self._connect('inventory.db') as db:
+            db.execute(
+                "INSERT INTO transport_operations VALUES "
+                "('old-completed', 'R1', 'NORMAL', 'docker', 'p3', 'COMPLETED', "
+                "0, NULL, 3, '2026-08-31T08:00:00Z', '2026-09-05T08:01:00Z', "
+                "'2026-09-05T08:01:00Z')"
+            )
+        with self._connect('fleet_manager.db') as db:
+            db.execute("UPDATE vehicle_states SET operation_id = NULL")
+
+        vehicle = SnapshotReader(self.data_directory).snapshot()['vehicles'][0]
+
+        self.assertEqual(vehicle['active_task']['operation_id'], 'op-1')
+
+    def test_arrival_wait_is_not_displayed_as_driving(self):
+        with self._connect('inventory.db') as db:
+            db.execute("UPDATE transport_operations SET status = 'TO_PLACE'")
+        with self._connect('fleet_manager.db') as db:
+            db.execute(
+                "UPDATE vehicle_states SET state = 'WAIT', source = 'NAV2', "
+                "detail = 'NAVIGATION_SUCCEEDED'"
+            )
+
+        vehicle = SnapshotReader(self.data_directory).snapshot()['vehicles'][0]
+
+        self.assertEqual(vehicle['display_state'], 'WAIT')
+
+    def test_missing_inventory_preserves_fleet_operation_reference(self):
+        (self.data_directory / 'inventory.db').unlink()
+
+        vehicle = SnapshotReader(self.data_directory).snapshot()['vehicles'][0]
+
+        self.assertEqual(vehicle['active_task'], {'operation_id': 'op-1'})
+
     def test_snapshot_displays_navigation_without_inventory_operation_as_manual_drive(self):
         with self._connect('inventory.db') as db:
             db.execute("DELETE FROM transport_operations WHERE operation_id = 'op-1'")
@@ -106,6 +182,20 @@ class SnapshotReaderTests(unittest.TestCase):
             db.execute(
                 "UPDATE vehicle_states SET state = 'WAIT', operation_id = 'manual-nav', "
                 "detail = 'NAVIGATION_SUCCEEDED' WHERE robot_id = 'R1'"
+            )
+
+        vehicle = SnapshotReader(self.data_directory).snapshot()['vehicles'][0]
+
+        self.assertEqual(vehicle['fleet_state']['state'], 'WAIT')
+        self.assertEqual(vehicle['display_state'], 'WAIT')
+
+    def test_snapshot_keeps_operator_ready_wait_available_to_the_server(self):
+        with self._connect('inventory.db') as db:
+            db.execute("DELETE FROM transport_operations WHERE operation_id = 'op-1'")
+        with self._connect('fleet_manager.db') as db:
+            db.execute(
+                "UPDATE vehicle_states SET state = 'WAIT', source = 'API', "
+                "detail = 'OPERATOR_READY' WHERE robot_id = 'R1'"
             )
 
         vehicle = SnapshotReader(self.data_directory).snapshot()['vehicles'][0]

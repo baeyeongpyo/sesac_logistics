@@ -96,6 +96,10 @@ class OrchestratorStore:
                     updated_at TEXT NOT NULL,
                     completed_at TEXT
                 );
+                CREATE TABLE IF NOT EXISTS pallet3_recovery_operator_ready (
+                    operation_id TEXT PRIMARY KEY,
+                    observed_at TEXT NOT NULL
+                );
                 """
             )
 
@@ -222,6 +226,42 @@ class OrchestratorStore:
             ).fetchone()
         return row is not None
 
+    def next_recovery_command_type(self, operation_id: str, base_command_type: str) -> str:
+        """Return an unused outbox type for another explicit recovery command."""
+        prefix = f"{base_command_type}_"
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT command_type FROM command_outbox
+                WHERE operation_id = ?
+                  AND (command_type = ? OR command_type GLOB ?)
+                """,
+                (operation_id, base_command_type, f"{prefix}[0-9]*"),
+            ).fetchall()
+        command_types = {str(row["command_type"]) for row in rows}
+        if base_command_type not in command_types:
+            return base_command_type
+        attempt = 2
+        while f"{base_command_type}_{attempt}" in command_types:
+            attempt += 1
+        return f"{base_command_type}_{attempt}"
+
+    def claim_pallet3_recovery_operator_ready(
+        self, operation_id: str, observed_at: str
+    ) -> bool:
+        """Consume one Fleet OPERATOR_READY report for one explicit recovery attempt."""
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                INSERT INTO pallet3_recovery_operator_ready (operation_id, observed_at)
+                VALUES (?, ?)
+                ON CONFLICT(operation_id) DO UPDATE SET observed_at = excluded.observed_at
+                WHERE pallet3_recovery_operator_ready.observed_at < excluded.observed_at
+                """,
+                (operation_id, observed_at),
+            )
+        return cursor.rowcount == 1
+
     def mark_recovery_required(self, operation_id: str, robot_id: str) -> None:
         with self._lock, self._connection:
             self._connection.execute(
@@ -246,6 +286,13 @@ class OrchestratorStore:
         with self._lock, self._connection:
             self._connection.execute(
                 "DELETE FROM operation_recoveries WHERE operation_id = ?", (operation_id,)
+            )
+
+    def clear_pallet3_recovery_operator_ready(self, operation_id: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "DELETE FROM pallet3_recovery_operator_ready WHERE operation_id = ?",
+                (operation_id,),
             )
 
     def create_or_get_pallet3_workflow(
@@ -370,6 +417,35 @@ class OrchestratorStore:
                 WHERE operation_id = ?
                 """,
                 (detail[:1000], _format_time(_now()), operation_id),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM pallet3_operation_workflows WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+        return _pallet3_workflow_from_row(row)
+
+    def force_complete_pallet3_workflow(
+        self, operation_id: str
+    ) -> Pallet3OperationWorkflow | None:
+        """Terminally close a P3 workflow after an operator confirms the ledger state."""
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT * FROM pallet3_operation_workflows WHERE operation_id = ?",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            timestamp = _format_time(_now())
+            self._connection.execute(
+                """
+                UPDATE pallet3_operation_workflows
+                SET phase = 'COMPLETED',
+                    failure_detail = 'FORCE_COMPLETED_BY_OPERATOR',
+                    updated_at = ?,
+                    completed_at = COALESCE(completed_at, ?)
+                WHERE operation_id = ?
+                """,
+                (timestamp, timestamp, operation_id),
             )
             row = self._connection.execute(
                 "SELECT * FROM pallet3_operation_workflows WHERE operation_id = ?",

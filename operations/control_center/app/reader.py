@@ -287,8 +287,8 @@ class SnapshotReader:
         batteries = self._by_robot(telemetry.get('batteries', []))
         states = self._by_robot(fleet.get('states', []))
         pallet_states = self._by_robot(inventory.get('pallet_states', []))
-        operations = self._by_robot(inventory.get('transport_operations', []))
-        steps = self._by_robot(orchestrator.get('steps', []))
+        operations = self._by_robot(inventory.get('transport_operations', []), multiple=True)
+        steps = self._by_robot(orchestrator.get('steps', []), multiple=True)
         commands = self._by_robot(orchestrator.get('commands', []), multiple=True)
         robot_ids = set(poses) | set(batteries) | set(states) | set(pallet_states)
         robot_ids |= set(operations) | set(steps) | set(commands)
@@ -296,10 +296,28 @@ class SnapshotReader:
         vehicles = []
         for robot_id in sorted(robot_ids):
             fleet_state = states.get(robot_id)
-            inventory_task = operations.get(robot_id)
+            # Operations arrive newest first. Completed history must never replace
+            # the current transport, even if an old record was updated recently.
+            active_operations = [
+                operation for operation in operations.get(robot_id, [])
+                if operation.get('status') in {
+                    'TO_PICK', 'PICKING', 'TO_PLACE', 'PLACING', 'RECOVERY_REQUIRED',
+                }
+            ]
+            operation_id = fleet_state.get('operation_id') if fleet_state else None
+            inventory_task = next(
+                (operation for operation in active_operations
+                 if operation['operation_id'] == operation_id),
+                active_operations[0] if active_operations else None,
+            )
             active_task = inventory_task
-            if active_task is None and fleet_state and fleet_state.get('operation_id'):
-                active_task = {'operation_id': fleet_state['operation_id']}
+            if active_task is None and not inventory_available and operation_id:
+                active_task = {'operation_id': operation_id}
+            orchestrator_step = next(
+                (step for step in steps.get(robot_id, [])
+                 if active_task and step['operation_id'] == active_task['operation_id']),
+                None,
+            )
             pose = poses.get(robot_id)
             compact_pose = None
             if pose:
@@ -326,7 +344,7 @@ class SnapshotReader:
                     ),
                     'pallet_state': pallet_states.get(robot_id),
                     'active_task': active_task,
-                    'orchestrator_step': steps.get(robot_id),
+                    'orchestrator_step': orchestrator_step,
                     'pending_commands': commands.get(robot_id, []),
                 }
             )
@@ -359,7 +377,7 @@ class SnapshotReader:
             and inventory_task.get('status')
             in {'TO_PICK', 'PICKING', 'TO_PLACE', 'PLACING'}
         )
-        if is_active_inventory_task and state in {'WAIT', 'DRIVE'}:
+        if is_active_inventory_task and state == 'DRIVE':
             return 'AUTO_DRIVE'
         if not is_active_inventory_task and state == 'DRIVE':
             return 'MANUAL_DRIVE'

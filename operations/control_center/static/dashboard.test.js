@@ -5,12 +5,14 @@ import * as dashboard from './dashboard.js';
 
 import {
   batteryPercent,
+  canStartOperatorNavigation,
   clampZoom,
   clampMapPan,
   connectivityAgeLabel,
   connectivityLabel,
   displayedFleetState,
   fleetStateLabel,
+  forkCommandPath,
   inventoryBreakdown,
   ManualControlSession,
   manualRepeatInterval,
@@ -193,7 +195,50 @@ test('dashboard prefers the UI-only navigation display state over the vehicle co
     fleet_state: { state: 'DRIVE' },
   }), 'DRIVE');
   assert.equal(fleetStateLabel('AUTO_DRIVE'), '자동 주행 중');
-  assert.equal(fleetStateLabel('MANUAL_DRIVE'), '수동 주행 중');
+  assert.equal(fleetStateLabel('MANUAL_DRIVE'), '개별 주행 중');
+});
+
+test('current task follows matching vehicle reports during the direct P3 sequence', () => {
+  const cases = [
+    ['TO_PICK', 'PICK', 'API', 'AUTO_DOCK_COMMAND_ACCEPTED', '파렛트 픽업 중'],
+    ['TO_PICK', 'WAIT', 'AUTO_DOCK', 'AUTO_DOCK_PICK_COMPLETED', '파렛트 픽업 완료'],
+    ['TO_PLACE', 'AUTO_DRIVE', 'NAV2', 'NAVIGATION_STARTED', '적치 구역으로 이동'],
+    ['TO_PLACE', 'WAIT', 'NAV2', 'NAVIGATION_SUCCEEDED', '적치 구역 도착'],
+    ['TO_PLACE', 'WAIT', 'FORK', 'FORK_DOWN_COMPLETE', '포크 하강 완료'],
+    ['TO_PLACE', 'AUTO_DRIVE', 'API', 'MANUAL_COMMAND_SENT', '적치 후 이동 중'],
+    ['TO_PLACE', 'WAIT', 'API', 'MANUAL_COMMAND_EXPIRED', '적치 완료 처리 대기'],
+  ];
+  for (const [status, state, source, detail, expected] of cases) {
+    assert.equal(taskLabel({ operation_id: 'p3-current', status }, state, {
+      operation_id: 'p3-current', state, source, detail,
+    }), expected, detail);
+  }
+});
+
+test('reports from another operation cannot replace the current task phase', () => {
+  assert.equal(taskLabel({ operation_id: 'p3-current', status: 'TO_PLACE' }, 'WAIT', {
+    operation_id: 'old-operation', source: 'FORK', detail: 'FORK_DOWN_COMPLETE',
+  }), '적치 구역으로 이동');
+});
+
+test('stop and recovery remain visible over detailed operation progress', () => {
+  const task = { operation_id: 'p3-current', status: 'TO_PLACE' };
+  const report = { operation_id: 'p3-current', source: 'FORK', detail: 'FORK_DOWN_COMPLETE' };
+  assert.equal(taskLabel(task, 'STOPPED', report), '정지 요청됨');
+  assert.equal(taskLabel(task, 'FAIL', report), '운행 복구 대기');
+  assert.equal(taskLabel({ ...task, status: 'RECOVERY_REQUIRED' }, 'WAIT', report), '운행 복구 대기');
+});
+
+test('navigation outside an inventory task is described without assuming manual control', () => {
+  assert.equal(taskLabel(null, 'MANUAL_DRIVE'), '운송 작업 외 주행');
+  assert.equal(taskLabel(null, 'AUTO_DRIVE'), '작업 정보 수신 대기');
+});
+
+test('operator navigation is available only after a stop or actual idle state', () => {
+  assert.equal(canStartOperatorNavigation({ display_state: 'STOPPED' }), true);
+  assert.equal(canStartOperatorNavigation({ display_state: 'IDLE' }), true);
+  assert.equal(canStartOperatorNavigation({ display_state: 'WAIT' }), false);
+  assert.equal(canStartOperatorNavigation({ fleet_state: { state: 'DRIVE' } }), false);
 });
 
 test('switching to a different navigation mode clears every existing point', () => {
@@ -254,6 +299,11 @@ test('manual controls use independently configured speeds and cap each turn at t
   });
   assert.equal(rotationHoldMs(1), 174);
   assert.equal(rotationHoldMs(0.1), 1000);
+});
+
+test('fork controls target the selected vehicle with the native direction endpoint', () => {
+  assert.equal(forkCommandPath('robot_1', 'up'), '/api/vehicles/robot_1/fork/up');
+  assert.equal(forkCommandPath('robot / 2', 'down'), '/api/vehicles/robot%20%2F%202/fork/down');
 });
 
 test('manual control completion yields one stop target and never creates one for other controls', () => {

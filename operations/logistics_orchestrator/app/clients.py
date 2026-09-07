@@ -61,6 +61,14 @@ class HttpInventoryClient(_HttpClient):
             {"robot_id": robot_id, "idempotency_key": idempotency_key},
         )
 
+    def force_complete(
+        self, operation_id: str, robot_id: str, idempotency_key: str
+    ) -> None:
+        self._post(
+            f"/api/v1/operations/{operation_id}/force-completions",
+            {"robot_id": robot_id, "idempotency_key": idempotency_key},
+        )
+
 
 class HttpFleetManagerClient(_HttpClient):
     def list_vehicles(self) -> list[dict[str, Any]]:
