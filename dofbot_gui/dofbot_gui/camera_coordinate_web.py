@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 
 import cv2
 import numpy as np
+import onnxruntime as ort
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
@@ -32,6 +33,15 @@ PLANAR_CALIBRATION_FILE = Path('/home/intelions/ros2_ws/config/planar_xy_calibra
 RGB_TOPIC = '/ascamera/ascamera_node/rgb0/image'
 DEPTH_TOPIC = '/ascamera/ascamera_node/depth0/image_raw'
 CAMERA_INFO_TOPIC = '/ascamera/ascamera_node/rgb0/camera_info'
+HANDLE_MODEL_FILE = Path('/home/intelions/ros2_ws/models/handle_v2_best.onnx')
+JOINT_PROGRAM_DIR = Path('/home/intelions/ros2_ws/config')
+JOINT_PROGRAM_STEPS = (
+ ('home','1. 기본 자세'),('pick_approach','2. 픽 위치로'),('pick','3. 픽하고'),
+ ('pick_lift','4. 다시 들어올린 위치로'),('drop_approach','5. 내려놓을 위치로'),
+ ('drop_position','6. 드롭 위치'),('drop','7. 드롭하고'),
+ ('drop_lift','8. 다시 드롭한 위치로'),('return_home','9. 다시 기본 자세로'))
+JOINT_COMMON_KEYS = tuple(key for key, _ in JOINT_PROGRAM_STEPS[4:])
+JOINT_COMMON_FILE = JOINT_PROGRAM_DIR / 'dofbot_pick_place_common_drop.json'
 
 PAGE = r'''<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -42,9 +52,9 @@ PAGE = r'''<!doctype html>
 .card{background:#fff;border-radius:14px;box-shadow:0 3px 14px #17203318;padding:14px}h1{font-size:22px;margin:0 0 6px}.muted{color:#657086;font-size:13px}.cameras{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}.camera-wrap:nth-child(1){order:2}.camera-wrap:nth-child(2){order:1}.camera-wrap h2{font-size:15px;margin:0 0 6px}.camera{position:relative;background:#222;min-height:220px;border-radius:9px;overflow:hidden}.camera img{display:block;width:100%;height:auto;cursor:crosshair}.camera:after{content:"영상을 기다리는 중…";color:#aaa;position:absolute;inset:45% 0;text-align:center;z-index:0}.camera img{position:relative;z-index:1}
 fieldset{border:1px solid #dbe2ec;border-radius:10px;margin:12px 0;padding:10px}legend{font-weight:700;padding:0 5px}button{border:0;border-radius:8px;padding:9px 11px;margin:3px;background:#e8edf5;color:#172033;font-weight:650;cursor:pointer}button.primary{background:#2563eb;color:white}button.danger{background:#dc2626;color:white}button:active{transform:translateY(1px)}label{display:flex;align-items:center;justify-content:space-between;margin:6px 3px}input{width:82px;padding:6px;border:1px solid #ccd5e2;border-radius:6px}.line{padding:5px 2px}.status{background:#f1f5f9;border-radius:8px;padding:10px;min-height:44px}.ok{color:#087f5b}.warn{color:#b45309}@media(max-width:850px){.wrap{grid-template-columns:1fr}.cameras{grid-template-columns:1fr}.camera{min-height:240px}}
 </style></head><body><div style="max-width:1180px;margin:0 auto 10px"><a href="/xyz">평면 XY + 고정 Z GUI</a> · <a href="/handle">RGB-D 검은 손잡이 필터</a></div><div class="wrap">
-<section class="card"><h1>DOFBOT IK 캘리브레이션</h1><div class="muted">두 화면 모두 클릭해 각 카메라의 기준점을 선택할 수 있습니다.</div><div class="cameras"><div class="camera-wrap"><h2>카메라 1 · RGB-D (클릭/보정)</h2><div class="camera primary"><img id="cam" src="/stream" alt="RGB-D 카메라"></div><div class="line" id="cameraState">RGB-D: 확인 중…</div><button onclick="reconnectCamera()">↻ RGB-D 다시 연결</button></div><div class="camera-wrap"><h2>카메라 2 · C270 (클릭/보조)</h2><div class="camera"><img id="cam2" src="/stream/usb" alt="C270 카메라"></div><div class="line" id="camera2State">C270: 확인 중…</div><button onclick="reconnectUsbCamera()">↻ C270 다시 연결</button></div></div><div class="line" id="selected">RGB-D 선택: —</div><div class="line" id="selected2">C270 선택: —</div><div class="muted">픽/드롭과 Depth는 RGB-D 선택을 사용하며 C270 좌표는 두 카메라 보정용으로 분리됩니다.</div></section>
+<section class="card"><h1>DOFBOT RGB-D 카메라</h1><div class="muted">RGB-D 영상과 Depth만 사용해 촬영하고 좌표를 선택합니다.</div><div class="cameras"><div class="camera-wrap"><h2>RGB-D 카메라 (클릭/보정)</h2><div class="camera primary"><img id="cam" src="/stream" alt="RGB-D 카메라"></div><div class="line" id="cameraState">RGB-D: 확인 중…</div><button onclick="reconnectCamera()">↻ RGB-D 다시 연결</button></div></div><div class="line" id="selected">RGB-D 선택: —</div></section>
 <aside class="card">
-<fieldset><legend>학습 이미지 수집</legend><button class="primary" onclick="capturePair()">📷 두 카메라 촬영 · PC에 저장</button><div class="line" id="captures">촬영 다운로드 0세트</div><div class="muted">원본 RGB-D RGB, Depth PNG, C270 RGB, 메타데이터를 ZIP으로 브라우저의 다운로드 폴더에 저장합니다.</div></fieldset>
+<fieldset><legend>학습 이미지 수집</legend><button class="primary" onclick="captureRgbd()">📷 RGB-D 촬영 · PC에 저장</button><div class="line" id="captures">촬영 다운로드 0세트</div><div class="muted">RGB 이미지, Depth PNG, 관절 메타데이터를 ZIP으로 브라우저의 다운로드 폴더에 저장합니다.</div></fieldset>
 <fieldset><legend>현재 팔 관절값</legend><div class="line" id="joints">J1 — · J2 — · J3 — · J4 — · J5 — · J6 —</div><div class="muted">손으로 자세를 잡은 뒤 여섯 값이 모두 표시돼야 기록할 수 있습니다.</div></fieldset>
 <fieldset><legend>관절 토크</legend><button onclick="torque(false)">Torque OFF</button><button class="primary" onclick="torque(true)">Torque ON</button><div class="muted">OFF: 손으로 팔 이동 · ON: 현재 자세 유지</div></fieldset>
 <fieldset><legend>실행 목표 지정</legend><button onclick="target('pick')">현재 클릭을 픽 위치로 지정</button><button onclick="target('drop')">현재 클릭을 드롭 위치로 지정</button><div class="line" id="pick">픽 위치: —</div><div class="line" id="drop">드롭 위치: —</div><div class="muted">안전영역 보정 없이 클릭한 좌표를 목표로만 저장합니다.</div></fieldset>
@@ -52,22 +62,20 @@ fieldset{border:1px solid #dbe2ec;border-radius:10px;margin:12px 0;padding:10px}
 <fieldset><legend>동작 설정</legend><label>구간 이동시간(초)<input id="seconds" type="number" min="0.5" max="10" step="0.5" value="2.5"></label><label>그리퍼 열림 각도<input id="open" type="number" min="0" max="180" value="90"></label><label>그리퍼 닫힘 각도<input id="closed" type="number" min="0" max="180" value="30"></label><button class="primary" onclick="run()">픽 → 드롭 실행</button><button class="danger" onclick="post('/api/stop',{})">정지</button></fieldset>
 <div class="status" id="status">연결 중…</div>
 </aside></div><script>
-const cam=document.getElementById('cam'),cam2=document.getElementById('cam2'),selected=document.getElementById('selected'),selected2=document.getElementById('selected2'),pick=document.getElementById('pick'),drop=document.getElementById('drop'),ikPoints=document.getElementById('ikPoints'),captures=document.getElementById('captures'),status=document.getElementById('status'),cameraState=document.getElementById('cameraState'),camera2State=document.getElementById('camera2State'),joints=document.getElementById('joints'),seconds=document.getElementById('seconds'),openAngle=document.getElementById('open'),closedAngle=document.getElementById('closed');
+const cam=document.getElementById('cam'),selected=document.getElementById('selected'),pick=document.getElementById('pick'),drop=document.getElementById('drop'),ikPoints=document.getElementById('ikPoints'),captures=document.getElementById('captures'),status=document.getElementById('status'),cameraState=document.getElementById('cameraState'),joints=document.getElementById('joints'),seconds=document.getElementById('seconds'),openAngle=document.getElementById('open'),closedAngle=document.getElementById('closed');
 async function post(url,data){try{let r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});let j=await r.json();if(!r.ok)throw Error(j.error||'요청 실패');status.textContent=j.status||'완료';return j}catch(e){status.textContent='오류: '+e.message}}
 cam.onclick=async e=>{let r=cam.getBoundingClientRect();await post('/api/select',{u:(e.clientX-r.left)*cam.naturalWidth/r.width,v:(e.clientY-r.top)*cam.naturalHeight/r.height})};
-cam2.onclick=async e=>{let r=cam2.getBoundingClientRect();await post('/api/select/usb',{u:(e.clientX-r.left)*cam2.naturalWidth/r.width,v:(e.clientY-r.top)*cam2.naturalHeight/r.height})};
 function torque(v){post('/api/torque',{enabled:v})}
 function target(v){post('/api/target',{target:v})}
 function recordIkPoint(){post('/api/ik/record',{})} function clearIk(){if(confirm('IK 보정 기록을 삭제할까요?'))post('/api/ik/clear',{})}
-async function capturePair(){try{status.textContent='두 카메라를 촬영하는 중…';let r=await fetch('/api/capture/download',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});if(!r.ok){let j=await r.json();throw Error(j.error||'촬영 실패')}let blob=await r.blob(),name=(r.headers.get('Content-Disposition')||'').match(/filename="?([^";]+)"?/),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name?name[1]:'dofbot_capture.zip';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(a.href);status.textContent='PC 다운로드를 시작했습니다.'}catch(e){status.textContent='오류: '+e.message}}
+async function captureRgbd(){try{status.textContent='RGB-D를 촬영하는 중…';let r=await fetch('/api/capture/download',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});if(!r.ok){let j=await r.json();throw Error(j.error||'촬영 실패')}let blob=await r.blob(),name=(r.headers.get('Content-Disposition')||'').match(/filename="?([^";]+)"?/),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name?name[1]:'dofbot_rgbd_capture.zip';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(a.href);status.textContent='RGB-D 촬영 ZIP 다운로드를 시작했습니다.'}catch(e){status.textContent='오류: '+e.message}}
 function detectHandle(){post('/api/detect',{kind:'handle'})}
 function detectDrop(){post('/api/detect',{kind:'drop'})}
 async function reconnectCamera(){cam.src='';await post('/api/camera/reconnect',{});setTimeout(()=>{cam.src='/stream?t='+Date.now()},3000)}
-async function reconnectUsbCamera(){cam2.src='';await post('/api/camera/usb/reconnect',{});setTimeout(()=>{cam2.src='/stream/usb?t='+Date.now()},1500)}
 function clearCal(){if(confirm('보정점을 모두 삭제할까요?'))post('/api/clear',{})}
 function run(){post('/api/run',{seconds:+seconds.value,open:+openAngle.value,closed:+closedAngle.value})}
 function fmt(p){return p?`u=${p[0].toFixed(0)}, v=${p[1].toFixed(0)}, depth=${p[2].toFixed(0)} mm`:'—'}
-async function poll(){try{let s=await(await fetch('/api/status')).json();selected.textContent='RGB-D 선택: '+fmt(s.selected);selected2.textContent='C270 선택: '+(s.usb_selected?`u=${s.usb_selected[0].toFixed(0)}, v=${s.usb_selected[1].toFixed(0)}`:'—');pick.textContent='픽 위치: '+fmt(s.pick);drop.textContent='드롭 위치: '+fmt(s.drop);ikPoints.textContent=`IK 보정점 ${s.ik_points}/6${s.ik_points>=6?' (기록 완료)':''}`;captures.textContent=`PC 촬영 다운로드 ${s.download_count}세트`;joints.textContent=s.angles.map((v,i)=>`J${i+1} ${v===null?'—':v.toFixed(1)+'°'}`).join(' · ');status.textContent=s.status;cameraState.textContent=s.camera?`RGB-D: ${s.width}×${s.height} 수신 중 (${s.frame_age.toFixed(1)}초 전)`:'RGB-D: 영상 없음';camera2State.textContent=s.usb_camera?`C270: ${s.usb_width}×${s.usb_height} 수신 중 (${s.usb_frame_age.toFixed(1)}초 전)`:`C270: 영상 없음 (${s.usb_error||'/dev/video0 확인'})`;}catch(e){status.textContent='서버 연결 끊김'}setTimeout(poll,700)}poll();
+async function poll(){try{let s=await(await fetch('/api/status')).json();selected.textContent='RGB-D 선택: '+fmt(s.selected);pick.textContent='픽 위치: '+fmt(s.pick);drop.textContent='드롭 위치: '+fmt(s.drop);ikPoints.textContent=`IK 보정점 ${s.ik_points}/6${s.ik_points>=6?' (기록 완료)':''}`;captures.textContent=`RGB-D 촬영 다운로드 ${s.download_count}세트`;joints.textContent=s.angles.map((v,i)=>`J${i+1} ${v===null?'—':v.toFixed(1)+'°'}`).join(' · ');status.textContent=s.status;cameraState.textContent=s.camera?`RGB-D: ${s.width}×${s.height} 수신 중 (${s.frame_age.toFixed(1)}초 전)`:'RGB-D: 영상 없음';}catch(e){status.textContent='서버 연결 끊김'}setTimeout(poll,700)}poll();
 </script></body></html>'''
 
 
@@ -101,20 +109,26 @@ async function poll(){try{let s=await(await fetch('/api/xyz/status')).json();pix
 </script></body></html>'''
 
 HANDLE_PAGE = r'''<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RGB-D 손잡이 필터</title><style>
-:root{font-family:-apple-system,BlinkMacSystemFont,"Noto Sans KR",sans-serif;color:#172033;background:#eef2f7}*{box-sizing:border-box}body{margin:0;padding:16px}.wrap{max-width:1300px;margin:auto}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.card{background:#fff;border-radius:14px;padding:14px;box-shadow:0 3px 14px #17203318;margin-bottom:12px}.view{background:#222;border-radius:9px;overflow:hidden;min-height:260px}.view img{display:block;width:100%;height:auto}h1{margin:0 0 5px;font-size:22px}h2{font-size:16px;margin:0 0 7px}.muted{font-size:13px;color:#657086}.controls{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:9px}.controls label{display:flex;flex-direction:column;gap:4px;font-size:13px}.controls input{padding:7px;border:1px solid #ccd5e2;border-radius:6px}button{border:0;border-radius:8px;padding:9px 12px;background:#e8edf5;font-weight:650;cursor:pointer}.primary{background:#2563eb;color:#fff}.value{font-family:ui-monospace,SFMono-Regular,monospace;background:#f1f5f9;padding:8px;border-radius:7px;margin:5px 0}.good{color:#087f5b}.bad{color:#b42318}.status{padding:10px;border-radius:8px;background:#f1f5f9}a{color:#2563eb}@media(max-width:850px){.grid,.controls{grid-template-columns:1fr}.view{min-height:220px}}</style></head><body><div class="wrap"><div class="card"><h1>RGB-D 검은 손잡이 검출</h1><div class="muted">색상 + 형태 + Depth 조건을 모두 통과한 후보만 표시합니다. <a href="/xyz">XYZ 보정 GUI</a> · <a href="/">메인 GUI</a></div></div><div class="grid"><div class="card"><h2>검출 오버레이</h2><div class="view"><img src="/stream/handle" alt="handle detection"></div></div><div class="card"><h2>검은색 마스크</h2><div class="view"><img src="/stream/handle-mask" alt="handle mask"></div></div></div><div class="card"><div class="controls"><label>최대 밝기 V (0~255)<input id="vmax" type="number" min="20" max="180"></label><label>최소 면적 px<input id="amin" type="number" min="10" max="5000"></label><label>최대 면적 px<input id="amax" type="number" min="100" max="30000"></label><label>최소 길쭉함<input id="aspect" type="number" min="1" max="10" step="0.1"></label><label>최소 Depth mm<input id="dmin" type="number" min="100" max="3000"></label><label>최대 Depth mm<input id="dmax" type="number" min="100" max="4000"></label><label>안정 프레임 수<input id="stable" type="number" min="1" max="20"></label><label>중심 안정 오차 px<input id="jitter" type="number" min="1" max="80"></label></div><div style="margin-top:10px"><button class="primary" onclick="applyFilter()">필터 적용</button> <button onclick="setTarget()">최적 손잡이를 시험 목표로</button></div></div><div class="card"><div class="value" id="det">검출: —</div><div class="value" id="camxyz">카메라 XYZ: —</div><div class="value" id="robotxyz">로봇 XYZ: —</div><div class="value" id="stableState">안정성: —</div><div class="status" id="status">연결 중…</div></div></div><script>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Noto Sans KR",sans-serif;color:#172033;background:#eef2f7}*{box-sizing:border-box}body{margin:0;padding:16px}.wrap{max-width:1300px;margin:auto}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.card{background:#fff;border-radius:14px;padding:14px;box-shadow:0 3px 14px #17203318;margin-bottom:12px}.view{background:#222;border-radius:9px;overflow:hidden;min-height:260px}.view img{display:block;width:100%;height:auto}h1{margin:0 0 5px;font-size:22px}h2{font-size:16px;margin:0 0 7px}.muted{font-size:13px;color:#657086}.controls{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:9px}.controls label{display:flex;flex-direction:column;gap:4px;font-size:13px}.controls input{padding:7px;border:1px solid #ccd5e2;border-radius:6px}button{border:0;border-radius:8px;padding:9px 12px;background:#e8edf5;font-weight:650;cursor:pointer}.primary{background:#2563eb;color:#fff}.value{font-family:ui-monospace,SFMono-Regular,monospace;background:#f1f5f9;padding:8px;border-radius:7px;margin:5px 0}.good{color:#087f5b}.bad{color:#b42318}.status{padding:10px;border-radius:8px;background:#f1f5f9}a{color:#2563eb}@media(max-width:850px){.grid,.controls{grid-template-columns:1fr}.view{min-height:220px}}</style></head><body><div class="wrap"><div class="card"><h1>RGB-D 검은 손잡이 검출</h1><div class="muted">색상 + 형태 + Depth 조건을 모두 통과한 후보만 표시합니다. <a href="/xyz">XYZ 보정 GUI</a> · <a href="/">메인 GUI</a></div></div><div class="grid"><div class="card"><h2>검출 오버레이</h2><div class="view"><img src="/stream/handle" alt="handle detection"></div></div><div class="card"><h2>검은색 마스크</h2><div class="view"><img src="/stream/handle-mask" alt="handle mask"></div></div></div><div class="card"><div class="controls"><label>최대 밝기 V (0~255)<input id="vmax" type="number" min="1" max="99"></label><label>최소 면적 px<input id="amin" type="number" min="10" max="5000"></label><label>최대 면적 px<input id="amax" type="number" min="100" max="30000"></label><label>최소 길쭉함<input id="aspect" type="number" min="1" max="10" step="0.1"></label><label>최소 Depth mm<input id="dmin" type="number" min="100" max="3000"></label><label>최대 Depth mm<input id="dmax" type="number" min="100" max="4000"></label><label>안정 프레임 수<input id="stable" type="number" min="1" max="20"></label><label>중심 안정 오차 px<input id="jitter" type="number" min="1" max="80"></label></div><div style="margin-top:10px"><button class="primary" onclick="applyFilter()">필터 적용</button> <button onclick="setTarget()">최적 손잡이를 시험 목표로</button></div></div><div class="card"><div class="value" id="det">검출: —</div><div class="value" id="camxyz">카메라 XYZ: —</div><div class="value" id="robotxyz">로봇 XYZ: —</div><div class="value" id="stableState">안정성: —</div><div class="status" id="status">연결 중…</div></div></div><script>
 const ids=['vmax','amin','amax','aspect','dmin','dmax','stable','jitter'],els=Object.fromEntries(ids.map(x=>[x,document.getElementById(x)])),det=document.getElementById('det'),camxyz=document.getElementById('camxyz'),robotxyz=document.getElementById('robotxyz'),stableState=document.getElementById('stableState'),status=document.getElementById('status');let editing=false;ids.forEach(x=>els[x].onfocus=()=>editing=true);ids.forEach(x=>els[x].onblur=()=>editing=false);
 async function post(url,data){let r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}),j=await r.json();if(!r.ok)throw Error(j.error||'요청 실패');status.textContent=j.status||'완료';return j}async function applyFilter(){try{await post('/api/handle/config',{vmax:+els.vmax.value,area_min:+els.amin.value,area_max:+els.amax.value,aspect_min:+els.aspect.value,depth_min:+els.dmin.value,depth_max:+els.dmax.value,stable_frames:+els.stable.value,jitter_px:+els.jitter.value})}catch(e){status.textContent='오류: '+e.message}}async function setTarget(){try{await post('/api/handle/target',{})}catch(e){status.textContent='오류: '+e.message}}function xyz(v,u){return v?`X=${v[0].toFixed(1)}, Y=${v[1].toFixed(1)}, Z=${v[2].toFixed(1)} ${u}`:'—'}async function poll(){try{let s=await(await fetch('/api/handle/status')).json(),b=s.best;if(!editing){let c=s.config;els.vmax.value=c.vmax;els.amin.value=c.area_min;els.amax.value=c.area_max;els.aspect.value=c.aspect_min;els.dmin.value=c.depth_min;els.dmax.value=c.depth_max;els.stable.value=c.stable_frames;els.jitter.value=c.jitter_px}det.textContent=b?`검출: u=${b.u.toFixed(1)}, v=${b.v.toFixed(1)}, angle=${b.angle.toFixed(1)}°, area=${b.area.toFixed(0)}, depth=${b.depth.toFixed(0)}mm`:'검출: 조건을 통과한 손잡이 없음';camxyz.textContent='카메라 XYZ: '+xyz(s.camera_xyz,'mm');robotxyz.textContent='예상 로봇 XYZ: '+xyz(s.robot_xyz,'cm');stableState.textContent=`안정성: ${s.stable_count}/${s.config.stable_frames} ${s.stable?'✓ 목표 사용 가능':'대기'}`;stableState.className='value '+(s.stable?'good':'');status.textContent=s.status}catch(e){status.textContent='서버 연결 끊김'}setTimeout(poll,500)}poll();
 </script></body></html>'''
 
 
 # Extend the handle detector page with guarded, step-by-step pick controls.
-HANDLE_PAGE = HANDLE_PAGE.replace('RGB-D 검은 손잡이 검출', 'RGB-D 파란 손잡이 검출')
-HANDLE_PAGE = HANDLE_PAGE.replace('검은색 마스크', '파란색 마스크')
-HANDLE_PAGE = HANDLE_PAGE.replace('색상 + 형태 + Depth 조건', 'Blur 5×5 + 파란색 + 형태 + Depth 조건')
-HANDLE_PAGE = HANDLE_PAGE.replace('최대 밝기 V (0~255)', '최소 채도 S (0~255)')
+HANDLE_PAGE = HANDLE_PAGE.replace('RGB-D 검은 손잡이 검출', 'RGB-D YOLO 손잡이 검출')
+HANDLE_PAGE = HANDLE_PAGE.replace('검은색 마스크', 'YOLO 검출 영역')
+HANDLE_PAGE = HANDLE_PAGE.replace('색상 + 형태 + Depth 조건', 'YOLOv5n + Confidence + 형태 + Depth 조건')
+HANDLE_PAGE = HANDLE_PAGE.replace('최대 밝기 V (0~255)', 'YOLO Confidence %')
 HANDLE_PAGE = HANDLE_PAGE.replace(
     '<button class="primary" onclick="applyFilter()">필터 적용</button>',
     '<button class="primary" onclick="applyFilter()">필터 적용 ON</button> <button onclick="disableFilter()">필터 해제 OFF</button> <span id="filterState">필터 상태 확인 중…</span>')
+HANDLE_PAGE = HANDLE_PAGE.replace(
+    '<button onclick="setTarget()">최적 손잡이를 시험 목표로</button>',
+    '<button onclick="setTarget()">최적 손잡이를 시험 목표로</button> <button class="danger" onclick="clearTarget()">고정 목표 해제</button>')
+HANDLE_PAGE = HANDLE_PAGE.replace(
+    '<div class="card"><div class="controls">',
+    '<div class="card" id="filterCard"><div class="controls">', 1)
 for _filter_id in ('vmax', 'amin', 'amax', 'aspect', 'dmin', 'dmax', 'stable', 'jitter'):
     HANDLE_PAGE = HANDLE_PAGE.replace(
         f'<input id="{_filter_id}" type="number"',
@@ -125,7 +139,7 @@ for _filter_id in ('vmax', 'amin', 'amax', 'aspect', 'dmin', 'dmax', 'stable', '
 HANDLE_PAGE = HANDLE_PAGE.replace(
     '<div class="card"><div class="value" id="det">',
     '''<div class="card"><h2>손잡이 단계별 집기</h2>
-    <div class="controls"><label>접근 높이 cm<input id="hApproach" type="number" value="3" min="1" max="10" step="0.5"></label><label>이동 시간 초<input id="hSeconds" type="number" value="3" min="1" max="10" step="0.5"></label><label>그리퍼 열림 각도<input id="hOpen" type="number" value="90" min="0" max="180"></label><label>그리퍼 닫힘 각도<input id="hClosed" type="number" value="30" min="0" max="180"></label></div>
+    <div class="controls"><label>접근 높이 cm<input id="hApproach" type="number" value="3" min="1" max="10" step="0.5"></label><label>이동 시간 초<input id="hSeconds" type="number" value="6" min="1" max="10" step="0.5"></label><label>그리퍼 열림 각도<input id="hOpen" type="number" value="50" min="0" max="180"></label><label>그리퍼 닫힘 각도<input id="hClosed" type="number" value="150" min="0" max="180"></label></div>
     <div style="margin-top:10px"><button onclick="chooseLayer(1)">1층</button> <button onclick="chooseLayer(2)">2층</button> <button onclick="torque(true)">토크 ON</button> <button onclick="torque(false)">토크 OFF</button></div>
     <div style="margin-top:10px"><button class="primary" onclick="moveHandle('above')">① 목표 위로</button> <button onclick="gripper('open')">② 그리퍼 열기</button> <button onclick="moveHandle('down')">③ 하강</button> <button onclick="gripper('close')">④ 그리퍼 닫기</button> <button onclick="moveHandle('lift')">⑤ 상승</button> <button class="bad" onclick="stopRobot()">정지</button></div>
     <div class="muted" style="margin-top:8px">먼저 ‘최적 손잡이를 시험 목표로’를 눌러 목표를 고정한 뒤 단계별로 시험하세요.</div></div>
@@ -138,7 +152,7 @@ HANDLE_PAGE = HANDLE_PAGE.replace(
     '''<div class="card"><h2>화면+Depth→관절 3D 직접 보정</h2><div class="muted">보정 모드에서는 필터와 관계없이 영상 아무 곳이나 클릭할 수 있습니다. Depth가 0이 아닌 점만 기록하며, 거리별 보정점을 사용합니다.</div><div style="margin-top:8px"><label style="display:inline-flex;gap:6px;align-items:center"><input id="calMode" type="checkbox" style="width:auto"> 보정용 자유 클릭 모드</label> <label>보정점 이름 <input id="jointLabel" value="P1" style="width:90px;padding:7px"></label> <button onclick="recordJoint('above')">위 자세 기록</button> <button onclick="recordJoint('down')">집기 자세 기록</button> <button onclick="deleteJoint()">현재 이름 삭제</button> <button onclick="clearJoint()">현재 층 전체 삭제</button></div><div class="value" id="calPoint">CAL POINT: —</div><div class="value" id="jointState">3D 관절 보정: 0쌍</div></div><div class="card"><h2>손잡이 단계별 집기 · 3D 관절 직접 보간</h2>''')
 HANDLE_PAGE = HANDLE_PAGE.replace(
     '<div class="card"><div class="value" id="det">',
-    '''<div class="card"><h2>고정 드롭 위치 · 연속 동작</h2><div class="muted">컨베이어의 고정 드롭 위치에서 팔을 직접 맞춰 두 자세를 저장합니다.</div><label>드롭 장거리 이동 시간 <span id="dropSecondsValue">6</span>초<input id="dropSeconds" type="range" min="3" max="15" step="0.5" value="6" oninput="dropSecondsValue.textContent=this.value"></label><div style="margin-top:8px"><button onclick="recordDrop('above')">드롭 위 자세 기록</button> <button onclick="recordDrop('down')">드롭 놓기 자세 기록</button> <button class="primary" onclick="runPickDrop()">▶ 집기→드롭 연속 실행</button></div><div class="value" id="dropState">드롭 보정: —</div></div><div class="card"><div class="value" id="det">''')
+    '''<div class="card" id="fixedDropCard"><h2>고정 드롭 위치 · 연속 동작</h2><div class="muted">컨베이어의 고정 드롭 위치에서 팔을 직접 맞춰 두 자세를 저장합니다.</div><label>드롭 장거리 이동 시간 <span id="dropSecondsValue">6</span>초<input id="dropSeconds" type="range" min="3" max="15" step="0.5" value="6" oninput="dropSecondsValue.textContent=this.value"></label><div style="margin-top:8px"><button onclick="recordDrop('above')">드롭 위 자세 기록</button> <button onclick="recordDrop('down')">드롭 놓기 자세 기록</button> <button class="primary" onclick="runPickDrop()">▶ 고정 목표 집기→드롭</button> <button class="primary" onclick="runUntilEmptyFixed()">▶ 고정 목표 우선 + 검출 없을 때까지 반복</button> <button class="primary" onclick="runAnyDetected()">▶ 검출된 손잡이 아무거나 집어서 드롭까지</button> <button class="primary" onclick="runUntilEmpty()">▶ 검출 없을 때까지 반복</button> <button id="orderToggle" onclick="toggleOrder()">구역 순서 끄기</button> <span id="orderState">구역 순서 확인 중…</span></div><div class="muted" style="margin-top:8px">ORDER: top-left 1 -&gt; bottom-left 2 -&gt; bottom-right 3 -&gt; top-right 4. Candidates within each zone are processed nearest the center first.</div><div class="value" id="dropState">드롭 보정: —</div></div><div class="card"><div class="value" id="det">''')
 HANDLE_PAGE = HANDLE_PAGE.replace(
     '<div class="value" id="stableState">',
     '<div class="value" id="targetInfo">고정 목표: —</div><div class="value" id="calibrationState">XY 보정: 확인 중…</div><div class="value" id="stableState">')
@@ -146,11 +160,16 @@ HANDLE_PAGE = HANDLE_PAGE.replace(
     "async function setTarget(){try{await post('/api/handle/target',{})}catch(e){status.textContent='오류: '+e.message}}",
     """async function disableFilter(){try{await post('/api/handle/filter-enabled',{enabled:false})}catch(e){status.textContent='오류: '+e.message}}
 async function setTarget(){try{await post('/api/handle/target',{})}catch(e){status.textContent='오류: '+e.message}}
+async function clearTarget(){try{await post('/api/handle/target-clear',{})}catch(e){status.textContent='오류: '+e.message}}
 async function recordJoint(kind){try{await post('/api/joint/record',{kind:kind,label:document.getElementById('jointLabel').value.trim()||'P1'})}catch(e){status.textContent='오류: '+e.message}}
 async function clearJoint(){if(confirm('화면→관절 보정 기록을 모두 삭제할까요?'))try{await post('/api/joint/clear',{})}catch(e){status.textContent='오류: '+e.message}}
 async function deleteJoint(){let label=document.getElementById('jointLabel').value.trim();if(!label||!confirm(`${label} 보정점을 삭제할까요?`))return;try{await post('/api/joint/delete',{labels:[label]})}catch(e){status.textContent='오류: '+e.message}}
 async function recordDrop(kind){try{await post('/api/joint/drop/record',{kind:kind})}catch(e){status.textContent='오류: '+e.message}}
 async function runPickDrop(){if(!confirm('현재 고정 목표를 집어 고정 드롭 위치까지 연속 실행할까요?'))return;try{await post('/api/joint/run',{seconds:+document.getElementById('hSeconds').value,drop_seconds:+document.getElementById('dropSeconds').value,open:+document.getElementById('hOpen').value,closed:+document.getElementById('hClosed').value})}catch(e){status.textContent='오류: '+e.message}}
+async function runUntilEmptyFixed(){if(!confirm('클릭한 고정 목표를 우선 처리하면서 검출이 없을 때까지 반복할까요? 반복 중 새로 클릭한 목표도 다음 사이클에서 우선 처리합니다.'))return;try{await post('/api/joint/run-until-empty-fixed',{seconds:+document.getElementById('hSeconds').value,drop_seconds:+document.getElementById('dropSeconds').value,open:+document.getElementById('hOpen').value,closed:+document.getElementById('hClosed').value})}catch(e){status.textContent='오류: '+e.message}}
+async function runAnyDetected(){if(!confirm('검출된 손잡이 하나를 자동 선택해 집고, 고정 드롭 위치에 놓은 뒤 후퇴할까요?'))return;try{await post('/api/joint/run-detected',{seconds:+document.getElementById('hSeconds').value,drop_seconds:+document.getElementById('dropSeconds').value,open:+document.getElementById('hOpen').value,closed:+document.getElementById('hClosed').value})}catch(e){status.textContent='오류: '+e.message}}
+async function runUntilEmpty(){if(!confirm('검출 가능한 손잡이가 없어질 때까지 집기→드롭을 반복할까요? 정지 버튼으로 언제든 중단할 수 있습니다.'))return;try{await post('/api/joint/run-until-empty',{seconds:+document.getElementById('hSeconds').value,drop_seconds:+document.getElementById('dropSeconds').value,open:+document.getElementById('hOpen').value,closed:+document.getElementById('hClosed').value})}catch(e){status.textContent='오류: '+e.message}}
+async function toggleOrder(){let b=document.getElementById('orderToggle'),enabled=b.dataset.enabled!=='true';try{await post('/api/handle/order-enabled',{enabled:enabled})}catch(e){status.textContent='오류: '+e.message}}
 async function chooseLayer(layer){try{await post('/api/xyz/layer',{layer:layer})}catch(e){status.textContent='오류: '+e.message}}
 async function torque(on){try{await post('/api/torque',{on:on})}catch(e){status.textContent='오류: '+e.message}}
 async function moveHandle(stage){try{let grip=stage==='lift'?+document.getElementById('hClosed').value:+document.getElementById('hOpen').value;await post('/api/joint/move',{stage:stage,seconds:+document.getElementById('hSeconds').value,gripper:grip})}catch(e){status.textContent='오류: '+e.message}}
@@ -171,7 +190,37 @@ HANDLE_PAGE = HANDLE_PAGE.replace(
     "els.jitter.value=c.jitter_px;ids.forEach(x=>document.getElementById(x+'Value').textContent=els[x].value)}")
 HANDLE_PAGE = HANDLE_PAGE.replace(
     'det.textContent=b?',
-    "document.getElementById('filterState').textContent=s.filter_enabled?'필터 ON':'필터 OFF';det.textContent=b?")
+    "document.getElementById('filterState').textContent=s.filter_enabled?'필터 ON':'필터 OFF';let ob=document.getElementById('orderToggle'),os=document.getElementById('orderState');ob.dataset.enabled=String(s.order_enabled);ob.textContent=s.order_enabled?'구역 순서 끄기':'구역 순서 켜기';os.textContent=s.order_enabled?'순서 ON (1→2→3→4)':'순서 OFF (신뢰도순)';os.className=s.order_enabled?'good':'muted';det.textContent=b?")
+HANDLE_PAGE = HANDLE_PAGE.replace(
+    '</body>',
+    '''<script>
+const filterCard=document.getElementById('filterCard');
+const fixedDropCard=document.getElementById('fixedDropCard');
+if(filterCard&&fixedDropCard)filterCard.after(fixedDropCard);
+</script></body>''')
+
+
+JOINT_PROGRAM_PAGE = r"""<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>관절 Pick & Place</title><style>
+body{font-family:"Noto Sans KR",sans-serif;background:#eef2f7;color:#172033;margin:0;padding:14px}.wrap{max-width:1400px;margin:auto}.card{background:white;border-radius:14px;padding:14px;margin-bottom:12px;box-shadow:0 3px 14px #17203318}h1{margin:0 0 5px}.muted{color:#657086;font-size:13px}.grid{display:grid;grid-template-columns:2fr 1fr;gap:12px}table{width:100%;border-collapse:collapse}th,td{padding:7px;border-bottom:1px solid #e3e8f0;text-align:left}.pose{width:100%;min-width:350px}.sec{width:65px}input,select{padding:7px;border:1px solid #ccd5e2;border-radius:6px}button{border:0;border-radius:8px;padding:8px 10px;margin:2px;background:#e8edf5;font-weight:650}.primary{background:#2563eb;color:#fff}.danger{background:#dc2626;color:#fff}.status{background:#f1f5f9;padding:10px;border-radius:8px}tr.common{background:#eff6ff}tr.common td:first-child:after{content:" · 공통";color:#2563eb;font-size:12px}.view img{width:100%;display:block}.view{background:#222;border-radius:9px;overflow:hidden}@media(max-width:900px){.grid{grid-template-columns:1fr}.scroll{overflow:auto}}</style></head><body><div class="wrap">
+<div class="card"><h1>DOFBOT 관절 좌표 Pick & Place</h1><div class="muted">1~4번은 상자별 픽 자세, 5~9번은 모든 상자가 공유하는 드롭·복귀 자세입니다. 기존 Docker JSON에도 공통값을 동기화합니다. <a href="/handle">YOLO GUI</a></div></div>
+<div class="grid"><div class="card scroll"><div id="angles">현재 관절: —</div><table><thead><tr><th>단계</th><th>관절 좌표 [J1..J6]</th><th>초</th><th>동작</th></tr></thead><tbody id="rows"></tbody></table></div>
+<div><div class="card view"><img src="/stream"></div><div class="card"><select id="box"></select><button onclick="loadBox()">불러오기</button><button onclick="saveBox()">저장</button></div><div class="card"><button onclick="torque(false)">Torque OFF</button><button onclick="torque(true)">Torque ON</button><button class="primary" onclick="runAll()">전체 초저속 실행</button><button class="danger" onclick="stopAll()">정지</button></div><div class="status" id="status">연결 중…</div></div></div></div>
+<script>
+var defs=[['home','1. 기본 자세'],['pick_approach','2. 픽 위치로'],['pick','3. 픽하고'],['pick_lift','4. 다시 들어올린 위치로'],['drop_approach','5. 내려놓을 위치로'],['drop_position','6. 드롭 위치'],['drop','7. 드롭하고'],['drop_lift','8. 다시 드롭한 위치로'],['return_home','9. 다시 기본 자세로']];
+var rows=document.getElementById('rows'),statusEl=document.getElementById('status'),box=document.getElementById('box');
+defs.forEach(function(d,index){var k=d[0];rows.insertAdjacentHTML('beforeend','<tr class="'+(index>=4?'common':'')+'"><td>'+d[1]+'</td><td><input class="pose" id="p_'+k+'" placeholder="[90,90,90,90,90,90]"></td><td><input class="sec" id="t_'+k+'" type="number" min=".5" max="30" step=".5" value="5"></td><td><button onclick="capturePose(\''+k+'\')">기록</button><button onclick="goPose(\''+k+'\')">이동</button></td></tr>')});for(var i=1;i<=8;i++)box.add(new Option('상자 '+i,i));
+async function post(u,d){var r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)}),j=await r.json();if(!r.ok)throw Error(j.error||'요청 실패');statusEl.textContent=j.status||'완료';return j}
+function getPose(k){var v=JSON.parse(document.getElementById('p_'+k).value);if(!Array.isArray(v)||v.length!==6)throw Error(k+' 관절값 6개 필요');return v.map(Number)}
+function getProgram(){var p={},t={};defs.forEach(function(d){p[d[0]]=getPose(d[0]);t[d[0]]=+document.getElementById('t_'+d[0]).value});return{poses:p,transition_seconds:t}}
+function applyProgram(x){defs.forEach(function(d){var k=d[0];document.getElementById('p_'+k).value=JSON.stringify(x.poses[k].map(function(v){return +v.toFixed(1)}));document.getElementById('t_'+k).value=x.transition_seconds[k]})}
+async function capturePose(k){try{var j=await post('/api/joint-program/capture',{key:k});document.getElementById('p_'+k).value=JSON.stringify(j.pose.map(function(v){return +v.toFixed(1)}))}catch(e){statusEl.textContent='오류: '+e.message}}
+async function goPose(k){try{await post('/api/joint-program/move',{key:k,pose:getPose(k),seconds:+document.getElementById('t_'+k).value})}catch(e){statusEl.textContent='오류: '+e.message}}
+async function loadBox(){try{var j=await post('/api/joint-program/load',{box:+box.value});applyProgram(j.program)}catch(e){statusEl.textContent='오류: '+e.message}}
+async function saveBox(){try{await post('/api/joint-program/save',{box:+box.value,program:getProgram()})}catch(e){statusEl.textContent='오류: '+e.message}}
+async function runAll(){if(!confirm('9단계를 전체 실행할까요?'))return;try{await post('/api/joint-program/run',{program:getProgram()})}catch(e){statusEl.textContent='오류: '+e.message}}
+async function torque(on){try{await post('/api/torque',{on:on})}catch(e){statusEl.textContent='오류: '+e.message}}async function stopAll(){try{await post('/api/stop',{})}catch(e){statusEl.textContent='오류: '+e.message}}
+async function poll(){try{var s=await(await fetch('/api/joint-program/status')).json();document.getElementById('angles').textContent='현재 관절: ['+s.angles.map(function(v){return v===null?'—':v.toFixed(1)}).join(', ')+']'+(s.playing?' · 실행 중':'');statusEl.textContent=s.status}catch(e){statusEl.textContent='서버 연결 끊김'}setTimeout(poll,500)}poll();
+</script></body></html>"""
 
 
 class UsbCamera:
@@ -272,6 +321,9 @@ class Controller(Node):
         self.samples = []
         self.status = '카메라와 팔 드라이버를 기다리는 중입니다.'
         self.playing = False
+        self.auto_until_empty = False
+        self.manual_target_pixel = None
+        self.manual_target_generation = 0
         self.calibration_mode = 'pick'
         self.stop_event = threading.Event()
         self.last_rgb_time = 0.0
@@ -281,16 +333,24 @@ class Controller(Node):
         self.capture_count = len(list((DATASET_DIR / 'meta').glob('capture_*.json')))
         self.download_count = 0
         self.camera_intrinsics = None
-        self.handle_filter = {'vmax': 90, 'area_min': 40, 'area_max': 3500,
+        self.handle_filter = {'vmax': 25, 'area_min': 40, 'area_max': 3500,
                               'aspect_min': 1.25, 'depth_min': 250, 'depth_max': 1600,
                               'stable_frames': 5, 'jitter_px': 18}
         self.handle_filter_enabled = True
+        self.handle_order_enabled = True
         self.handle_detections = []
         self.handle_best = None
         self.handle_stable_count = 0
         self.handle_previous_center = None
         self.handle_jpeg = None
         self.handle_mask_jpeg = None
+        self.handle_inference_busy = False
+        try:
+            self.handle_net = ort.InferenceSession(str(HANDLE_MODEL_FILE), providers=['CPUExecutionProvider'])
+            self.status = f'YOLO 모델 로드 완료: {HANDLE_MODEL_FILE.name}'
+        except Exception as error:
+            self.handle_net = None
+            self.status = f'YOLO 모델 로드 실패: {error}'
         self.planar_points = []
         self.fixed_pick_zs = {1: 5.0, 2: 5.0}
         self.active_layer = 1
@@ -515,106 +575,115 @@ class Controller(Node):
             self.status = f"그리퍼를 {'열기' if action == 'open' else '닫기'} 명령했습니다."
 
     def update_handle_detection(self, frame):
-        """Detect dark, elongated RGB-D regions and maintain temporal stability."""
+        """Run YOLOv5n ONNX detection and attach median RGB-D depth."""
         with self.lock:
-            config = dict(self.handle_filter)
-            filter_enabled = self.handle_filter_enabled
-            depth = self.depth.copy() if self.depth is not None else None
-            locked_target = self.test_target_pixel
-            calibration_selected = self.selected
-            direct_points = [(item['u'], item['v']) for item in self.direct_complete()]
-        # A light blur suppresses isolated color noise without modifying depth data.
-        blurred = cv2.GaussianBlur(frame, (5, 5), 0)
-        hsv = cv2.cvtColor(blurred, cv2.COLOR_RGB2HSV)
-        # Blue handle only: OpenCV hue 90..135, with adjustable minimum saturation.
-        mask = cv2.inRange(hsv, np.array([90, int(config['vmax']), 40], np.uint8),
-                           np.array([135, 255, 255], np.uint8))
-        if not filter_enabled:
-            mask[:] = 0
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        candidates = []
-        height, width = frame.shape[:2]
-        for contour in contours:
-            area = float(cv2.contourArea(contour))
-            if not config['area_min'] <= area <= config['area_max']:
-                continue
-            (cx, cy), (rw, rh), angle = cv2.minAreaRect(contour)
-            short, long = sorted((max(rw, 0.1), max(rh, 0.1)))
-            aspect = long / short
-            if aspect < config['aspect_min']:
-                continue
-            if rw < rh:
-                angle += 90.0
-            measured_depth = 0.0
-            if depth is not None:
-                dh, dw = depth.shape[:2]
-                scaled = np.asarray(contour, np.float32)
-                scaled[:, 0, 0] *= dw / width
-                scaled[:, 0, 1] *= dh / height
-                depth_mask = np.zeros((dh, dw), np.uint8)
-                cv2.drawContours(depth_mask, [scaled.astype(np.int32)], -1, 255, -1)
-                values = depth[(depth_mask > 0) & np.isfinite(depth) & (depth > 0)]
-                if values.size:
-                    measured_depth = float(np.median(values))
-            if not config['depth_min'] <= measured_depth <= config['depth_max']:
-                continue
-            score = aspect / (1.0 + abs(math.log(max(area, 1.0) / 400.0)))
-            candidates.append({'u': float(cx), 'v': float(cy), 'depth': measured_depth,
-                               'area': area, 'aspect': float(aspect), 'angle': float(angle),
-                               'score': float(score), 'contour': contour})
-        candidates.sort(key=lambda item: item['score'], reverse=True)
-        best = candidates[0] if candidates else None
-        if best is not None and self.handle_previous_center is not None:
-            distance = math.hypot(best['u']-self.handle_previous_center[0],
-                                  best['v']-self.handle_previous_center[1])
-            stable_count = self.handle_stable_count + 1 if distance <= config['jitter_px'] else 1
-        else:
-            stable_count = 1 if best is not None else 0
-        previous = (best['u'], best['v']) if best is not None else None
-        annotated = frame.copy()
-        if len(direct_points) >= 3:
-            polygon = cv2.convexHull(np.asarray(direct_points, np.float32)).astype(np.int32)
-            cv2.polylines(annotated, [polygon], True, (40, 210, 255), 2, cv2.LINE_AA)
-            x, y = polygon.reshape(-1, 2).min(axis=0)
-            cv2.putText(annotated, 'JOINT CAL AREA (+60px)', (int(x), max(18, int(y)-8)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (40, 210, 255), 2, cv2.LINE_AA)
-        for index, item in enumerate(candidates[:8]):
-            color = (40, 255, 80) if index == 0 else (255, 190, 40)
-            cv2.drawContours(annotated, [item['contour']], -1, color, 2)
-            cv2.drawMarker(annotated, (round(item['u']), round(item['v'])), color,
-                           cv2.MARKER_CROSS, 18, 2)
-            cv2.putText(annotated, f"H{index+1} {item['depth']:.0f}mm",
-                        (round(item['u'])+7, round(item['v'])-8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
-        if locked_target is not None:
-            point = (round(locked_target[0]), round(locked_target[1]))
-            cv2.drawMarker(annotated, point, (255, 40, 220), cv2.MARKER_TILTED_CROSS, 30, 3)
-            cv2.circle(annotated, point, 22, (255, 40, 220), 2)
-            cv2.putText(annotated, 'LOCKED TARGET', (point[0]+12, point[1]+25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 40, 220), 2, cv2.LINE_AA)
-        if calibration_selected is not None:
-            point = (round(calibration_selected[0]), round(calibration_selected[1]))
-            cv2.drawMarker(annotated, point, (20, 255, 255), cv2.MARKER_CROSS, 28, 3)
-            cv2.putText(annotated, 'CAL POINT', (point[0]+12, point[1]-12),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (20, 255, 255), 2, cv2.LINE_AA)
-        annotated_jpeg = cv2.imencode('.jpg', cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR),
-                                      [cv2.IMWRITE_JPEG_QUALITY, 75])[1]
-        mask_jpeg = cv2.imencode('.jpg', mask, [cv2.IMWRITE_JPEG_QUALITY, 85])[1]
-        cleaned = [{key: value for key, value in item.items() if key != 'contour'}
-                   for item in candidates]
+            config=dict(self.handle_filter); enabled=self.handle_filter_enabled
+            depth=self.depth.copy() if self.depth is not None else None
+            locked=self.test_target_pixel; selected=self.selected
+            active_layer = self.active_layer
+            complete_direct = self.direct_complete(active_layer)
+            direct = [(x['u'], x['v']) for x in complete_direct]
+            direct_markers = [
+                {
+                    'u': float(x['u']), 'v': float(x['v']),
+                    'label': str(x.get('label', '?')),
+                    'complete': x.get('direct_down') is not None,
+                }
+                for x in self.samples
+                if x.get('direct_layer') == active_layer
+                and x.get('direct_above') is not None
+                and x.get('u') is not None and x.get('v') is not None
+            ]
+            order_enabled=self.handle_order_enabled
+        h,w=frame.shape[:2]; mask=np.zeros((h,w),np.uint8); candidates=[]
+        if enabled and self.handle_net is not None:
+            scale=min(640.0/w,640.0/h); nw,nh=round(w*scale),round(h*scale)
+            resized=cv2.resize(frame,(nw,nh)); px,py=(640-nw)//2,(640-nh)//2
+            image=np.full((640,640,3),114,np.uint8); image[py:py+nh,px:px+nw]=resized
+            blob=cv2.dnn.blobFromImage(image,1/255.0,(640,640),swapRB=False)
+            out=np.asarray(self.handle_net.run(None, {self.handle_net.get_inputs()[0].name: blob})[0]).squeeze(0)
+            if out.ndim==2 and out.shape[0]==5: out=out.T
+            conf_min=config['vmax']/100.0; boxes=[]; scores=[]
+            for row in out:
+                conf=float(row[4])
+                if conf<conf_min: continue
+                cx,cy,bw,bh=map(float,row[:4])
+                x1=max(0,min(w-1,round((cx-bw/2-px)/scale))); y1=max(0,min(h-1,round((cy-bh/2-py)/scale)))
+                x2=max(0,min(w,round((cx+bw/2-px)/scale))); y2=max(0,min(h,round((cy+bh/2-py)/scale)))
+                if x2>x1 and y2>y1: boxes.append([x1,y1,x2-x1,y2-y1]); scores.append(conf)
+            keep=cv2.dnn.NMSBoxes(boxes,scores,conf_min,.45)
+            for i in np.asarray(keep).reshape(-1) if len(keep) else []:
+                x,y,bw,bh=boxes[int(i)]; conf=scores[int(i)]; area=float(bw*bh)
+                aspect=max(bw,bh)/max(1,min(bw,bh))
+                if not config['area_min']<=area<=config['area_max'] or aspect<config['aspect_min']: continue
+                measured=0.0
+                if depth is not None:
+                    dh,dw=depth.shape[:2]; x1=round(x*dw/w); y1=round(y*dh/h); x2=round((x+bw)*dw/w); y2=round((y+bh)*dh/h)
+                    ix=max(1,(x2-x1)//5); iy=max(1,(y2-y1)//5)
+                    values=depth[y1+iy:y2-iy,x1+ix:x2-ix]; values=values[np.isfinite(values)&(values>0)]
+                    if values.size: measured=float(np.median(values))
+                if not config['depth_min']<=measured<=config['depth_max']: continue
+                contour=np.asarray([[[x,y]],[[x+bw,y]],[[x+bw,y+bh]],[[x,y+bh]]],np.int32)
+                cv2.rectangle(mask,(x,y),(x+bw,y+bh),255,-1)
+                center_u, center_v = x + bw / 2, y + bh / 2
+                zone = (1 if center_u < w / 2 and center_v < h / 2 else
+                        4 if center_u >= w / 2 and center_v < h / 2 else
+                        3 if center_u >= w / 2 and center_v >= h / 2 else 2)
+                candidates.append({'u':center_u,'v':center_v,'depth':measured,'area':area,
+                    'aspect':float(aspect),'angle':0.0,'score':conf,'confidence':conf,
+                    'zone':zone,'contour':contour})
+        candidates.sort(key=lambda x:x['score'],reverse=True); best=candidates[0] if candidates else None
+        if best and self.handle_previous_center:
+            dist=math.hypot(best['u']-self.handle_previous_center[0],best['v']-self.handle_previous_center[1])
+            stable=self.handle_stable_count+1 if dist<=config['jitter_px'] else 1
+        else: stable=1 if best else 0
+        previous=(best['u'],best['v']) if best else None; annotated=frame.copy()
+        mask_view=cv2.cvtColor(mask,cv2.COLOR_GRAY2BGR)
+        if len(direct)>=3:
+            polygon=cv2.convexHull(np.asarray(direct,np.float32)).astype(np.int32); cv2.polylines(annotated,[polygon],True,(40,210,255),2)
+        if order_enabled:
+            cv2.line(annotated, (w//2, 0), (w//2, h), (170,170,170), 1)
+            cv2.line(annotated, (0, h//2), (w, h//2), (170,170,170), 1)
+            for zone, point in ((1,(12,28)),(4,(w//2+12,28)),
+                               (3,(w//2+12,h//2+28)),(2,(12,h//2+28))):
+                cv2.putText(annotated, f'ORDER {zone}', point,
+                            cv2.FONT_HERSHEY_SIMPLEX, .55, (20,255,255), 2)
+        for index,item in enumerate(candidates[:8]):
+            color=(40,255,80) if index==0 else (255,190,40); cv2.drawContours(annotated,[item['contour']],-1,color,2)
+            cv2.drawMarker(annotated,(round(item['u']),round(item['v'])),color,cv2.MARKER_CROSS,18,2)
+            prefix = f"Q{item['zone']} " if order_enabled else ''
+            cv2.putText(annotated,f"{prefix}H{index+1} {item['confidence']:.2f} {item['depth']:.0f}mm",(round(item['u'])+7,round(item['v'])-8),cv2.FONT_HERSHEY_SIMPLEX,.45,color,1)
+        for marker in direct_markers:
+            q = (round(marker['u']), round(marker['v']))
+            color = (20, 255, 255) if marker['complete'] else (255, 170, 20)
+            label = f"L{active_layer} {marker['label']}" + ('' if marker['complete'] else ' ABOVE')
+            cv2.circle(annotated, q, 9, (0, 0, 0), 4)
+            cv2.circle(annotated, q, 9, color, 2)
+            cv2.putText(annotated, label, (q[0] + 12, q[1] + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 0, 0), 3)
+            cv2.putText(annotated, label, (q[0] + 12, q[1] + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, .5, color, 1)
+            mask_color = (0, 255, 255) if marker['complete'] else (0, 165, 255)
+            cv2.circle(mask_view, q, 9, (0, 0, 0), 4)
+            cv2.circle(mask_view, q, 9, mask_color, 2)
+            cv2.putText(mask_view, label, (q[0] + 12, q[1] + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, .5, (0, 0, 0), 3)
+            cv2.putText(mask_view, label, (q[0] + 12, q[1] + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, .5, mask_color, 1)
+        for point,label,color in ((locked,'LOCKED TARGET',(255,40,220)),(selected,'CAL POINT',(20,255,255))):
+            if point is not None:
+                q=(round(point[0]),round(point[1])); cv2.drawMarker(annotated,q,color,cv2.MARKER_CROSS,28,3); cv2.putText(annotated,label,(q[0]+12,q[1]-12),cv2.FONT_HERSHEY_SIMPLEX,.55,color,2)
+        aj=cv2.imencode('.jpg',cv2.cvtColor(annotated,cv2.COLOR_RGB2BGR),[cv2.IMWRITE_JPEG_QUALITY,75])[1]
+        mj=cv2.imencode('.jpg',mask_view,[cv2.IMWRITE_JPEG_QUALITY,85])[1]
+        cleaned=[{k:v for k,v in x.items() if k!='contour'} for x in candidates]
         with self.lock:
-            self.handle_detections = cleaned
-            self.handle_best = cleaned[0] if cleaned else None
-            self.handle_stable_count = stable_count
-            self.handle_previous_center = previous
-            self.handle_jpeg = bytes(annotated_jpeg)
-            self.handle_mask_jpeg = bytes(mask_jpeg)
+            self.handle_detections=cleaned; self.handle_best=cleaned[0] if cleaned else None
+            self.handle_stable_count=stable; self.handle_previous_center=previous
+            self.handle_jpeg=bytes(aj); self.handle_mask_jpeg=bytes(mj)
 
     def configure_handle_filter(self, data):
         config = {
-            'vmax': max(20, min(180, int(data['vmax']))),
+            'vmax': max(1, min(99, int(data['vmax']))),
             'area_min': max(10, min(5000, int(data['area_min']))),
             'area_max': max(100, min(30000, int(data['area_max']))),
             'aspect_min': max(1.0, min(10.0, float(data['aspect_min']))),
@@ -632,7 +701,7 @@ class Controller(Node):
             self.handle_filter_enabled = True
             self.handle_stable_count = 0
             self.handle_previous_center = None
-            self.status = '파란 손잡이 필터 설정을 적용했습니다.'
+            self.status = 'YOLO 손잡이 검출 설정을 적용했습니다.'
 
     def set_handle_filter_enabled(self, enabled):
         with self.lock:
@@ -643,14 +712,21 @@ class Controller(Node):
             self.handle_previous_center = None
             if not enabled:
                 self.test_target_pixel = None
-            self.status = ('파란 손잡이 필터를 적용했습니다.' if enabled
+            self.status = ('YOLO 손잡이 검출을 적용했습니다.' if enabled
                            else '손잡이 필터를 해제했습니다. 자동 목표와 이동을 차단합니다.')
+
+    def set_handle_order_enabled(self, enabled):
+        with self.lock:
+            self.handle_order_enabled = bool(enabled)
+            self.status = ('구역 순서 ON: 1→2→3→4 순으로 선택합니다.' if enabled
+                           else '구역 순서 OFF: YOLO 신뢰도 순으로 선택합니다.')
 
     def handle_state(self):
         with self.lock:
             best = dict(self.handle_best) if self.handle_best is not None else None
             config = dict(self.handle_filter)
             filter_enabled = self.handle_filter_enabled
+            order_enabled = self.handle_order_enabled
             stable_count = self.handle_stable_count
             matrix, _ = self.planar_model()
             calibration_error = self.planar_calibration_error()
@@ -660,6 +736,7 @@ class Controller(Node):
             fixed_z = float(self.fixed_pick_zs[active_layer])
             direct_samples = self.direct_complete(active_layer)
             joint_complete = len(direct_samples)
+            joint_validation_error = self.validate_direct_calibration(active_layer)
             joint_depths = [float(item['depth']) for item in direct_samples]
             joint_depth_min = min(joint_depths) if joint_depths else None
             joint_depth_max = max(joint_depths) if joint_depths else None
@@ -681,15 +758,18 @@ class Controller(Node):
                     'camera_xyz': camera_xyz, 'robot_xyz': robot_xyz,
                     'stable_count': stable_count,
                     'stable': best is not None and stable_count >= config['stable_frames'],
-                    'config': config, 'filter_enabled': filter_enabled, 'status': self.status,
+                    'config': config, 'filter_enabled': filter_enabled,
+                    'order_enabled': order_enabled, 'status': self.status,
                     'calibrated': calibration_error is None,
                     'calibration_error': calibration_error,
                     'target_pixel': target, 'selected': selected, 'active_layer': active_layer,
                     'fixed_z': fixed_z, 'joint_complete': joint_complete,
-                    'joint_partial': joint_partial, 'joint_ready': joint_complete >= 3,
+                    'joint_partial': joint_partial, 'joint_ready': joint_complete >= 3 and joint_validation_error is None,
+                    'joint_validation_error': joint_validation_error,
                     'joint_depth_min': joint_depth_min, 'joint_depth_max': joint_depth_max,
                     'drop_above': drop_above, 'drop_down': drop_down,
-                    'drop_ready': drop_above and drop_down, 'playing': self.playing}
+                    'drop_ready': drop_above and drop_down, 'playing': self.playing,
+                    'auto_until_empty': self.auto_until_empty}
 
     def set_handle_target(self):
         with self.lock:
@@ -702,10 +782,23 @@ class Controller(Node):
                 raise ValueError('손잡이 위치가 아직 안정되지 않았습니다.')
             self.selected = (best['u'], best['v'], best['depth'])
             self.test_target_pixel = tuple(map(float, self.selected))
+            self.manual_target_pixel = self.test_target_pixel
+            self.manual_target_generation += 1
             ready = len(self.direct_complete()) >= 3
             self.status = ('최적 손잡이를 목표로 고정했습니다. ' +
                            ('관절 직접 보간으로 이동할 수 있습니다.' if ready
                             else '현재 층 관절 보정 3쌍 이상이 필요합니다.'))
+
+    def clear_handle_target(self):
+        """Clear the user-selected priority target without interrupting motion."""
+        with self.lock:
+            self.selected = None
+            self.test_target_pixel = None
+            self.manual_target_pixel = None
+            self.manual_target_generation += 1
+            self.status = ('고정 목표를 해제했습니다. 현재 동작이 끝나면 '
+                           '일반 검출 순서로 계속합니다.' if self.auto_until_empty
+                           else '고정 목표와 선택 좌표를 해제했습니다.')
 
     def select_handle_target(self, u, v):
         """Lock the filtered handle nearest to a click in the overlay."""
@@ -721,6 +814,8 @@ class Controller(Node):
                 raise ValueError('클릭 근처 80px 안에 검출된 손잡이가 없습니다.')
             self.selected = (nearest['u'], nearest['v'], nearest['depth'])
             self.test_target_pixel = tuple(map(float, self.selected))
+            self.manual_target_pixel = self.test_target_pixel
+            self.manual_target_generation += 1
             ready = len(self.direct_complete()) >= 3
             self.status = (f'클릭한 H 후보를 목표로 고정했습니다 (거리 {distance:.0f}px). ' +
                            ('관절 직접 보간으로 이동할 수 있습니다.' if ready
@@ -741,7 +836,11 @@ class Controller(Node):
                 frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
             elif channels == 1:
                 frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
-            self.update_handle_detection(frame)
+            with self.lock:
+                start_inference = not self.handle_inference_busy
+                if start_inference: self.handle_inference_busy = True
+            if start_inference:
+                threading.Thread(target=self._handle_worker,args=(frame.copy(),),daemon=True).start()
             shown = cv2.resize(frame, (640, 480), interpolation=cv2.INTER_AREA)
             with self.lock:
                 samples = list(self.samples)
@@ -757,6 +856,13 @@ class Controller(Node):
                 self.last_frame_received = time.monotonic()
         except (ValueError, cv2.error):
             pass
+
+    def _handle_worker(self, frame):
+        try: self.update_handle_detection(frame)
+        except Exception as error:
+            with self.lock: self.status=f'YOLO 추론 오류: {error}'
+        finally:
+            with self.lock: self.handle_inference_busy=False
 
     @staticmethod
     def _draw_workspace(frame, samples, selected, pick, drop, planar_points=(), test_target=None):
@@ -1003,6 +1109,33 @@ class Controller(Node):
             result.append(sample)
         return result
 
+    def check_direct_calibration_record(self, layer, label, point, kind, pose):
+        """Reject spatially duplicate or conflicting calibration records before saving."""
+        if not self._driver_safe_pose(pose):
+            raise ValueError('현재 관절 자세가 드라이버 안전 범위를 벗어나 저장할 수 없습니다.')
+        pose_key = 'direct_above' if kind == 'above' else 'direct_down'
+        for other in self.samples:
+            if other.get('direct_layer') != layer or str(other.get('label')) == str(label):
+                continue
+            other_pose = other.get(pose_key)
+            if other_pose is None or float(other.get('depth', 0)) <= 0:
+                continue
+            pixel_distance = math.hypot(float(point[0])-float(other['u']),
+                                        float(point[1])-float(other['v']))
+            depth_distance = abs(float(point[2])-float(other['depth']))
+            if pixel_distance > 15.0 or depth_distance > 30.0:
+                continue
+            joint_delta = max(abs(float(a)-float(b))
+                              for a,b in zip(pose[:5], other_pose[:5]))
+            if joint_delta > 12.0:
+                raise ValueError(
+                    f"충돌 보정 저장 거부: {other['label']}와 {pixel_distance:.1f}px/"
+                    f"{depth_distance:.0f}mm 거리인데 관절차가 {joint_delta:.1f}°입니다. "
+                    f"기존 점을 삭제하거나 같은 이름으로 다시 기록하세요.")
+            raise ValueError(
+                f"중복 보정 저장 거부: {other['label']}와 {pixel_distance:.1f}px/"
+                f"{depth_distance:.0f}mm로 너무 가깝습니다. 다른 위치를 선택하세요.")
+
     def record_direct_joint(self, kind, label):
         if kind not in ('above', 'down'):
             raise ValueError('위 자세 또는 집기 자세만 기록할 수 있습니다.')
@@ -1017,17 +1150,23 @@ class Controller(Node):
             sample = next((item for item in self.samples
                            if item.get('direct_layer') == layer and item.get('label') == label), None)
             if kind == 'above':
+                above_pose = list(map(float, self.angles))
+                self.check_direct_calibration_record(
+                    layer, label, self.selected, 'above', above_pose)
                 if sample is None:
                     sample = {'label': label, 'direct_layer': layer}
                     self.samples.append(sample)
                 sample.update({'u': float(self.selected[0]), 'v': float(self.selected[1]),
                                'depth': float(self.selected[2]),
-                               'direct_above': list(map(float, self.angles)),
+                               'direct_above': above_pose,
                                'direct_down': None})
             else:
                 if sample is None or sample.get('direct_above') is None:
                     raise ValueError(f'{layer}층 {label}의 위 자세를 먼저 기록하세요.')
                 down_pose = list(map(float, self.angles))
+                self.check_direct_calibration_record(
+                    layer, label, (sample['u'], sample['v'], sample['depth']),
+                    'down', down_pose)
                 if max(abs(down_pose[i] - float(sample['direct_above'][i])) for i in range(5)) < 3.0:
                     raise ValueError('집기 자세에서 J1~J5가 거의 움직이지 않았습니다. J6 그리퍼가 아니라 팔 끝을 실제로 하강시킨 뒤 기록하세요.')
                 sample['direct_down'] = down_pose
@@ -1109,7 +1248,24 @@ class Controller(Node):
         return len(pose) == 6 and all(minimums[i] <= pose[i] <= maximums[i]
                                       for i in range(6))
 
-    def start_direct_pick_drop(self, seconds, drop_seconds, opened, closed):
+    def validate_direct_calibration(self, layer=None):
+        layer = self.active_layer if layer is None else int(layer)
+        samples = self.direct_complete(layer)
+        if len(samples) < 3:
+            return '완료된 보정점이 3개 미만입니다.'
+        for left_index, left in enumerate(samples):
+            for right in samples[left_index + 1:]:
+                pixel_distance = math.hypot(left['u'] - right['u'], left['v'] - right['v'])
+                depth_distance = abs(float(left['depth']) - float(right['depth']))
+                if pixel_distance <= 15.0 and depth_distance <= 30.0:
+                    above_delta = max(abs(float(a)-float(b)) for a,b in zip(left['direct_above'][:5], right['direct_above'][:5]))
+                    down_delta = max(abs(float(a)-float(b)) for a,b in zip(left['direct_down'][:5], right['direct_down'][:5]))
+                    if max(above_delta, down_delta) > 12.0:
+                        return (f"{layer}층 충돌 보정: {left['label']}/{right['label']} "
+                                f"(위치 {pixel_distance:.1f}px, 관절차 {max(above_delta,down_delta):.1f}°)")
+        return None
+
+    def start_direct_pick_drop(self, seconds, drop_seconds, opened, closed, from_auto=False):
         seconds = max(1.0, min(10.0, float(seconds)))
         drop_seconds = max(3.0, min(15.0, float(drop_seconds)))
         opened = max(22.0, min(180.0, float(opened)))
@@ -1117,8 +1273,11 @@ class Controller(Node):
         with self.lock:
             if self.playing:
                 raise ValueError('이미 연속 동작 중입니다.')
-            if len(self.direct_complete()) < 3:
-                raise ValueError('현재 층 관절 보정이 최소 3쌍 필요합니다.')
+            if self.auto_until_empty and not from_auto:
+                raise ValueError('검출 없을 때까지 반복 동작 중입니다.')
+            calibration_error = self.validate_direct_calibration()
+            if calibration_error:
+                raise ValueError(calibration_error)
             if self.test_target_pixel is None:
                 raise ValueError('먼저 손잡이 목표를 클릭해 고정하세요.')
             target = tuple(self.test_target_pixel)
@@ -1133,13 +1292,16 @@ class Controller(Node):
             drop_down = list(map(float, drop['drop_down']))
             pick_above[5] = opened; pick_down[5] = opened
             close_pose = pick_down.copy(); close_pose[5] = closed
+            grip_hold_pose = close_pose.copy()
             lift_pose = pick_above.copy(); lift_pose[5] = closed
             drop_above[5] = closed; drop_down[5] = closed
             release_pose = drop_down.copy(); release_pose[5] = opened
             retreat_pose = drop_above.copy(); retreat_pose[5] = opened
-            sequence = [pick_above, pick_down, close_pose, lift_pose,
+            # Close fully at the lowered pick pose, hold that exact pose so the
+            # servo can settle, then lift while preserving the closed J6 value.
+            sequence = [pick_above, pick_down, close_pose, grip_hold_pose, lift_pose,
                         drop_above, drop_down, release_pose, retreat_pose]
-            durations = [seconds, seconds, 1.0, seconds,
+            durations = [seconds, seconds, 1.5, 1.0, seconds,
                          drop_seconds, seconds, 1.0, seconds]
             if not all(self._driver_safe_pose(pose) for pose in sequence):
                 raise ValueError('연속 동작 자세가 드라이버 안전 관절 범위를 벗어났습니다.')
@@ -1150,6 +1312,150 @@ class Controller(Node):
         threading.Thread(target=self.run_worker_timed,
                          args=(sequence, durations), daemon=True).start()
 
+    def start_detected_pick_drop(self, seconds, drop_seconds, opened, closed, from_auto=False):
+        """Pick the first detection inside the active-layer calibration."""
+        with self.lock:
+            if not self.handle_filter_enabled:
+                raise ValueError('손잡이 필터가 OFF입니다. 필터를 적용하세요.')
+            if not self.handle_detections:
+                raise ValueError('조건을 통과한 손잡이가 없습니다.')
+            height, width = self.rgb.shape[:2] if self.rgb is not None else (480, 640)
+            eligible = [
+                item for item in self.handle_detections
+                if self.direct_inside((item['u'], item['v'], item['depth']))
+            ]
+            if self.handle_order_enabled:
+                eligible.sort(key=lambda item: (
+                    int(item.get('zone', 5)),
+                    math.hypot(item['u'] - width / 2, item['v'] - height / 2),
+                ))
+            candidate = eligible[0] if eligible else None
+            if candidate is None:
+                raise ValueError(
+                    '검출된 손잡이 중 현재 층의 3D 관절 보정 범위 안에 있는 후보가 없습니다.')
+            self.selected = (candidate['u'], candidate['v'], candidate['depth'])
+            self.test_target_pixel = tuple(map(float, self.selected))
+            selection = (f'{candidate.get("zone", "?")}번 구역' if self.handle_order_enabled
+                         else 'YOLO 신뢰도 우선')
+            self.status = (f'{selection} 후보를 선택했습니다: '
+                           f'u={candidate["u"]:.0f}, v={candidate["v"]:.0f}, '
+                           f'depth={candidate["depth"]:.0f}mm')
+        self.start_direct_pick_drop(seconds, drop_seconds, opened, closed, from_auto=from_auto)
+
+    def start_until_empty(self, seconds, drop_seconds, opened, closed,
+                          prioritize_manual=False):
+        """Repeat detected pick/drop cycles until detections remain empty."""
+        with self.lock:
+            if self.playing or self.auto_until_empty:
+                raise ValueError('이미 동작 중입니다.')
+            if not self.handle_filter_enabled:
+                raise ValueError('손잡이 필터가 OFF입니다. 필터를 적용하세요.')
+            calibration_error = self.validate_direct_calibration()
+            if calibration_error:
+                raise ValueError(calibration_error)
+            drop = self.direct_drop_sample()
+            if drop is None or drop.get('drop_above') is None or drop.get('drop_down') is None:
+                raise ValueError('드롭 위 자세와 놓기 자세를 모두 기록하세요.')
+            self.auto_until_empty = True
+            self.stop_event.clear()
+            self.status = ('고정 목표 우선 + 검출 없을 때까지 반복 모드를 시작합니다.'
+                           if prioritize_manual else
+                           '검출 없을 때까지 반복 모드를 시작합니다.')
+        threading.Thread(target=self._until_empty_worker,
+                         args=(seconds, drop_seconds, opened, closed,
+                               prioritize_manual),
+                         daemon=True).start()
+
+    def _until_empty_worker(self, seconds, drop_seconds, opened, closed,
+                            prioritize_manual=False):
+        cycles = 0
+        empty_checks = 0
+        failure = None
+        handled_manual_generation = -1
+        try:
+            while not self.stop_event.is_set():
+                with self.lock:
+                    detections = [dict(item) for item in self.handle_detections]
+                    candidates = [
+                        item for item in detections
+                        if self.direct_inside((item['u'], item['v'], item['depth']))
+                    ]
+                    manual_generation = self.manual_target_generation
+                    manual_target = self.manual_target_pixel
+                use_manual = (prioritize_manual and manual_target is not None
+                              and manual_generation > handled_manual_generation)
+                if use_manual:
+                    target = manual_target
+                    nearest = (min(candidates,
+                                   key=lambda item: math.hypot(item['u']-target[0],
+                                                               item['v']-target[1]))
+                               if candidates else None)
+                    distance = (math.hypot(nearest['u']-target[0], nearest['v']-target[1])
+                                if nearest is not None else float('inf'))
+                    handled_manual_generation = manual_generation
+                    if nearest is not None and distance <= 80.0:
+                        with self.lock:
+                            self.selected = (nearest['u'], nearest['v'], nearest['depth'])
+                            self.test_target_pixel = tuple(map(float, self.selected))
+                            self.status = '사용자가 클릭한 고정 목표를 우선 집기 시작합니다.'
+                        self.start_direct_pick_drop(
+                            seconds, drop_seconds, opened, closed, from_auto=True)
+                        while not self.stop_event.is_set():
+                            with self.lock:
+                                active = self.playing
+                            if not active:
+                                break
+                            self.stop_event.wait(0.2)
+                        if self.stop_event.is_set():
+                            break
+                        cycles += 1
+                        with self.lock:
+                            self.status = f'고정 목표 처리 완료 · 총 {cycles}개 · 자동 검출 계속'
+                        if self.stop_event.wait(1.5):
+                            break
+                        continue
+                    with self.lock:
+                        self.status = '클릭한 고정 목표가 사라져 기존 검출 순서로 계속합니다.'
+                if not detections:
+                    empty_checks += 1
+                    with self.lock:
+                        self.status = f'재검출 확인 {empty_checks}/5 · 처리 {cycles}개'
+                    if empty_checks >= 5:
+                        break
+                    if self.stop_event.wait(0.4):
+                        break
+                    continue
+                if not candidates:
+                    failure = '검출은 있지만 현재 층의 3D 관절 보정 범위 안 후보가 없습니다.'
+                    break
+                empty_checks = 0
+                self.start_detected_pick_drop(
+                    seconds, drop_seconds, opened, closed, from_auto=True)
+                while not self.stop_event.is_set():
+                    with self.lock:
+                        active = self.playing
+                    if not active:
+                        break
+                    self.stop_event.wait(0.2)
+                if self.stop_event.is_set():
+                    break
+                cycles += 1
+                with self.lock:
+                    self.status = f'{cycles}개 처리 완료 · YOLO 재검출 대기'
+                if self.stop_event.wait(1.5):
+                    break
+        except (ValueError, TypeError) as error:
+            failure = str(error)
+        finally:
+            with self.lock:
+                self.auto_until_empty = False
+                if self.stop_event.is_set():
+                    self.status = f'반복 동작을 정지했습니다. 처리 {cycles}개'
+                elif failure:
+                    self.status = f'반복 동작 종료: {failure}'
+                else:
+                    self.status = f'검출 없음 확인 완료 · 총 {cycles}개 처리'
+
     def move_direct_joint_stage(self, stage, seconds, gripper):
         """Interpolate recorded pixel-to-joint pose pairs without FK or IK."""
         if stage not in ('above', 'down', 'lift'):
@@ -1157,8 +1463,9 @@ class Controller(Node):
         seconds = max(1.0, min(10.0, float(seconds)))
         gripper = max(22.0, min(180.0, float(gripper)))
         with self.lock:
-            if len(self.direct_complete()) < 3:
-                raise ValueError('화면→관절 보정 자세가 최소 3쌍 필요합니다. 6쌍 이상 권장합니다.')
+            calibration_error = self.validate_direct_calibration()
+            if calibration_error:
+                raise ValueError(calibration_error)
             if self.test_target_pixel is None:
                 raise ValueError('먼저 손잡이 목표를 클릭해 고정하세요.')
             target = tuple(self.test_target_pixel)
@@ -1249,25 +1556,165 @@ class Controller(Node):
             self.playing=False; self.status='정지했습니다.' if self.stop_event.is_set() else 'Pick & Place 완료'
 
     def run_worker_timed(self, sequence, durations):
-        labels = ('픽 위', '픽 하강', '그리퍼 닫기', '픽 상승',
+        labels = ('픽 위', '픽 하강', '그리퍼 닫기', '닫힘 유지', '픽 상승',
                   '드롭으로 저속 이동', '드롭 하강', '그리퍼 열기', '드롭 복귀')
-        for index, (pose, duration) in enumerate(zip(sequence, durations)):
-            if self.stop_event.is_set():
-                break
-            self.move_pub.publish(Float32MultiArray(
-                data=[*pose, float(round(duration * 1000))]))
+        try:
+            for index, (pose, duration) in enumerate(zip(sequence, durations)):
+                if self.stop_event.is_set():
+                    break
+                self.move_pub.publish(Float32MultiArray(
+                    data=[*pose, float(round(duration * 1000))]))
+                with self.lock:
+                    label = labels[index] if index < len(labels) else '동작'
+                    self.status = f'{label} {index+1}/{len(sequence)} · {duration:.1f}초'
+                if self.stop_event.wait(duration + 0.35):
+                    break
+        except Exception as error:
             with self.lock:
-                self.status = f'{labels[index]} {index+1}/8 · {duration:.1f}초'
-            if self.stop_event.wait(duration + 0.35):
-                break
+                self.status = f'집기→드롭 실행 오류: {error}'
+            self.get_logger().error(f'Pick/drop worker failed: {error}')
+        finally:
+            with self.lock:
+                self.playing = False
+                if self.stop_event.is_set():
+                    self.status = '정지했습니다.'
+                elif not self.status.startswith('집기→드롭 실행 오류:'):
+                    self.status = '집기→드롭 연속 동작을 완료했습니다.'
+
+    @staticmethod
+    def validate_joint_program(data):
+        if not isinstance(data, dict) or not isinstance(data.get('poses'), dict):
+            raise ValueError('프로그램 형식이 잘못되었습니다.')
+        times_in=data.get('transition_seconds',{})
+        poses={}; times={}
+        for key,label in JOINT_PROGRAM_STEPS:
+            raw=data['poses'].get(key)
+            if not isinstance(raw,(list,tuple)) or len(raw)!=6:
+                raise ValueError(f'{label}: 관절값 6개가 필요합니다.')
+            pose=[float(v) for v in raw]
+            if not Controller._driver_safe_pose(pose):
+                raise ValueError(f'{label}: 드라이버 관절 범위를 벗어났습니다.')
+            sec=float(times_in.get(key,data.get('seconds_per_step',5.0)))
+            if not .5<=sec<=30: raise ValueError(f'{label}: 시간은 0.5~30초입니다.')
+            poses[key]=pose; times[key]=sec
+        return {'poses':poses,'transition_seconds':times}
+
+    def joint_program_status(self):
+        with self.lock: return {'angles':list(self.angles),'playing':self.playing,'status':self.status}
+
+    def joint_program_capture(self,key):
+        if key not in dict(JOINT_PROGRAM_STEPS): raise ValueError('잘못된 단계입니다.')
         with self.lock:
-            self.playing = False
-            self.status = ('정지했습니다.' if self.stop_event.is_set()
-                           else '집기→드롭 연속 동작을 완료했습니다.')
+            if any(v is None for v in self.angles): raise ValueError('현재 관절값을 읽지 못했습니다.')
+            pose=list(map(float,self.angles)); self.status=f'{dict(JOINT_PROGRAM_STEPS)[key]} 기록 완료'
+            return pose
+
+    @staticmethod
+    def joint_program_file(box):
+        box=int(box)
+        if not 1<=box<=8: raise ValueError('상자 번호는 1~8입니다.')
+        return JOINT_PROGRAM_DIR/f'dofbot_pick_place_box{box}.json'
+
+    @staticmethod
+    def _common_from_program(program):
+        return {
+            'poses': {key: program['poses'][key] for key in JOINT_COMMON_KEYS},
+            'transition_seconds': {
+                key: program['transition_seconds'][key] for key in JOINT_COMMON_KEYS},
+        }
+
+    def _load_joint_common(self, fallback):
+        try:
+            common = json.loads(JOINT_COMMON_FILE.read_text())
+        except OSError:
+            common = self._common_from_program(fallback)
+            JOINT_COMMON_FILE.write_text(
+                json.dumps(common, ensure_ascii=False, indent=2) + '\n')
+        except json.JSONDecodeError as error:
+            raise ValueError('공통 드롭 프로그램 JSON 오류입니다.') from error
+        merged = {
+            'poses': dict(fallback['poses']),
+            'transition_seconds': dict(fallback['transition_seconds']),
+        }
+        for key in JOINT_COMMON_KEYS:
+            if key not in common.get('poses', {}) or key not in common.get('transition_seconds', {}):
+                raise ValueError(f'공통 드롭 프로그램에 {key}가 없습니다.')
+            merged['poses'][key] = common['poses'][key]
+            merged['transition_seconds'][key] = common['transition_seconds'][key]
+        return self.validate_joint_program(merged)
+
+    def joint_program_load(self,box):
+        try: raw=json.loads(self.joint_program_file(box).read_text())
+        except OSError as e: raise ValueError(f'상자 {box} 저장 파일이 없습니다.') from e
+        except json.JSONDecodeError as e: raise ValueError(f'상자 {box} JSON 오류입니다.') from e
+        result=self._load_joint_common(self.validate_joint_program(raw))
+        with self.lock: self.status=f'상자 {box} 픽 + 공통 드롭 불러오기 완료'
+        return result
+
+    def joint_program_save(self,box,data):
+        result=self.validate_joint_program(data)
+        common=self._common_from_program(result)
+        JOINT_PROGRAM_DIR.mkdir(parents=True,exist_ok=True)
+        JOINT_COMMON_FILE.write_text(json.dumps(common,ensure_ascii=False,indent=2)+'\n')
+        updated=0
+        for number in range(1,9):
+            path=self.joint_program_file(number)
+            if number==int(box):
+                merged=result
+            else:
+                try: existing=self.validate_joint_program(json.loads(path.read_text()))
+                except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError): continue
+                merged={'poses':dict(existing['poses']),
+                        'transition_seconds':dict(existing['transition_seconds'])}
+                for key in JOINT_COMMON_KEYS:
+                    merged['poses'][key]=common['poses'][key]
+                    merged['transition_seconds'][key]=common['transition_seconds'][key]
+            path.write_text(json.dumps(merged,ensure_ascii=False,indent=2)+'\n')
+            updated+=1
+        with self.lock:
+            self.status=f'상자 {box} 픽 저장 + 공통 5~9번을 {updated}개 상자에 동기화'
+
+    def joint_program_move(self,key,pose,seconds):
+        if key not in dict(JOINT_PROGRAM_STEPS): raise ValueError('잘못된 단계입니다.')
+        fake={'poses':{k:pose for k,_ in JOINT_PROGRAM_STEPS},'transition_seconds':{k:seconds for k,_ in JOINT_PROGRAM_STEPS}}
+        result=self.validate_joint_program(fake); target=result['poses'][key]; sec=result['transition_seconds'][key]
+        with self.lock:
+            if self.playing: raise ValueError('이미 동작 중입니다.')
+            self.status=f'{dict(JOINT_PROGRAM_STEPS)[key]} 위치로 {sec:.1f}초 이동'
+        self.torque_pub.publish(Bool(data=True))
+        self.move_pub.publish(Float32MultiArray(data=[*target,sec*1000]))
+
+    def start_joint_program(self,data):
+        program=self.validate_joint_program(data)
+        with self.lock:
+            if self.playing or self.auto_until_empty: raise ValueError('이미 동작 중입니다.')
+            if any(v is None for v in self.angles): raise ValueError('현재 관절값을 읽지 못했습니다.')
+            source=list(map(float,self.angles)); self.playing=True; self.stop_event.clear()
+            self.status='9단계 관절 프로그램 시작'
+        self.torque_pub.publish(Bool(data=True))
+        threading.Thread(target=self._joint_program_worker,args=(program,source),daemon=True).start()
+
+    def _joint_program_worker(self,program,source):
+        for index,(key,label) in enumerate(JOINT_PROGRAM_STEPS):
+            if self.stop_event.is_set(): break
+            target=program['poses'][key]; duration=program['transition_seconds'][key]; started=time.monotonic()
+            while not self.stop_event.is_set():
+                ratio=min(1.0,(time.monotonic()-started)/max(.1,duration)); blend=ratio*ratio*(3-2*ratio)
+                pose=[a+(b-a)*blend for a,b in zip(source,target)]
+                self.move_pub.publish(Float32MultiArray(data=[*pose,150.0]))
+                with self.lock: self.status=f'관절 프로그램 {index+1}/9: {label} · {duration:.1f}초'
+                if ratio>=1: break
+                if self.stop_event.wait(.1): break
+            source=list(target)
+            if self.stop_event.wait(.1): break
+        with self.lock:
+            self.playing=False
+            self.status='관절 프로그램 정지' if self.stop_event.is_set() else '9단계 관절 프로그램 완료'
 
     def stop(self):
         self.stop_event.set()
         with self.lock:
+            self.auto_until_empty = False
             pose = None if any(v is None for v in self.angles) else list(self.angles)
             self.status='정지 명령을 보냈습니다.'
         if pose: self.move_pub.publish(Float32MultiArray(data=[*pose,100.0]))
@@ -1280,7 +1727,7 @@ class Controller(Node):
         threading.Thread(target=self._restart_camera_worker, daemon=True).start()
 
     def capture_pair(self):
-        """Save clean paired RGB frames plus depth and acquisition metadata."""
+        """Save one clean RGB-D frame plus depth and acquisition metadata."""
         now = time.monotonic()
         with self.lock:
             if self.rgb is None or now - self.last_frame_received >= 3.0:
@@ -1289,33 +1736,25 @@ class Controller(Node):
             depth = self.depth.copy() if self.depth is not None else None
             angles = list(self.angles)
             rgb_age = now - self.last_frame_received
-        with self.usb_camera.lock:
-            if self.usb_camera.clean_jpeg is None or now - self.usb_camera.last_frame_received >= 3.0:
-                raise ValueError('C270 카메라 영상이 없습니다.')
-            usb_jpeg = self.usb_camera.clean_jpeg
-            usb_age = now - self.usb_camera.last_frame_received
-
-        for name in ('rgbd', 'depth', 'c270', 'meta'):
+        for name in ('rgbd', 'depth', 'meta'):
             (DATASET_DIR / name).mkdir(parents=True, exist_ok=True)
         self.capture_count += 1
         capture_id = f'capture_{self.capture_count:06d}_{time.strftime("%Y%m%d_%H%M%S")}'
         rgb_path = DATASET_DIR / 'rgbd' / f'{capture_id}.jpg'
         depth_path = DATASET_DIR / 'depth' / f'{capture_id}.png'
-        usb_path = DATASET_DIR / 'c270' / f'{capture_id}.jpg'
         meta_path = DATASET_DIR / 'meta' / f'{capture_id}.json'
         if not cv2.imwrite(str(rgb_path), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
                            [cv2.IMWRITE_JPEG_QUALITY, 92]):
             raise ValueError('RGB-D 이미지 저장에 실패했습니다.')
-        usb_path.write_bytes(usb_jpeg)
         depth_saved = False
         if depth is not None:
             depth_saved = cv2.imwrite(str(depth_path), np.clip(depth, 0, 65535).astype(np.uint16))
         meta = {
             'id': capture_id,
             'captured_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
-            'rgbd_image': str(rgb_path), 'c270_image': str(usb_path),
+            'rgbd_image': str(rgb_path),
             'depth_image': str(depth_path) if depth_saved else None,
-            'rgbd_frame_age_seconds': rgb_age, 'c270_frame_age_seconds': usb_age,
+            'rgbd_frame_age_seconds': rgb_age,
             'joint_angles': angles,
         }
         meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + '\n')
@@ -1324,7 +1763,7 @@ class Controller(Node):
         return capture_id
 
     def capture_download(self):
-        """Build a paired training sample ZIP in memory for browser download."""
+        """Build a single-camera RGB-D training ZIP in memory."""
         now = time.monotonic()
         with self.lock:
             if self.rgb is None or now - self.last_frame_received >= 3.0:
@@ -1333,12 +1772,6 @@ class Controller(Node):
             depth = self.depth.copy() if self.depth is not None else None
             angles = list(self.angles)
             rgb_age = now - self.last_frame_received
-        with self.usb_camera.lock:
-            if self.usb_camera.clean_jpeg is None or now - self.usb_camera.last_frame_received >= 3.0:
-                raise ValueError('C270 카메라 영상이 없습니다.')
-            usb_jpeg = bytes(self.usb_camera.clean_jpeg)
-            usb_age = now - self.usb_camera.last_frame_received
-
         ok, rgb_encoded = cv2.imencode('.jpg', cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
                                        [cv2.IMWRITE_JPEG_QUALITY, 92])
         if not ok:
@@ -1353,15 +1786,14 @@ class Controller(Node):
         metadata = {
             'id': capture_id,
             'captured_at': time.strftime('%Y-%m-%dT%H:%M:%S%z'),
-            'rgbd_image': 'rgbd.jpg', 'c270_image': 'c270.jpg',
+            'rgbd_image': 'rgbd.jpg',
             'depth_image': 'depth.png' if depth_bytes is not None else None,
-            'rgbd_frame_age_seconds': rgb_age, 'c270_frame_age_seconds': usb_age,
+            'rgbd_frame_age_seconds': rgb_age,
             'joint_angles': angles,
         }
         output = io.BytesIO()
         with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
             archive.writestr('rgbd.jpg', bytes(rgb_encoded))
-            archive.writestr('c270.jpg', usb_jpeg)
             if depth_bytes is not None:
                 archive.writestr('depth.png', depth_bytes)
             archive.writestr('metadata.json', json.dumps(metadata, ensure_ascii=False, indent=2) + '\n')
@@ -1423,9 +1855,11 @@ class Handler(BaseHTTPRequestHandler):
         if path=='/': self.send_bytes(PAGE.encode(),'text/html; charset=utf-8')
         elif path=='/xyz': self.send_bytes(XYZ_PAGE.encode(),'text/html; charset=utf-8')
         elif path=='/handle': self.send_bytes(HANDLE_PAGE.encode(),'text/html; charset=utf-8')
+        elif path=='/joint-program': self.send_bytes(JOINT_PROGRAM_PAGE.encode(),'text/html; charset=utf-8')
         elif path=='/api/status': self.json(self.controller.state())
         elif path=='/api/xyz/status': self.json(self.controller.planar_state())
         elif path=='/api/handle/status': self.json(self.controller.handle_state())
+        elif path=='/api/joint-program/status': self.json(self.controller.joint_program_status())
         elif path=='/stream': self.stream('depth')
         elif path=='/stream/usb': self.stream('usb')
         elif path=='/stream/handle': self.stream('handle')
@@ -1453,6 +1887,10 @@ class Handler(BaseHTTPRequestHandler):
             size=int(self.headers.get('Content-Length','0')); data=json.loads(self.rfile.read(size) or b'{}'); path=urlparse(self.path).path; c=self.controller
             if path=='/api/capture/download':
                 archive, filename = c.capture_download(); self.download(archive, filename); return
+            if path=='/api/joint-program/capture':
+                pose=c.joint_program_capture(str(data['key'])); self.json({'ok':True,'pose':pose,'status':c.status}); return
+            if path=='/api/joint-program/load':
+                program=c.joint_program_load(int(data['box'])); self.json({'ok':True,'program':program,'status':c.status}); return
             if path=='/api/select': c.select(float(data['u']),float(data['v']))
             elif path=='/api/select/usb':
                 point = c.usb_camera.select(float(data['u']), float(data['v']))
@@ -1494,8 +1932,13 @@ class Handler(BaseHTTPRequestHandler):
                                   float(data['closed']), float(data.get('seconds', 1.0)))
             elif path=='/api/handle/config': c.configure_handle_filter(data)
             elif path=='/api/handle/filter-enabled': c.set_handle_filter_enabled(bool(data['enabled']))
+            elif path=='/api/handle/order-enabled': c.set_handle_order_enabled(bool(data['enabled']))
             elif path=='/api/handle/target': c.set_handle_target()
+            elif path=='/api/handle/target-clear': c.clear_handle_target()
             elif path=='/api/handle/select': c.select_handle_target(float(data['u']), float(data['v']))
+            elif path=='/api/joint-program/save': c.joint_program_save(int(data['box']),data['program'])
+            elif path=='/api/joint-program/move': c.joint_program_move(str(data['key']),data['pose'],float(data['seconds']))
+            elif path=='/api/joint-program/run': c.start_joint_program(data['program'])
             elif path=='/api/joint/select':
                 c.select(float(data['u']), float(data['v']))
                 with c.lock: c.status = '관절 보정용 자유 클릭 좌표를 선택했습니다.'
@@ -1515,6 +1958,19 @@ class Handler(BaseHTTPRequestHandler):
                 c.start_direct_pick_drop(float(data['seconds']),
                                          float(data.get('drop_seconds', 6.0)),
                                          float(data['open']), float(data['closed']))
+            elif path=='/api/joint/run-detected':
+                c.start_detected_pick_drop(float(data['seconds']),
+                                           float(data.get('drop_seconds', 6.0)),
+                                           float(data['open']), float(data['closed']))
+            elif path=='/api/joint/run-until-empty':
+                c.start_until_empty(float(data['seconds']),
+                                    float(data.get('drop_seconds', 6.0)),
+                                    float(data['open']), float(data['closed']))
+            elif path=='/api/joint/run-until-empty-fixed':
+                c.start_until_empty(float(data['seconds']),
+                                    float(data.get('drop_seconds', 6.0)),
+                                    float(data['open']), float(data['closed']),
+                                    prioritize_manual=True)
             elif path=='/api/ik/record': c.record_ik_point()
             elif path=='/api/ik/clear':
                 with c.lock:
