@@ -1453,7 +1453,7 @@ class TeleopWindow(QMainWindow):
         self.y_slot_insertion_distance = QDoubleSpinBox()
         self.y_slot_insertion_distance.setRange(1.0, 100.0)
         self.y_slot_insertion_distance.setDecimals(1)
-        self.y_slot_insertion_distance.setValue(35.0)
+        self.y_slot_insertion_distance.setValue(38.0)
         self.y_slot_insertion_distance.setSuffix(" cm")
         self.y_slot_insertion_distance.setEnabled(False)
         self.y_slot_insertion_button = QPushButton("Insertion 실행")
@@ -1733,7 +1733,7 @@ class TeleopWindow(QMainWindow):
     def on_arrival_location_changed(self, _index=None):
         location = str(self.arrival_location.checkedButton().property("location") or "")
         if location == "Y":
-            self.y_slot_insertion_distance.setValue(35.0)
+            self.y_slot_insertion_distance.setValue(38.0)
             self.y_slot_insertion_distance.setEnabled(True)
             self.y_slot_insertion_button.setEnabled(True)
             self.arrival_operation.setCurrentIndex(
@@ -2385,10 +2385,9 @@ class TeleopWindow(QMainWindow):
             location=location, operation=operation,
             product_type=product_type,
             insertion_distance_cm=(
-                self.y_slot_insertion_distance.value()
-                if location == "Y" else None
+                38.0 if location == "Y" else None
             ),
-            stage_only=(location == "Y"),
+            stage_only=False,
         )
         self.start_auto_dock_log(arrival)
         target_text = (

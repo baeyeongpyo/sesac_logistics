@@ -8,6 +8,8 @@ state machine directly; GUI/UI programs are optional ROS clients.
 
 import json
 import math
+import os
+import queue
 import re
 import signal
 import socket
@@ -27,8 +29,8 @@ from nav_msgs.msg import Odometry
 from rclpy.executors import ExternalShutdownException
 from rclpy.signals import SignalHandlerOptions
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import CameraInfo, Image, LaserScan
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from sensor_msgs.msg import CameraInfo, Image, Imu, LaserScan
 from std_msgs.msg import Empty, String
 from auto_dock.top_line_depth import (
     measure_sampled_top_line_depth,
@@ -39,6 +41,8 @@ from auto_dock.loaded_response_planner import (
 )
 from auto_dock.loaded_response_history import estimate_from_history
 from auto_dock.y_slot_direct_place import post_staging_action
+from auto_dock.y_place import YPlaceRunner, apply_event
+from auto_dock.dock_front_distance_hold import adjust as hold_front_distance
 
 
 SYMBOLS = {"star", "diamond", "spade", "clover", "heart"}
@@ -2029,7 +2033,9 @@ class AutoDockNode(Node):
         self.declare_parameter("control_port", 8091)
 
         requested_vehicle = int(self.get_parameter("vehicle").value)
-        self.vehicle = requested_vehicle if requested_vehicle in (1, 2) else 0
+        self.vehicle = resolve_vehicle_id(
+            requested_vehicle, int(os.environ.get("ROS_DOMAIN_ID", "0"))
+        )
         self.pose_config_path = Path(str(self.get_parameter("pose_config").value))
         self.warning_tape_hsv_path = Path(str(
             self.get_parameter("warning_tape_hsv_config").value
@@ -2347,6 +2353,8 @@ class AutoDockNode(Node):
         )
         self.last_tick_error_at = 0.0
         self.last_tick_error_signature = None
+        self.y_place_runner = None
+        self.create_subscription(Imu, "/imu", self.on_y_place_imu, qos_profile_sensor_data)
         self.timer = self.create_timer(0.05, self.guarded_tick)
         self.publish_status("idle", "ready")
 
@@ -2505,6 +2513,7 @@ class AutoDockNode(Node):
         )))
 
     def publish_drive(self, linear_x=0.0, linear_y=0.0, angular_z=0.0):
+        linear_x, linear_y, angular_z = hold_front_distance(self, linear_x, linear_y, angular_z)
         msg = Twist()
         msg.linear.x = float(linear_x)
         msg.linear.y = float(linear_y)
@@ -2527,6 +2536,10 @@ class AutoDockNode(Node):
             arrival = parse_arrival(msg.data)
         except ValueError as exc:
             self.publish_status("rejected", str(exc))
+            return
+        if (getattr(self, "y_place_runner", None) is not None
+                and self.y_place_runner.is_alive()):
+            self.publish_status("rejected", "arrival_while_busy")
             return
         if self.state not in {"idle", "ready"}:
             self.publish_status("rejected", "arrival_while_busy")
@@ -2551,6 +2564,11 @@ class AutoDockNode(Node):
                 requested_operation=operation, requested_location=location,
             )
             return
+        if mission_kind == "Y_PLACE":
+            requested = arrival.get("insertion_distance_cm")
+            if arrival.get("stage_only") or (requested is not None and requested != 38.):
+                self.publish_status("rejected", "test_y_requires_full_38cm_place")
+                return
         self.operation = operation
         self.location = location
         self.product_type = arrival["product_type"]
@@ -2591,6 +2609,10 @@ class AutoDockNode(Node):
                 self.publish_status("waiting", "slot_grid_scanning")
             return
         self.mission_kind = mission_kind
+        if mission_kind == "Y_PLACE":
+            # The user selected the exact test_y profile, not legacy Y options.
+            self.start_y_place()
+            return
         self.load_config()
         self.slot_pending_depth_frame = None
         for buffer_name in ("slot_depth_frames", "slot_rgb_observations"):
@@ -2624,6 +2646,7 @@ class AutoDockNode(Node):
         self.dock_reverse_search_start_position = None
         self.dock_reverse_search_clearance_recovery_active = False
         self.dock_lateral_search_standoff_reached = False
+        self.dock_front_distance_hold = None
         self.dock_lateral_yaw_entity_id = None
         self.nearest_alignment_distance_cm = None
         self.last_nearest_decision = None
@@ -2708,6 +2731,61 @@ class AutoDockNode(Node):
             right=self.target_right, target_type=target["type"],
         )
 
+    def start_y_place(self):
+        self.y_place_failure = None
+        if self.vehicle != 1:
+            self.publish_status("rejected", "test_y_profile_requires_vehicle_1")
+            return
+        self.stop_drive(10)
+        self.state = "y_slot_centering"
+        self.load_state = "LOADED"
+        output = Path.home() / "recordings" / f"vehicle{self.vehicle}" / f"auto_dock_test_y_{time.time_ns()}"
+        try:
+            self.y_place_runner = YPlaceRunner(
+                drive=self.publish_drive,
+                fork=lambda command: self.fork_pub.publish(String(data=command)),
+                clock=self.get_clock, bridge=CvBridge(), output=output,
+            )
+            self.publish_status("running", "y_slot_centering_started")
+            self.y_place_runner.start()
+        except Exception as exc:
+            self.cancel("test_y_start_failed:" + str(exc))
+
+
+    def on_y_place_imu(self, msg):
+        runner = getattr(self, "y_place_runner", None)
+        if getattr(self, "mission_kind", None) == "Y_PLACE" and runner is not None:
+            runner.feed("orientation", msg)
+
+
+    @staticmethod
+    def y_place_empty_message():
+        return Empty()
+
+
+    def tick_y_place(self):
+        failure = getattr(self, "y_place_failure", None)
+        if failure and self.state == "idle":
+            now = time.monotonic()
+            if now - getattr(self, "y_place_failure_sent_at", 0.0) >= 1.0:
+                self.y_place_failure_sent_at = now
+                self.status_signature = None
+                self.publish_status("cancelled", failure, terminal=True, error=failure)
+            return
+        runner = getattr(self, "y_place_runner", None)
+        if runner is None:
+            return
+        while True:
+            try:
+                event = runner.events.get_nowait()
+            except queue.Empty:
+                return
+            # Cancellation latches in the worker before these queued events.
+            if self.state == "idle":
+                continue
+            apply_event(self, event)
+
+
     def on_stop(self, _msg):
         self.cancel("emergency_stop")
 
@@ -2732,6 +2810,9 @@ class AutoDockNode(Node):
 
     def on_y_slot_manual_insertion(self, msg):
         """Immediately replace the current drive plan with one straight move."""
+        if getattr(self, "mission_kind", None) == "Y_PLACE":
+            self.publish_status("rejected", "test_y_profile_is_fixed")
+            return
         if getattr(self, "mission_kind", None) != "Y_PLACE":
             self.publish_status("rejected", "y_slot_command_requires_y_place")
             return
@@ -2761,6 +2842,9 @@ class AutoDockNode(Node):
 
     def on_y_slot_insertion_default(self, msg):
         """Update the runtime default distance without starting any motion."""
+        if getattr(self, "mission_kind", None) == "Y_PLACE":
+            self.publish_status("rejected", "test_y_profile_is_fixed")
+            return
         if getattr(self, "mission_kind", None) != "Y_PLACE":
             self.publish_status("rejected", "y_slot_command_requires_y_place")
             return
@@ -2777,6 +2861,9 @@ class AutoDockNode(Node):
 
     def on_y_slot_response_config(self, msg):
         """Apply and persist model knobs without starting vehicle motion."""
+        if getattr(self, "mission_kind", None) == "Y_PLACE":
+            self.publish_status("rejected", "test_y_profile_is_fixed")
+            return
         if getattr(self, "mission_kind", None) != "Y_PLACE":
             self.publish_status("rejected", "y_slot_config_requires_y_place")
             return
@@ -2806,6 +2893,9 @@ class AutoDockNode(Node):
 
     def on_y_slot_pose_source(self, msg):
         """Select the metric source used by the next frozen Y plan."""
+        if getattr(self, "mission_kind", None) == "Y_PLACE":
+            self.publish_status("rejected", "test_y_profile_is_fixed")
+            return
         if getattr(self, "mission_kind", None) != "Y_PLACE":
             self.publish_status("rejected", "y_slot_config_requires_y_place")
             return
@@ -2821,6 +2911,11 @@ class AutoDockNode(Node):
         )
 
     def on_fork_state(self, msg):
+        if getattr(self, "mission_kind", None) == "Y_PLACE":
+            runner = getattr(self, "y_place_runner", None)
+            if runner is not None:
+                runner.feed("fork_state", msg)
+            return
         if self.state != "waiting_fork":
             return
         try:
@@ -2873,6 +2968,9 @@ class AutoDockNode(Node):
         )
 
     def cancel(self, reason):
+        runner = getattr(self, "y_place_runner", None)
+        if runner is not None:
+            runner.cancel()
         future = getattr(self, 'y_slot_plan_future', None)
         if future is not None:
             future.cancel()
@@ -2956,6 +3054,8 @@ class AutoDockNode(Node):
         self.slot_camera_size = (int(msg.width), int(msg.height))
 
     def on_slot_depth(self, msg):
+        if getattr(self, "mission_kind", None) == "Y_PLACE":
+            return
         if getattr(self, "mission_kind", None) != "Y_PLACE":
             return
         if msg.encoding not in ('16UC1', '32FC1'):
@@ -3114,6 +3214,11 @@ class AutoDockNode(Node):
         return clamp(max(bottoms) / float(image_height) + margin, 0.0, 0.98)
 
     def on_slot_image(self, msg):
+        if getattr(self, "mission_kind", None) == "Y_PLACE":
+            runner = getattr(self, "y_place_runner", None)
+            if runner is not None:
+                runner.feed("image", msg)
+            return
         received = time.monotonic()
         stamp = msg.header.stamp
         source_ns = int(stamp.sec)*1_000_000_000+int(stamp.nanosec)
@@ -3534,6 +3639,11 @@ class AutoDockNode(Node):
                 history.append((self.odom_received_at-age, self.odom_yaw))
 
     def on_response_command(self, msg):
+        if getattr(self, "mission_kind", None) == "Y_PLACE":
+            runner = getattr(self, "y_place_runner", None)
+            if runner is not None:
+                runner.feed("command", msg)
+            return
         """Keep actual command-topic history, including operator commands."""
         if getattr(self, "mission_kind", None) != "Y_PLACE":
             return
@@ -4106,26 +4216,11 @@ class AutoDockNode(Node):
         pose = AutoDockNode.nearest_candidate_pose(candidate)
         if pose is None:
             return locked_entity_id is None
-        depth_yaw = candidate.get("depth_yaw") or {}
-        has_depth_yaw = depth_yaw.get("yaw_deg") is not None
-        maximum_yaw_deg = (
-            self.number(
-                "nearest_candidate_max_abs_yaw_deg", 12.0, 0.0, 45.0
-            )
-            if has_depth_yaw else
-            self.number(
-                "nearest_candidate_max_abs_pnp_yaw_deg", 45.0, 0.0, 90.0
-            )
-        )
-        if abs(pose[1]) > maximum_yaw_deg:
+        # Acquisition is not insertion readiness. Keep an oblique front face
+        # so search stops and alignment can correct it; tick_docking still
+        # requires the target yaw to be within 3 degrees before insertion.
+        if abs(pose[1]) >= 90.0:
             return False
-        peer_yaw = candidate.get("peer_pnp_yaw_median_deg")
-        if not has_depth_yaw and peer_yaw is not None:
-            maximum_peer_delta = self.number(
-                "nearest_candidate_max_peer_yaw_delta_deg", 20.0, 0.0, 90.0
-            )
-            if abs(pose[1] - float(peer_yaw)) > maximum_peer_delta:
-                return False
         return not respect_lock or locked_entity_id is None
 
     def candidate_matches_best_entity(self, candidate):
@@ -4407,6 +4502,7 @@ class AutoDockNode(Node):
         return candidate, pnp, None
 
     def reset_coarse_alignment(self):
+        self.coarse_invalid_center_started_at = None
         self.coarse_alignment_started_at = None
         self.coarse_depth_fallback_frames = 0
         self.coarse_last_counted_stamp = None
@@ -4463,6 +4559,7 @@ class AutoDockNode(Node):
         return True
 
     def enter_coarse_alignment(self, reason):
+        self.coarse_invalid_center_started_at = None
         self.state = "coarse_align"
         self.coarse_alignment_started_at = time.monotonic()
         self.coarse_depth_fallback_frames = 0
@@ -4712,6 +4809,10 @@ class AutoDockNode(Node):
         try:
             self.tick()
         except Exception as exc:
+            if getattr(self, "mission_kind", None) == "Y_PLACE":
+                self.cancel("test_y_adapter_exception:" + str(exc))
+                self.get_logger().error(traceback.format_exc())
+                return
             try:
                 self.stop_drive(10)
             except Exception:
@@ -4746,6 +4847,11 @@ class AutoDockNode(Node):
                     )
 
     def tick(self):
+        if getattr(self, "mission_kind", None) == "Y_PLACE":
+            # The frozen test_y profile owns its motion; no legacy Y/LiDAR
+            # backoff/tick may publish an additional drive command here.
+            self.tick_y_place()
+            return
         if self.interrupt_for_lidar():
             return
         if self.state == "idle":
@@ -6052,6 +6158,39 @@ class AutoDockNode(Node):
             nearest_decision=getattr(self, "last_nearest_decision", None),
         )
 
+    def wait_for_coarse_visual(self, now, reason, status="running", **details):
+        """Bound unusable locked-target observations before returning to search."""
+        self.stop_drive()
+        started = getattr(self, "coarse_invalid_center_started_at", None)
+        if started is None:
+            started = self.coarse_invalid_center_started_at = now
+        timeout = self.number("candidate_confirmation_timeout_sec", 0.8, 0.1, 10.0)
+        if now - started < timeout:
+            self.publish_status(status, reason, **details)
+            return
+        lost_entity_id = self.target_entity_id
+        self.target_world = None
+        self.target_entity_id = None
+        self.nearest_lock_signature = None
+        self.target_last_center_error = None
+        self.nearest_center_reconfirm_pending = False
+        self.nearest_center_reconfirm_due_at = None
+        self.nearest_center_reconfirm_source_stamp_ns = None
+        self.candidate_stop_due_at = None
+        self.candidate_confirmation_started_at = None
+        self.candidate_retry_not_before = now + self.number(
+            "candidate_retry_cooldown_sec", 1.0, 0.0, 10.0
+        )
+        self.state = "search"
+        self.reset_coarse_alignment()
+        self.latch_search_heading()
+        self.publish_status(
+            "running", "coarse_center_invalid_resume_search",
+            recovery_reason=reason,
+            lost_entity_id=lost_entity_id,
+        )
+        return
+
     def tick_coarse_align(self):
         now = time.monotonic()
         if (
@@ -6088,10 +6227,10 @@ class AutoDockNode(Node):
                                     self, now, center_tolerance
                                 )
                             else:
-                                self.stop_drive()
-                                self.publish_status(
-                                    "waiting",
+                                AutoDockNode.wait_for_coarse_visual(
+                                    self, now,
                                     "nearest_center_recheck_waiting_visual",
+                                    status="waiting",
                                     measurement_reason=(
                                         partial_reason or identity_reason
                                     ),
@@ -6172,9 +6311,11 @@ class AutoDockNode(Node):
             self, candidate, raw_center_error
         )
         if not math.isfinite(center_error) or abs(center_error) > 1.0:
-            self.stop_drive()
-            self.publish_status("running", "coarse_center_error_invalid")
+            AutoDockNode.wait_for_coarse_visual(
+                self, now, "coarse_center_error_invalid"
+            )
             return
+        self.coarse_invalid_center_started_at = None
         center_tolerance = self.number("coarse_center_error_max", 0.10, 0.01, 0.50)
         if (
             getattr(self, "target_type", "SYMBOLS") == "NEAREST"
@@ -7427,6 +7568,11 @@ class AutoDockNode(Node):
         self.publish_status("running", "lidar_replanned_virtual_dock" if self.state == "docking" else "lidar_recovery_search")
 
     def destroy_node(self):
+        runner = getattr(self, "y_place_runner", None)
+        if runner is not None:
+            runner.cancel()
+            if runner.thread is not None:
+                runner.thread.join(timeout=2.)
         # No callbacks are spun during cleanup. Keep DDS alive for a paced
         # stop burst; publication alone cannot guarantee actuator receipt.
         executor = getattr(self, "y_slot_plan_executor", None)

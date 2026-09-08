@@ -1,4 +1,4 @@
-"""The Y-slot depth queue retains line samples, never complete depth images."""
+"""Integrated test_y ignores legacy depth guidance; retained helper stays bounded."""
 from collections import deque
 from types import SimpleNamespace
 
@@ -42,28 +42,22 @@ def fake_node(observations=()):
     return fake
 
 
-def test_rgb_first_depth_callback_retains_only_sparse_neighborhoods(monkeypatch):
+def test_test_y_ignores_depth_even_when_legacy_rgb_is_present(monkeypatch):
     import auto_dock.auto_dock_node as module
     monkeypatch.setattr(module.time, 'monotonic', lambda: 100.)
     fake = fake_node([observation()])
     AutoDockNode.on_slot_depth(fake, depth_message())
     assert fake.slot_pending_depth_frame is None
-    assert len(fake.slot_depth_frames) == 1
-    stored = fake.slot_depth_frames[0]
-    assert 'data' not in stored and 'depth_m' not in stored
-    assert stored['depth_samples']['depth_patches_m'].shape == (33, 9)
-    assert stored['depth_samples']['depth_patches_m'].nbytes == 33*9*4
+    assert len(fake.slot_depth_frames) == 0
 
 
-def test_depth_first_uses_one_pending_frame_then_discards_it(monkeypatch):
+def test_test_y_does_not_queue_a_legacy_depth_frame(monkeypatch):
     import auto_dock.auto_dock_node as module
     monkeypatch.setattr(module.time, 'monotonic', lambda: 100.)
     fake = fake_node()
     AutoDockNode.on_slot_depth(fake, depth_message())
-    assert isinstance(fake.slot_pending_depth_frame.get('data'), bytes)
-    assert fake.consume_pending_slot_depth(observation())
     assert fake.slot_pending_depth_frame is None
-    assert len(fake.slot_depth_frames) == 1
+    assert len(fake.slot_depth_frames) == 0
 
 
 def test_stale_pending_frame_is_cleared(monkeypatch):

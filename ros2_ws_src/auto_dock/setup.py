@@ -6,6 +6,7 @@ setup(
     name=package_name,
     version="1.7.0",
     packages=[package_name],
+    package_data={package_name: ["y_place_config.json", "y_place_baseline.json"]},
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/auto_dock"]),
         (f"share/{package_name}", ["package.xml"]),

@@ -90,7 +90,7 @@ SUB  fork/state: UP_COMPLETE
 STATE REVERSING → TURNING → READY
 PUB  drive_ready: LOADED
 
-SUB  nav2/arrival: Y, Y1~Y4, PLACE
+SUB  nav2/arrival: location=Y, operation=PLACE, target.type=NONE
 STATE SEARCHING → ALIGNING → INSERTING → WAIT_DOWN_COMPLETE
 SUB  fork/state: DOWN_COMPLETE
 STATE REVERSING → TURNING → READY

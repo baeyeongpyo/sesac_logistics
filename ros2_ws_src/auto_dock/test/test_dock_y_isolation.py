@@ -25,6 +25,7 @@ def arrival_fake(load_state):
         slot_rgb_observations=[],
         statuses=statuses,
     )
+    fake.start_y_place = lambda: setattr(fake, "state", "y_slot_centering")
     fake.load_config = lambda: None
     fake.reset_coarse_alignment = lambda: None
     fake.latch_search_heading = lambda: None

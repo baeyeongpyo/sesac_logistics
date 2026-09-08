@@ -1,0 +1,24 @@
+{
+  "y_place_square_geometry.py": "45444f57ca3d3f15cca95027f632f786f0399706c0e6ca47a993cc53645913e4",
+  "y_place_slot_sides.py": "77526e70f35e2d32d775a855b815fe7bd9c44413796c97ec6f3fe5dc3b32fa72",
+  "y_place_warning_tape.py": "e8096f5d26aa6a607bb2d6f30276a187d3d10ffa56a3ed9e260ed4565e0620a2",
+  "y_place_square_motion.py": "8aac50eb7187fabdce03aabc6e7b0a1fe8c9fe2b3a5e518766e863839612e739",
+  "y_place_midpoint.py": "c011b47652623c013b5641dbccce56cebb6b5990ba26a683ed3ed1d2173df040",
+  "y_place_finish.py": "2a7df44f980757d978d81ad6c9a4322a4477261eb34ee7418a96958c7847a0ac",
+  "y_place_trial_stop.py": "43e703b2d7a838145fa8566ec79aa788aa591373998802614bac38f2aad68feb",
+  "y_place_command_monitor.py": "8ae6c43dfa059469a4da64195b3aba594b8fe2592575e59edb4d1b27b75fd830",
+  "y_place_square_topline_trial.py": "7f2d9dc7c3101a398065256328f0bd981f0569bb89ecdad6f448c9e10a178144",
+  "vehicle_pose_config.json": "42d6479d5400e70c4c79e044f48c8cf0be446578aaca809dabe146e09b8756f2",
+  "effective_args": {
+    "stage_cm": 40.0,
+    "insert_cm": 38.0,
+    "speed": 0.1,
+    "angular": 0.35,
+    "center_offset_left_cm": 2.0,
+    "wait_sec": 30.0,
+    "observe_sec": 0.5,
+    "start_frames": 1,
+    "anchor": null,
+    "stop_file": "/home/ubuntu/.local/state/y_place_trial/stop"
+  }
+}

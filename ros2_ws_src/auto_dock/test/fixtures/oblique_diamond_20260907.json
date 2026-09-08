@@ -1,0 +1,645 @@
+[
+  {
+    "inference_sec": 0.08682630799012259,
+    "source_stamp_ns": 1788769155642463075,
+    "target_top": [
+      "spade",
+      "spade"
+    ],
+    "pose_config": {
+      "camera_pitch_deg": -7.0045071389682825,
+      "camera_distance_scale_cm_per_pnp_unit": 6.366069808066864,
+      "camera_distance_offset_cm": -17.381442423258008,
+      "yaw_bias_deg": 0.14410323682444304,
+      "friction_coefficient": 0.9485619699123968
+    },
+    "detections": [
+      {
+        "class": "star",
+        "confidence": 0.93115234375,
+        "box": [
+          170,
+          332,
+          261,
+          408
+        ],
+        "depth": {
+          "camera_depth_m": 0.36400002241134644,
+          "forward_distance_cm": 22.12833307355546,
+          "bearing_deg": -11.48455517920396,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "star",
+        "confidence": 0.92822265625,
+        "box": [
+          548,
+          219,
+          639,
+          308
+        ],
+        "depth": {
+          "camera_depth_m": 0.34200000762939453,
+          "forward_distance_cm": 19.944751170455206,
+          "bearing_deg": 23.872431032478612,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "star",
+        "confidence": 0.919921875,
+        "box": [
+          525,
+          314,
+          620,
+          395
+        ],
+        "depth": {
+          "camera_depth_m": 0.36900001764297485,
+          "forward_distance_cm": 22.62460088117203,
+          "bearing_deg": 22.047012474515988,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "star",
+        "confidence": 0.9140625,
+        "box": [
+          147,
+          236,
+          248,
+          322
+        ],
+        "depth": {
+          "camera_depth_m": 0.33100003004074097,
+          "forward_distance_cm": 18.85296317689454,
+          "bearing_deg": -13.165944055500685,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "star",
+        "confidence": 0.888671875,
+        "box": [
+          452,
+          224,
+          561,
+          316
+        ],
+        "depth": {
+          "camera_depth_m": 0.33800002932548523,
+          "forward_distance_cm": 19.54773869915563,
+          "bearing_deg": 16.29013705585804,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "star",
+        "confidence": 0.814453125,
+        "box": [
+          278,
+          223,
+          376,
+          317
+        ],
+        "depth": {
+          "camera_depth_m": 0.34200000762939453,
+          "forward_distance_cm": 19.944751170455206,
+          "bearing_deg": -0.7763664563546571,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "star",
+        "confidence": 0.421630859375,
+        "box": [
+          435,
+          195,
+          459,
+          311
+        ]
+      },
+      {
+        "class": "diamond",
+        "confidence": 0.931640625,
+        "box": [
+          0,
+          207,
+          98,
+          290
+        ],
+        "depth": {
+          "camera_depth_m": 0.3710000216960907,
+          "forward_distance_cm": 22.823108595816542,
+          "bearing_deg": -26.033504351866608,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "diamond",
+        "confidence": 0.916015625,
+        "box": [
+          17,
+          299,
+          117,
+          375
+        ],
+        "depth": {
+          "camera_depth_m": 0.3960000276565552,
+          "forward_distance_cm": 25.304450591888845,
+          "bearing_deg": -24.593919037399132,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "diamond",
+        "confidence": 0.83544921875,
+        "box": [
+          85,
+          177,
+          136,
+          287
+        ]
+      },
+      {
+        "class": "diamond",
+        "confidence": 0.748046875,
+        "box": [
+          102,
+          262,
+          147,
+          371
+        ],
+        "depth": {
+          "camera_depth_m": 0.4020000100135803,
+          "forward_distance_cm": 25.89997077783294,
+          "bearing_deg": -19.815847454123357,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "diamond",
+        "confidence": 0.56640625,
+        "box": [
+          0,
+          301,
+          30,
+          369
+        ],
+        "depth": {
+          "camera_depth_m": 0.4010000228881836,
+          "forward_distance_cm": 25.800718399505413,
+          "bearing_deg": -28.658309664442132,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "pallet",
+        "confidence": 0.70703125,
+        "box": [
+          0,
+          376,
+          133,
+          414
+        ]
+      },
+      {
+        "class": "pallet",
+        "confidence": 0.54345703125,
+        "box": [
+          130,
+          332,
+          172,
+          414
+        ]
+      },
+      {
+        "class": "pallet",
+        "confidence": 0.69775390625,
+        "box": [
+          424,
+          410,
+          629,
+          442
+        ]
+      },
+      {
+        "class": "pallet",
+        "confidence": 0.68603515625,
+        "box": [
+          161,
+          412,
+          374,
+          448
+        ]
+      },
+      {
+        "class": "pallet",
+        "confidence": 0.32958984375,
+        "box": [
+          477,
+          462,
+          630,
+          479
+        ]
+      }
+    ],
+    "entities": [
+      {
+        "entity_id": 28,
+        "seen_count": 1,
+        "matrix": [
+          "diamond",
+          "diamond",
+          "diamond",
+          "diamond"
+        ],
+        "pnp": {
+          "yaw_deg": -74.27208355800302,
+          "lateral_ratio": -0.4256209896111166,
+          "raw_yaw_deg": -73.31517479622283,
+          "raw_lateral_ratio": -0.418502261198978,
+          "camera_yaw_deg": 0.0,
+          "camera_pitch_deg": -7.0045071389682825,
+          "yaw_bias_deg": 0.14410323682444304,
+          "yaw_before_bias_deg": -74.12798032117857,
+          "reprojection_error_px": 2.0559730529785156,
+          "translation_x_units": -2.774106595730898,
+          "translation_y_units": 0.5034552696136976,
+          "translation_z_units": 6.628653780228781,
+          "pnp_forward_units": 6.517786160559321,
+          "raw_camera_pitch_deg": 19.800064203974465,
+          "forward_distance_cm": 24.111239268914723,
+          "distance_reference": "fork tip to target front face"
+        },
+        "depth_yaw": null,
+        "frontal_error": -0.2138728323699422,
+        "top_row_error": -0.1907514450867052,
+        "bottom_row_error": -0.23699421965317918,
+        "angle_source": "pnp",
+        "visibility_score": 970.7981381142074,
+        "frame_pallet_group": 1,
+        "image_pallet_box": [
+          0,
+          376,
+          133,
+          414
+        ],
+        "odom_pose": {
+          "x": 0.41039802091952987,
+          "y": -0.12709544686306798,
+          "yaw": 0.6929177952246647
+        }
+      }
+    ],
+    "candidate": null,
+    "tracked_partial": null
+  },
+  {
+    "inference_sec": 0.07748757800436579,
+    "source_stamp_ns": 1788769156686048545,
+    "target_top": [
+      "spade",
+      "spade"
+    ],
+    "pose_config": {
+      "camera_pitch_deg": -7.0045071389682825,
+      "camera_distance_scale_cm_per_pnp_unit": 6.366069808066864,
+      "camera_distance_offset_cm": -17.381442423258008,
+      "yaw_bias_deg": 0.14410323682444304,
+      "friction_coefficient": 0.9485619699123968
+    },
+    "detections": [
+      {
+        "class": "star",
+        "confidence": 0.9326171875,
+        "box": [
+          170,
+          332,
+          261,
+          409
+        ],
+        "depth": {
+          "camera_depth_m": 0.36500000953674316,
+          "forward_distance_cm": 22.227585451882987,
+          "bearing_deg": -11.484555179203962,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "star",
+        "confidence": 0.9248046875,
+        "box": [
+          548,
+          220,
+          639,
+          308
+        ],
+        "depth": {
+          "camera_depth_m": 0.34300002455711365,
+          "forward_distance_cm": 20.04400650677219,
+          "bearing_deg": 23.872431032478612,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "star",
+        "confidence": 0.91748046875,
+        "box": [
+          525,
+          315,
+          620,
+          395
+        ],
+        "depth": {
+          "camera_depth_m": 0.3710000216960907,
+          "forward_distance_cm": 22.823108595816542,
+          "bearing_deg": 22.047012474515988,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "star",
+        "confidence": 0.9140625,
+        "box": [
+          145,
+          236,
+          247,
+          322
+        ],
+        "depth": {
+          "camera_depth_m": 0.3320000171661377,
+          "forward_distance_cm": 18.952215555222068,
+          "bearing_deg": -13.351403074404097,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "star",
+        "confidence": 0.8984375,
+        "box": [
+          452,
+          224,
+          561,
+          316
+        ],
+        "depth": {
+          "camera_depth_m": 0.33900001645088196,
+          "forward_distance_cm": 19.646991077483158,
+          "bearing_deg": 16.29013705585804,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "star",
+        "confidence": 0.81982421875,
+        "box": [
+          277,
+          223,
+          377,
+          318
+        ],
+        "depth": {
+          "camera_depth_m": 0.34300002455711365,
+          "forward_distance_cm": 20.04400650677219,
+          "bearing_deg": -0.7763664563546572,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "star",
+        "confidence": 0.44677734375,
+        "box": [
+          435,
+          196,
+          459,
+          311
+        ],
+        "depth": {
+          "camera_depth_m": 0.3620000183582306,
+          "forward_distance_cm": 21.92982535891094,
+          "bearing_deg": 10.837813681843528,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "diamond",
+        "confidence": 0.9267578125,
+        "box": [
+          0,
+          207,
+          98,
+          290
+        ],
+        "depth": {
+          "camera_depth_m": 0.3710000216960907,
+          "forward_distance_cm": 22.823108595816542,
+          "bearing_deg": -26.033504351866608,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "diamond",
+        "confidence": 0.916015625,
+        "box": [
+          17,
+          299,
+          117,
+          375
+        ],
+        "depth": {
+          "camera_depth_m": 0.398000031709671,
+          "forward_distance_cm": 25.502958306533365,
+          "bearing_deg": -24.593919037399132,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "diamond",
+        "confidence": 0.7734375,
+        "box": [
+          85,
+          178,
+          137,
+          286
+        ],
+        "depth": {
+          "camera_depth_m": 0.39000001549720764,
+          "forward_distance_cm": 24.70892744795529,
+          "bearing_deg": -20.93397401734915,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "diamond",
+        "confidence": 0.61376953125,
+        "box": [
+          102,
+          262,
+          149,
+          371
+        ],
+        "depth": {
+          "camera_depth_m": 0.4050000309944153,
+          "forward_distance_cm": 26.197733828794455,
+          "bearing_deg": -19.642399171399017,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "diamond",
+        "confidence": 0.5751953125,
+        "box": [
+          0,
+          301,
+          30,
+          370
+        ],
+        "depth": {
+          "camera_depth_m": 0.40300002694129944,
+          "forward_distance_cm": 25.999226114149934,
+          "bearing_deg": -28.658309664442132,
+          "distance_reference": "fork tip to tag face"
+        }
+      },
+      {
+        "class": "pallet",
+        "confidence": 0.69921875,
+        "box": [
+          0,
+          377,
+          132,
+          414
+        ]
+      },
+      {
+        "class": "pallet",
+        "confidence": 0.5634765625,
+        "box": [
+          130,
+          332,
+          172,
+          413
+        ]
+      },
+      {
+        "class": "pallet",
+        "confidence": 0.69873046875,
+        "box": [
+          447,
+          411,
+          628,
+          442
+        ]
+      },
+      {
+        "class": "pallet",
+        "confidence": 0.681640625,
+        "box": [
+          162,
+          413,
+          373,
+          448
+        ]
+      },
+      {
+        "class": "pallet",
+        "confidence": 0.337646484375,
+        "box": [
+          476,
+          461,
+          630,
+          479
+        ]
+      },
+      {
+        "class": "pallet",
+        "confidence": 0.5146484375,
+        "box": [
+          323,
+          0,
+          397,
+          19
+        ]
+      },
+      {
+        "class": "pallet",
+        "confidence": 0.306884765625,
+        "box": [
+          484,
+          4,
+          530,
+          21
+        ]
+      },
+      {
+        "class": "pallet",
+        "confidence": 0.442626953125,
+        "box": [
+          317,
+          0,
+          480,
+          20
+        ]
+      }
+    ],
+    "entities": [
+      {
+        "entity_id": 28,
+        "seen_count": 5,
+        "matrix": [
+          "diamond",
+          "diamond",
+          "diamond",
+          "diamond"
+        ],
+        "pnp": {
+          "yaw_deg": -73.65094824800988,
+          "lateral_ratio": -0.4249341291536026,
+          "raw_yaw_deg": -72.67248077703503,
+          "raw_lateral_ratio": -0.41782732498524805,
+          "camera_yaw_deg": 0.0,
+          "camera_pitch_deg": -7.0045071389682825,
+          "yaw_bias_deg": 0.14410323682444304,
+          "yaw_before_bias_deg": -73.50684501118543,
+          "reprojection_error_px": 2.039506673812866,
+          "translation_x_units": -2.769232644019635,
+          "translation_y_units": 0.5033267692664675,
+          "translation_z_units": 6.627696367434577,
+          "pnp_forward_units": 6.516851563642302,
+          "raw_camera_pitch_deg": 19.643291924599204,
+          "forward_distance_cm": 24.105289559698576,
+          "distance_reference": "fork tip to target front face"
+        },
+        "depth_yaw": {
+          "yaw_deg": 30.679390459153204,
+          "left_depth_m": 0.3710000216960907,
+          "right_depth_m": 0.39000001549720764,
+          "baseline_m": 0.03723783398070397,
+          "forward_distance_cm": 23.76601802188592,
+          "distance_reference": "fork tip to target front face"
+        },
+        "frontal_error": -0.2138728323699422,
+        "top_row_error": -0.1907514450867052,
+        "bottom_row_error": -0.23699421965317918,
+        "angle_source": "depth",
+        "visibility_score": 2983.45845609495,
+        "frame_pallet_group": 1,
+        "image_pallet_box": [
+          0,
+          377,
+          132,
+          414
+        ],
+        "odom_pose": {
+          "x": 0.4102407121947247,
+          "y": -0.12721887284680722,
+          "yaw": -1.1388309811959911
+        }
+      }
+    ],
+    "candidate": null,
+    "tracked_partial": null
+  }
+]

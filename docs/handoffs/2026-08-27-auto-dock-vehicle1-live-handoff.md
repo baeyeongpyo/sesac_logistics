@@ -1,5 +1,7 @@
 # Auto Dock 차량 1 실차 작업 핸드오프 — 2026-08-27
 
+> 적재 Y PLACE의 9월 5~6일 요구사항·최근 네 세션·반응식과 실차 배포 이력은 [2026-09-06 인계](2026-09-06-loaded-y-place-response-handoff.md)를 먼저 읽는다. 아래 실행 상태는 8월 27일 당시 기록이다.
+
 ## 문서 성격
 
 이 문서는 2026-08-27 차량 1 실차 세션에서 발생한 증상, 실패한 접근,
@@ -14,22 +16,23 @@ Project/Team wiki truth가 아니며, 실차 runtime 설정 파일도 canonical 
 - Docker container: `IntelPi`
 - ROS domain: `215`
 - Git branch: `fork_test`
-- 현재 HEAD: `655a981`
-- 이번 세션 변경은 아직 커밋하지 않았다.
+- 현재 HEAD: `2430a2a`
+- 후속 실차 세션의 backoff/결합 SEARCHING 변경은 아직 커밋하지 않았다.
 - 저장소에는 이번 작업과 무관한 사용자 변경 및 untracked 파일이 많다.
   전체 stage, `git reset --hard`, `git clean`을 하지 않는다.
 - 최신 로컬 파일과 차량 1 배포 파일의 SHA-256은 일치한다.
-- 인계 시점에는 `/shared/auto_dock_test_panel.py`만 실행 중이다.
-  Auto Dock, YOLO, fork_controller는 실행 중이 아니다.
-- 실행 중인 패널 프로세스는 최신 패널 파일 배포 전에 시작된 프로세스이므로
-  메모리에는 수동 fork COMPLETE 버튼이 남아 있을 수 있다. 반드시 재시작한다.
+- 인계 직전 `/auto_dock`, `/yolo_tag`, `/fork_controller`, 패널과 주행 스택이
+  실행 중이었다. 단, 마지막 Auto Dock 업로드 뒤 `/auto_dock`은 재시작하지 않았다.
+- 실행 중 `/auto_dock`은 직전 빌드 코드로
+  `ERROR / lidar_backoff_rear_clearance_limit` 상태였다. 최신 후방 전진복구 코드는
+  install에만 있으며 프로세스 재시작 뒤 적용된다.
 - 차량 2에는 이번 세션 최종 변경을 배포하지 않았다.
 
 ## 최신 파일과 차량 1 배포 위치
 
 | 기능 | 저장소 파일 | 차량 1 위치 | SHA-256 |
 | --- | --- | --- | --- |
-| Auto Dock FSM | `ros2_ws_src/auto_dock/auto_dock/auto_dock_node.py` | `/home/ubuntu/ros2_ws/src/auto_dock/auto_dock/auto_dock_node.py` | `db0a84ca668b0f925d1ae9ce2150eb9d62d53d7132ae332a028d3a035f0d23dc` |
+| Auto Dock FSM | `ros2_ws_src/auto_dock/auto_dock/auto_dock_node.py` | `/home/ubuntu/ros2_ws/src/auto_dock/auto_dock/auto_dock_node.py` | `b8c4be65a5198800636fb31416cb73a258e326ceeb29eeaec584ea8ff0dce321` |
 | Fork controller | `ros2_ws_src/fork_control/fork_control/fork_controller.py` | `/home/ubuntu/ros2_ws/src/fork_control/fork_control/fork_controller.py` | `c9ec319beb0ad7c228b1ba8b3f166f8f00b4d43ff46394f2a6c891439f26e6a0` |
 | 테스트 패널 | `tools/auto_dock_test_panel.py` | `/shared/auto_dock_test_panel.py` | `f5f3c33fe4f4f898b06f0f5882b316c3356dc64ca2445590bb3262d435be3035` |
 | YOLO + 개별 태그 depth | `tools/yolo_symbol_seg_node.py` | `/shared/yolo_symbol_seg_node.py` | `fa90693cbdc5c3b2b2242f8c9f4f89bee41a63a817c932c418db45373dbc45aa` |
@@ -42,27 +45,22 @@ vehicle_simulator_model/ubuntu/ros2_ws/src/fork_control/fork_control/fork_contro
 
 ## 인계 시점 실행 상태
 
-마지막 확인 결과 실행 중인 관련 프로세스는 패널 하나뿐이었다.
-
-```text
-python3 /shared/auto_dock_test_panel.py
-```
-
-다음 프로세스는 내려가 있었다.
+초기 인계 시점에는 패널만 실행 중이었지만, 후속 실차 세션에서 전체 노드를 다시
+올렸다. 마지막 확인 시 다음 노드가 존재했다.
 
 ```text
 /auto_dock
-/yolo_tag
+/auto_dock_test_panel
 /fork_controller
+/yolo_tag
 ```
 
-따라서 다음 실차 시험은 카메라/Nav2 주행 스택을 먼저 올린 뒤 Auto Dock
-launch와 패널을 새로 시작해야 한다. 소스와 install build는 차량 1에 배포돼
-있지만, 실행 중 프로세스 메모리는 파일 배포로 자동 갱신되지 않는다.
+마지막 업로드 뒤에는 Auto Dock을 재시작하지 않았으므로 최신 install 코드가
+메모리에 반영되지 않았다. 다음 시험 전에 사용자가 `/auto_dock`을 재시작한다.
 
 ## 검증 결과
 
-- Auto Dock 전체 테스트: `83 passed`
+- Auto Dock 전체 테스트: `106 passed`
 - Fork controller 추가 로직 테스트: `2 passed`
 - YOLO 파일: `python3 -m py_compile` 통과
 - 차량 1 `colcon build --packages-select auto_dock`: 성공
@@ -409,19 +407,19 @@ GPIO18 LOW였지만 포크가 움직이지 않았다. 상단 리미트 GPIO22도
 
 ## 안전 관련 현재 상태
 
-차량 1 runtime 설정에서 다음 값은 꺼져 있다.
+후속 실차 세션에서 차량 1 runtime 설정을 다시 읽었을 때 다음 값은 켜져 있었다.
 
 ```json
 {
-  "lidar_safety_enabled": false,
-  "lidar_backoff_enabled": false
+  "lidar_safety_enabled": 1,
+  "lidar_backoff_enabled": 1
 }
 ```
 
-따라서 Auto Dock의 일반 주행 충돌 방지는 현재 LiDAR backoff에 의존하지 않는다.
-낮은 충전독처럼 LiDAR 스캔 높이에 걸리지 않는 장애물은 계속 감지할 수 없다.
-SEARCHING의 20 cm 태그 거리 유지가 낮은 후방 장애물의 일반 충돌 방지 기능을
-대체하지는 않는다. 첫 재시험은 비상정지 준비 상태에서 실시한다.
+일반 LiDAR safety와 backoff가 모두 활성 상태다. 낮은 충전독처럼 LiDAR 스캔
+높이에 걸리지 않는 장애물은 계속 감지할 수 없다. SEARCHING의 20 cm 태그 거리
+유지가 일반 충돌 방지를 대체하지는 않는다. 첫 재시험은 비상정지 준비 상태에서
+실시한다.
 
 ## 비활성 실험 코드와 정리 필요 항목
 
@@ -453,6 +451,117 @@ nav2_forward_search_max_distance_m
 ```
 
 `nav2_scan_approach_enabled: 0`이므로 현재는 사용되지 않는다.
+
+## 후속 실차 세션 작업 기록: SEARCHING, backoff, X 격자
+
+### 실차 진단에서 확인한 사실
+
+1. 첫 SEARCHING 정지는 `rear_lidar_search_scan_stale`였다. 당시 `/scan_raw`의
+   publisher가 0이었고, LiDAR 노드를 올린 뒤 publisher 1을 확인했다.
+2. 기존 backoff는 `-0.12 m/s`를 0.7초만 발행하고 실제 이동량을 확인하지 않은 채
+   원래 장애물이 남아 있으면 `lidar_front_blocked_after_backoff` ERROR로 끝났다.
+3. 결합 옵션에서 목표 `heart/clover` 중 heart가 없고, 화면 끝 clover depth가
+   34.2 cm로 30 cm 노이즈 상한을 넘자 `tag_guided_search_depth_missing`으로
+   정지했다. 후방은 66.3 cm, yaw는 0도였으므로 옵션 2 횡탐색은 가능했다.
+4. 결합 분기 수정 뒤 status는
+   `rear_lidar_clearance_held_lateral_search`, `linear.y=+0.12 m/s`였고 실제
+   `/controller/cmd_vel`에서도 같은 명령이 약 20 Hz로 연속 관측됐다. STOP 덮어쓰기는
+   관측되지 않았다. 이때 차체가 움직이지 않은 현상은 Auto Dock 출력 이후의 주행
+   컨트롤러 상태로 구분했다.
+5. 직전 backoff 구현은 후방이 30 cm 미만이면
+   `lidar_backoff_rear_clearance_limit` ERROR로 끝났다. 사용자의 요구는 이 경우
+   전진해서 후방 여유를 다시 확보하는 것이다.
+6. 전진복구를 추가한 뒤에도 SEARCHING 일반 safety가 전·후·좌·우를 모두
+   감시하면서 옵션 1/2의 종방향 보정과 충돌했다. 차체는 횡이동하지 못하고
+   앞뒤로 반복 이동했으며, 마지막 관측 상태는
+   `lidar_backoff_right_clearance_limit`였다.
+7. ALIGNING 중 검출이 끊기면 이전 best pose로는 복귀했지만 state가 ALIGNING에
+   남아 `alignment_target_lost_holding`과 `alignment_best_pose_restored`를
+   반복했다. 화면에 목표가 간헐적으로 다시 보여도 안정 streak가 끊겨 횡탐색으로
+   돌아가지 못했다.
+8. 첫 SEARCHING 복귀 수정은 짧은 한두 프레임 손실에도 정렬을 중단했다. 진입
+   조건은 stable candidate 2프레임, best entity 일치, 유효 PnP였지만 ALIGNING
+   중에는 0.5초 손실만으로 복귀가 시작되어 ALIGNING/SEARCHING이 출렁였다.
+9. 손실 STOP을 없앤 뒤에도 `alignment_yaw_stabilizing`이 3프레임 재확인 동안
+   STOP을 발행했고, 짧은 손실 때 확인 카운트를 0으로 초기화했다. 따라서 검출이
+   간헐적이면 잠긴 pose가 있어도 정렬이 반복 정지했다.
+
+Git 이력으로 확인한 원래 회귀 시점은 `3c1089c`
+(`fix(auto-dock): stabilize live alignment and fork workflow`,
+2026-08-27 15:28:45 KST)이다. 부모 `655a981`의 `tick_docking()`은 candidate가
+보일 때만 target을 갱신하고, candidate가 없어도 기존 `target_world`로 계속
+정렬했다. `3c1089c`에서 `candidate is None`이면 즉시 STOP하고 0.5초 뒤 best
+pose로 복귀하는 분기가 추가됐다. 그 뒤 후속 미커밋 작업에서 best pose 복귀 후
+SEARCHING 재진입을 추가하면서 ALIGNING/SEARCHING 반복 현상이 발생했다.
+
+### 최종 구현한 동작
+
+- 원래 LiDAR 장애물이 남아 있으면 0.7초 한 번으로 끝내지 않고 backoff 명령을
+  계속 발행한다.
+- backoff scan freshness를 확인하며, 비상 상한은 기본 5초와 30 cm 이동이다.
+- 전방 장애물 때문에 후진하는 동안 후방 raw LiDAR가 30 cm 미만이면 ERROR 대신
+  `+0.12 m/s`로 전진한다.
+- 후방이 31 cm까지 복구되면 `lidar_backoff_rear_clearance_restored_search`로
+  SEARCHING에 복귀한다. 1 cm는 경계 진동 방지 여유다.
+- 옵션 1+2에서 옵션 1 태그/depth가 없더라도 후방 30 cm가 확보되면 시작 yaw를
+  보정한 뒤 옵션 2 횡탐색을 계속한다. status extra에
+  `tag_depth_missing: true`를 남긴다.
+- 옵션 1만 켠 경우에는 기존처럼 유효한 태그 depth가 없으면 정지한다.
+- 옵션 1 또는 2가 켜진 guided SEARCHING에서는 일반 safety가 설정된 실제
+  횡이동 진행 방향만 감시한다. 앞·뒤 거리는 옵션 1/2가 전담하므로 일반
+  backoff가 보정 명령을 뒤집지 않는다. 예를 들어 왼쪽 횡탐색 중에는 왼쪽만
+  일반 safety 대상으로 삼고 오른쪽 장애물은 backoff를 유발하지 않는다.
+- ALIGNING에서 목표를 잃으면 이전 best pose로 한 번 복귀한다. 복귀 지점에서도
+  목표가 없으면 기존 world target/entity 잠금을 해제하고
+  `alignment_target_lost_resuming_search`로 SEARCHING을 재개한다.
+- 짧은 검출 손실은 상태를 바꾸지 않는다. 잠긴 world target을 이용해 최대 1.5초간
+  선속도 0.04 m/s, 각속도 0.08 rad/s 이하로 저속 정렬·접근을 계속하며
+  `alignment_target_lost_using_locked_pose`를 발행한다. 1.5초 이상 완전히
+  손실된 경우에만 best pose 복귀와 SEARCHING 재개를 수행한다.
+- ALIGNING의 3프레임 yaw 재확인 중에도 STOP하지 않고 잠긴 pose로 계속 정렬한다.
+  재확인 전 측정값은 world target 갱신에는 쓰지 않으며, 짧은 손실에는 이미 확보한
+  확인 프레임 수와 마지막 stamp를 보존한다.
+
+새로 추가된 주요 reason은 다음과 같다.
+
+```text
+lidar_backoff_continuing
+lidar_backoff_scan_stale
+lidar_backoff_forward_for_rear_clearance
+lidar_backoff_rear_clearance_restored_search
+lidar_backoff_distance_limit
+lidar_backoff_time_limit
+```
+
+### X 개수 기반 슬롯 격자 시도와 실패 기록
+
+차량 1에서 오늘 촬영된 빈 슬롯 사진 10장을 확인했다.
+
+```text
+/home/ubuntu/recordings/vehicle1/captures/capture_20260827_*.jpg
+```
+
+사진은 원거리, 좌우 편향, 근거리 잘림 각도를 포함하지만 모두 빈 매트였고 팔레트가
+칸을 가린 사례는 없었다. 흰 삼각형 꼭짓점으로 X 허브 후보를 찾고 부분 3×3
+homography/PnP로 외곽을 추정하는 실험을 했다. 반복 X 무늬와 외곽 교차점이 서로
+다른 3×3 격자로 과적합됐고, 물리 자세 필터와 경계 지지율을 추가해도 10장 중
+3장 정도만 통과했으며 일부 자세는 일관되지 않았다. 이 상태는 잘못된 슬롯으로
+이동할 위험이 있어 실험 코드를 전부 되돌렸고 실차에는 배포하지 않았다. 현재
+Auto Dock 코드에는 X 기반 fallback이 없다. 다음 시도는 점유 팔레트가 포함된
+사진을 추가하고, 반복 X만 세지 말고 보이는 외곽선 또는 기준 템플릿으로 절대
+행/열을 고정해야 한다.
+
+### 검증과 배포 상태
+
+- 로컬 Auto Dock 테스트: `106 passed`
+- `py_compile`, `git diff --check`: 통과
+- 차량 1 `colcon build --packages-select auto_dock`: 성공
+- 차량 1 source/install SHA-256:
+  `b8c4be65a5198800636fb31416cb73a258e326ceeb29eeaec584ea8ff0dce321`
+- 컨테이너 ROS 환경은 `/opt/ros/humble/setup.bash`를 먼저 source해야 한다.
+- 최신 backoff 후방 전진복구 코드는 배포·빌드됐지만 실행 노드는 재시작하지 않았다.
+- 변경 파일은 `auto_dock_node.py`, `test_arrival_contract.py`, 이 핸드오프이며
+  아직 커밋하지 않았다.
 
 ## 다음 실차 시험 시작 순서
 
@@ -570,3 +679,38 @@ docs/handoffs/2026-08-27-auto-dock-vehicle1-live-handoff.md
 
 커밋할 때도 위 파일을 명시적으로 stage하고, 저장소 전체 변경을 한꺼번에 stage하지
 않는다. 이번 세션 도중 다른 사용자 작업 파일이 다수 수정/추가된 상태다.
+
+## 2026-08-27 후보 이탈 회전 및 약한 횡정렬 수정
+
+실차 ALIGNING에서 `translation_first_alignment_enabled=1`이어도 기존 코드는
+전진·횡이동·회전을 동시에 발행했다. 횡 속도도 최대 0.08 m/s라서 실차의 정지
+구간을 넘지 못했고, 화면 가장자리의 정상 후보를 회전으로 먼저 밀어낸 뒤 후보를
+잃어버릴 수 있었다. PnP yaw는 부호를 반전하고 depth yaw는 그대로 사용하는 현재
+환산식이 두 센서의 기하 부호를 같은 방향으로 맞추므로, 근거 없이 yaw 부호 자체는
+변경하지 않았다.
+
+비-slot 심볼 정렬에서는 횡 오차가 2.5 cm 이상이면 전진과 회전을 금지하고 순수
+횡이동을 먼저 한다. `translation_alignment_min_lateral_speed_m_s` 기본값 0.12
+m/s를 추가해 기존 max 0.08 설정보다 작아지지 않게 했으며, 횡 오차가 허용 범위로
+들어온 뒤에만 기존 전진/yaw 정렬을 수행한다. 후보를 잠깐 잃은 1.5초 locked-pose
+구간에서도 마지막 yaw를 따라 회전하지 않고, 횡 오차가 남으면 0.12 m/s 순수
+횡이동, 횡 정렬이 끝났으면 저속 전진만 허용한다.
+
+검증 결과 Auto Dock 테스트는 106개 전부 통과했고 `git diff --check`와
+`py_compile`도 통과했다. 이 변경의 배포 전 소스 SHA256은
+`fcbdbd1e4a920607a1bb4649d06b97c3a4665202c229cae5a93c611e62cc5ab1`이다.
+
+### SEARCHING 전방 20cm 유지 기준 수정
+
+옵션 1의 의도는 전방의 임의 심볼 깊이로 20cm 간격을 유지하면서 횡이동해
+상자 전면과 평행하게 탐색하는 것이다. 기존에는 화면 중앙에 가까운 태그를 매
+프레임 선택했기 때문에 가까운 상자 앞에서도 더 먼 배경 상자로 기준이 바뀌어
+0.12m/s 전진 명령이 나갈 수 있었다.
+
+전방 ±45도 내 유효 심볼 중 가장 가까운 깊이를 보수적인 기준으로 선택하도록
+변경했다. 목표 간격은 20cm, 데드밴드는 ±1.5cm이며, 멀면 전진하고 가까우면
+후진하며 데드밴드 안에서만 횡이동한다. 옵션 2를 함께 쓸 때 전방 20cm와 후방
+30cm 조건이 충돌하면 `search_front_rear_clearance_conflict`로 정지하고 어느
+상자도 앞으로 밀지 않는다. Auto Dock 테스트 108개, `git diff --check`,
+`py_compile`을 통과했으며 배포 소스 SHA256은
+`a5d1bdcce2914840fd28d9980e93c7254bc21c61762d6ef2199c93bfd8e3caeb`이다.

@@ -1,0 +1,9 @@
+# Y PLACE: 30cm final observation, single 25cm insertion
+
+User confirmed removing the 15cm midpoint observation and keeping the previous placement endpoint. Integrated auto_dock profile now stages at 30cm and inserts 25cm (same stage-minus-insertion endpoint: 5cm). The stage observation and existing one-time reverse/reacquisition fallback remain. After that observation, one complete insertion plan is fixed and executed without a midpoint camera observation or replan. Existing command conflict, cancellation, turn target and stop checks remain.
+
+The fork DOWN acknowledgement still gates unloaded retreat; timeout does not allow reverse. Nominal retreat is now 25cm. The Y arrival contract and Control GUI payload/display are 25cm; explicit old 35cm requests are rejected. Running auto_dock and Control GUI need USER restart to use the new code. Standalone test_y script/profile is not modified by this integrated-flow change.
+
+Local offline package suite: 390 passed, including single-insertion and fork-ack/timeout flow checks. GUI callback tested via AST extraction with fake widgets/publisher, no GUI or ROS runtime started. Vehicle staging tests/build/hash and symlink results are recorded under analysis/y_single_insertion_20260907. No agent runtime launch or restart is allowed; physical execution must be performed by the user. Distances remain model/nominal commands, not verified physical travel.
+
+Deployment completed: vehicle offline suite 390 passed; normal `colcon build --base-paths src --packages-select auto_dock` succeeded. Installed/source/staged file SHA256 values match and installed package, staging and backup contain zero symlinks. Backup: `/home/ubuntu/ros2_ws/tools/backup_y_single_insertion_20260907_155601`. Build emitted only setuptools setup.py deprecation warning. No runtime started/restarted.

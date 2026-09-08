@@ -3743,7 +3743,7 @@ def test_centerline_offset_changes_the_zero_error_at_current_depth():
     assert corrected == pytest.approx(0.0)
 
 
-def test_nearest_initial_selection_rejects_closer_side_face():
+def test_nearest_initial_selection_keeps_closer_oblique_face():
     fake = type("FakeDock", (), {})()
     fake.product_type = "NORMAL"
     fake.number = lambda _key, default, *_args: default
@@ -3765,7 +3765,7 @@ def test_nearest_initial_selection_rejects_closer_side_face():
         fake, {"entities": [entity(1, 10.0, 35.0), entity(2, 20.0, 2.0)]}
     )
 
-    assert candidate["entity_id"] == 2
+    assert candidate["entity_id"] == 1
 
 
 def test_nearest_initial_selection_uses_pnp_yaw_when_depth_yaw_is_missing():
@@ -3795,7 +3795,7 @@ def test_nearest_initial_selection_uses_pnp_yaw_when_depth_yaw_is_missing():
         ]}
     )
 
-    assert candidate["entity_id"] == 2
+    assert candidate["entity_id"] == 1
 
 
 def test_nearest_locked_reacquire_timeout_resumes_search():
@@ -3891,16 +3891,17 @@ def test_y_place_arrival_starts_centering_without_slot_number(location):
         number=lambda _key, default, *_args: default,
         publish_status=lambda *_args, **_kwargs: None,
     )
+    fake.start_y_place = lambda: setattr(fake, "state", "y_slot_centering")
     AutoDockNode.on_trigger(fake, String(data=json.dumps({
         "status": "SUCCEEDED", "location": location,
         "operation": "PLACE", "product_type": "FRESH",
-        "insertion_distance_cm": 20,
+        "insertion_distance_cm": 38,
     })))
 
     assert fake.location == "Y"
     assert fake.state == "y_slot_centering"
     assert fake.target_type == "NONE"
-    assert fake.y_slot_requested_insertion_distance_cm == 20
+    assert fake.y_slot_requested_insertion_distance_cm == 38
 
 
 def test_y_place_down_complete_reverses_the_insertion_distance_unloaded():
@@ -3937,6 +3938,7 @@ def test_y_place_normal_accepts_fleet_default_nearest_target():
         number=lambda _key, default, *_args: default,
         publish_status=lambda *_args, **_kwargs: None,
     )
+    fake.start_y_place = lambda: setattr(fake, "state", "y_slot_centering")
     AutoDockNode.on_trigger(fake, String(data=json.dumps({
         "status": "SUCCEEDED", "location": "Y", "operation": "PLACE",
         "product_type": "NORMAL", "target": {"type": "NEAREST"},
@@ -4485,7 +4487,7 @@ def test_manual_y_insertion_cannot_replace_dock_pick(monkeypatch):
     assert fake.statuses[-1][0][1] == 'y_slot_command_requires_y_place'
 
 
-def test_insertion_default_update_changes_distance_without_motion():
+def test_y_fixed_profile_rejects_legacy_distance_override():
     fake = floor_control_fake()
     fake.state = 'ready'
     fake.mission_kind = 'Y_PLACE'
@@ -4493,9 +4495,9 @@ def test_insertion_default_update_changes_distance_without_motion():
     AutoDockNode.on_y_slot_insertion_default(
         fake, String(data='{"distance_cm":27.5}'))
 
-    assert fake.y_slot_insertion_distance_override_cm == 27.5
+    assert not hasattr(fake, "y_slot_insertion_distance_override_cm")
     assert fake.drives == []
-    assert fake.statuses[-1][0][1] == 'y_slot_insertion_default_updated'
+    assert fake.statuses[-1][0][1] == 'test_y_profile_is_fixed'
 
 
 def test_homography_consensus_selects_target_slot_with_lateral_extrapolation():
